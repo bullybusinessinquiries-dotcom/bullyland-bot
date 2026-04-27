@@ -2661,10 +2661,44 @@ function parseShutdownTime(str) {
   } else {
     return null;
   }
+
+  // Build the target time in CT (America/Chicago)
+  // Get current CT date parts
   const now = new Date();
-  const target = new Date();
-  target.setHours(hours, minutes, 0, 0);
-  if (target <= now) target.setDate(target.getDate() + 1); // next occurrence
+  const ctFormatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Chicago',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  });
+  const ctParts = Object.fromEntries(ctFormatter.formatToParts(now).map(p => [p.type, p.value]));
+  const ctNowHour = parseInt(ctParts.hour === '24' ? '0' : ctParts.hour);
+  const ctNowMin  = parseInt(ctParts.minute);
+
+  // Determine if the specified time is today or tomorrow in CT
+  let daysToAdd = 0;
+  if (hours < ctNowHour || (hours === ctNowHour && minutes <= ctNowMin)) {
+    daysToAdd = 1; // time already passed today CT — use tomorrow
+  }
+
+  // Build an ISO string for the target CT time and convert to UTC
+  const year  = ctParts.year;
+  const month = ctParts.month;
+  let   day   = parseInt(ctParts.day) + daysToAdd;
+  // Simple day overflow (good enough — month boundary edge cases are rare)
+  const hh = String(hours).padStart(2, '0');
+  const mm = String(minutes).padStart(2, '0');
+  const dd = String(day).padStart(2, '0');
+  // Parse as CT by appending CT offset — use a trick: create date string and let JS parse
+  const isoLike = `${year}-${month}-${dd}T${hh}:${mm}:00`;
+  // Convert CT to UTC using the offset at that moment
+  const tempDate = new Date(isoLike + 'Z'); // treat as UTC first to get a valid Date
+  const utcOffset = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Chicago', timeZoneName: 'shortOffset'
+  }).formatToParts(tempDate).find(p => p.type === 'timeZoneName')?.value || 'GMT-5';
+  const offsetMatch = utcOffset.match(/GMT([+-])(\d+)(?::(\d+))?/);
+  const offsetHours = offsetMatch ? parseInt(offsetMatch[1] + offsetMatch[2]) : -5;
+  const target = new Date(isoLike + 'Z');
+  target.setUTCHours(target.getUTCHours() - offsetHours);
   return target;
 }
 
