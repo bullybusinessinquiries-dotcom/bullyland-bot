@@ -1066,53 +1066,19 @@ Refreshes <t:${Math.floor(shopRefreshTime.getTime()/1000)}:R>`)
     await message.reply(`Code claimed! **${row.amount} BB** added to your balance.`); return;
   }
 
-  // ── !inventory / !inv ──
-  if (content === '!inventory' || content === '!inv') {
+  // ── !inventory ──
+  if (content === '!inventory') {
     const inv = getRoleInventory(userId);
-    const chests = db.prepare('SELECT tier, COUNT(*) as count FROM raid_chest_inventory WHERE user_id = ? AND opened = 0 GROUP BY tier ORDER BY CASE tier WHEN "Legendary" THEN 1 WHEN "Rare" THEN 2 ELSE 3 END').all(userId);
-
-    // Roles section
-    let roleSection = '';
-    if (inv.length) {
-      const equipped   = inv.filter(r => r.equipped === 1);
-      const unequipped = inv.filter(r => r.equipped === 0);
-      if (equipped.length)   roleSection += '**Equipped (' + equipped.length + '/3):**\n' + equipped.map(r => '✅ ' + r.role_name + ' [' + r.rarity + ']').join('\n') + '\n\n';
-      if (unequipped.length) roleSection += '**Unequipped:**\n' + unequipped.map(r => '📦 ' + r.role_name + ' [' + r.rarity + ']').join('\n') + '\n\n';
-      roleSection += 'Use **!equip [role name]** or **!unequip [role name]** to manage your roles.';
-    } else {
-      roleSection = '_No roles yet. Buy them from the shop with **!shop**._';
-    }
-
-    // Chests section
-    const chestEmojiLocal = function(t) { return t === 'Legendary' ? '👑' : t === 'Rare' ? '💎' : '📦'; };
-    const chestSection = chests.length
-      ? chests.map(c => chestEmojiLocal(c.tier) + ' **' + c.tier + '** — ' + c.count + ' chest' + (c.count !== 1 ? 's' : '')).join('\n') + '\n\n_Use the buttons below to open chests._'
-      : '_No chests yet. Win raids to earn them!_';
-
-    const embed = new EmbedBuilder()
-      .setColor('#c9a84c')
-      .setTitle('🎒 ' + username + "'s Inventory")
-      .addFields(
-        { name: '🎭 Roles', value: roleSection },
-        { name: '📦 Raid Chests', value: chestSection }
-      )
-      .setFooter({ text: "Bully's World • Collect them all." })
-      .setTimestamp();
-
-    const chestButtonsList = [];
-    for (const tier of ['Legendary', 'Rare', 'Common']) {
-      const chestRow = chests.find(c => c.tier === tier);
-      if (chestRow) {
-        chestButtonsList.push(
-          new ButtonBuilder()
-            .setCustomId('inv_openchest.' + tier)
-            .setLabel('Open ' + chestEmojiLocal(tier) + ' ' + tier + ' (' + chestRow.count + ')')
-            .setStyle(tier === 'Legendary' ? ButtonStyle.Success : tier === 'Rare' ? ButtonStyle.Primary : ButtonStyle.Secondary)
-        );
-      }
-    }
-    const invComponents = chestButtonsList.length ? [new ActionRowBuilder().addComponents(...chestButtonsList)] : [];
-    await message.reply({ embeds: [embed], components: invComponents });
+    if (!inv.length) { await message.reply("Your inventory is empty. Buy roles from the shop with **!shop**."); return; }
+    const equipped = inv.filter(r=>r.equipped===1);
+    const unequipped = inv.filter(r=>r.equipped===0);
+    let desc = '';
+    if (equipped.length) desc += `**Equipped (${equipped.length}/3):**\n${equipped.map(r=>`✅ ${r.role_name} [${r.rarity}]`).join('\n')}\n\n`;
+    if (unequipped.length) desc += `**Unequipped:**\n${unequipped.map(r=>`📦 ${r.role_name} [${r.rarity}]`).join('\n')}\n\n`;
+    desc += `Use **!equip [role name]** or **!unequip [role name]** to manage your roles.`;
+    const embed = new EmbedBuilder().setColor('#c9a84c').setTitle(`${username}'s Role Inventory`)
+      .setDescription(desc).setFooter({text:"Bully's World • Collect them all."}).setTimestamp();
+    await message.reply({ embeds: [embed] });
     return;
   }
 
@@ -1703,10 +1669,11 @@ ${roleList}
     if (target.id === userId) { await message.reply("You can't steal from yourself."); return; }
     if (target.bot) { await message.reply("You can't steal from a bot."); return; }
 
-    // Cooldown check (3 min)
+    // Check cooldown (1 hour)
     const cooldownRow = db.prepare('SELECT last_steal FROM steal_cooldown WHERE user_id = ?').get(userId);
     if (cooldownRow) {
-      const remaining = 3 * 60 * 1000 - (Date.now() - new Date(cooldownRow.last_steal).getTime());
+      const lastSteal = new Date(cooldownRow.last_steal).getTime();
+      const remaining = 3 * 60 * 1000 - (Date.now() - lastSteal);
       if (remaining > 0) {
         const mins = Math.ceil(remaining / 60000);
         await message.reply(`You need to wait **${mins} more minute${mins !== 1 ? 's' : ''}** before stealing again.`);
@@ -1714,7 +1681,7 @@ ${roleList}
       }
     }
 
-    // Daily limit (10 attempts)
+    // Check max 5 total steal attempts per day
     const today = new Date().toISOString().slice(0, 10);
     const totalSteals = db.prepare("SELECT COUNT(*) as c FROM steal_log WHERE stealer_id = ? AND DATE(created_at) = ?").get(userId, today);
     if (totalSteals.c >= 10) {
@@ -1722,158 +1689,39 @@ ${roleList}
       return;
     }
 
-    // Shield check
+    // Check shield
     if (hasShield(target.id)) {
       await message.reply(`**${target.username}** is protected by a shield. You can't steal from them right now.`);
       return;
     }
 
-    // Target balance check
+    // Check target has BB to steal
     const targetUser = getUser(target.id, target.username);
     if (targetUser.balance < 1) {
       await message.reply(`**${target.username}** is broke. Nothing to steal.`);
       return;
     }
 
-    // Log attempt and update cooldown
+    // Update cooldown and log
     db.prepare('INSERT OR REPLACE INTO steal_cooldown (user_id, last_steal) VALUES (?, ?)').run(userId, new Date().toISOString());
     db.prepare('INSERT INTO steal_log (stealer_id, target_id) VALUES (?, ?)').run(userId, target.id);
 
-    // ── Block window: DM the victim with a block button ──────────────────────
-    // Block window scales with amount: 15s (small) → 30s (large)
-    let blockWindowMs;
-    if (stealAmount <= 25)       blockWindowMs = 15000;
-    else if (stealAmount <= 50)  blockWindowMs = 18000;
-    else if (stealAmount <= 100) blockWindowMs = 22000;
-    else if (stealAmount <= 150) blockWindowMs = 26000;
-    else                         blockWindowMs = 30000;
-
-    // Penalty tiers (thief loses BB when caught or blocked)
-    function getStealPenalty(amt) {
-      // Ranges reduced by 25%, rounded to nearest 5
-      if (amt <= 25)  return Math.round((Math.floor(Math.random() * 11) + 10) / 5) * 5; // 10–20
-      if (amt <= 50)  return Math.round((Math.floor(Math.random() * 21) + 25) / 5) * 5; // 25–45
-      if (amt <= 100) return Math.round((Math.floor(Math.random() * 31) + 45) / 5) * 5; // 45–75
-      if (amt <= 150) return Math.round((Math.floor(Math.random() * 36) + 75) / 5) * 5; // 75–110
-      return Math.round((Math.floor(Math.random() * 41) + 110) / 5) * 5;                // 110–150
-    }
-
-    // Unique ID for this steal attempt (used as button customId)
-    const stealId = `steal_block.${userId}.${target.id}.${Date.now()}`;
-
-    // Tell the server the steal is in progress
-    const pendingEmbed = new EmbedBuilder()
-      .setColor('#c9a84c')
-      .setTitle('🤫 Steal Attempt In Progress...')
-      .setDescription(`**${username}** is attempting to steal **${stealAmount} BB** from **${target.username}**.
-
-_Waiting to see if they get away with it..._`)
-      .setFooter({ text: "Bully's World • Watch your pockets." })
-      .setTimestamp();
-    const pendingMsg = await message.reply({ embeds: [pendingEmbed] });
-
-    // DM the victim with a block button
-    let victimBlocked = false;
-    let blockResolved = false;
-
-    const blockRow = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId(stealId)
-        .setLabel('🛡️ Block the Steal!')
-        .setStyle(ButtonStyle.Danger)
-    );
-
-    const dmEmbed = new EmbedBuilder()
-      .setColor('#FF4500')
-      .setTitle('🚨 Someone is trying to steal from you!')
-      .setDescription(`**${username}** is trying to steal **${stealAmount} BB** from you!
-
-Press the button below to block them — you have **${blockWindowMs / 1000} seconds!**`)
-      .setFooter({ text: "Bully's World • React fast!" })
-      .setTimestamp();
-
-    let dmMsg = null;
-    try {
-      dmMsg = await target.send({ embeds: [dmEmbed], components: [blockRow] });
-    } catch {
-      // Victim has DMs closed — can't be notified, steal proceeds normally
-    }
-
-    // Register this pending steal so the interaction handler can resolve it
-    pendingStealBlocks.set(stealId, {
-      stealerId: userId,
-      stealerUsername: username,
-      victimId: target.id,
-      victimUsername: target.username,
-      amount: stealAmount,
-      channel: message.channel,
-      pendingMsg,
-      dmMsg,
-      resolve: null, // set below
-    });
-
-    // Wait for block window
-    const blocked = await new Promise(resolve => {
-      pendingStealBlocks.get(stealId).resolve = resolve;
-      setTimeout(() => resolve(false), blockWindowMs);
-    });
-
-    pendingStealBlocks.delete(stealId);
-
-    // Disable the DM button
-    if (dmMsg) {
-      try {
-        const disabledRow = new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setCustomId(stealId + '_done')
-            .setLabel(blocked ? '🛡️ Blocked!' : '⌛ Too slow!')
-            .setStyle(blocked ? ButtonStyle.Success : ButtonStyle.Secondary)
-            .setDisabled(true)
-        );
-        await dmMsg.edit({ components: [disabledRow] });
-      } catch {}
-    }
-
-    if (blocked) {
-      // Victim blocked in time — thief gets penalised
-      const penalty = getStealPenalty(stealAmount);
-      const thiefUser = getUser(userId, username);
-      const actualPenalty = Math.min(penalty, thiefUser.balance);
-      if (actualPenalty > 0) {
-        db.prepare('UPDATE balances SET balance = balance - ? WHERE user_id = ?').run(actualPenalty, userId);
-        db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(userId, -actualPenalty, `steal blocked by ${target.username}`);
-      }
-      const blockedEmbed = new EmbedBuilder()
-        .setColor('#4169E1')
-        .setTitle('🛡️ Steal Blocked!')
-        .setDescription(`**${target.username}** was paying attention and blocked the steal!
-
-**${username}** loses **${actualPenalty} BB** for getting caught.`)
-        .addFields(
-          { name: `${username}'s balance`, value: `${thiefUser.balance - actualPenalty} BB`, inline: true },
-          { name: `${target.username}'s balance`, value: `${targetUser.balance} BB`, inline: true }
-        )
-        .setFooter({ text: "Bully's World • Stay alert." })
-        .setTimestamp();
-      await pendingMsg.edit({ embeds: [blockedEmbed] });
-      return;
-    }
-
-    // Not blocked — proceed with normal steal odds
+    // Tiered odds based on steal amount
     let successChance;
-    if (stealAmount <= 25)       successChance = 0.50;
-    else if (stealAmount <= 50)  successChance = 0.35;
+    if (stealAmount <= 25) successChance = 0.50;
+    else if (stealAmount <= 50) successChance = 0.35;
     else if (stealAmount <= 100) successChance = 0.20;
-    else                         successChance = 0.05;
+    else successChance = 0.05;
 
     const success = Math.random() < successChance;
+    const amount = stealAmount;
 
     if (success) {
-      const actualStolen = Math.min(stealAmount, targetUser.balance);
+      const actualStolen = Math.min(amount, targetUser.balance);
       db.prepare('UPDATE balances SET balance = balance - ? WHERE user_id = ?').run(actualStolen, target.id);
       db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(target.id, -actualStolen, `stolen by ${username}`);
       addBB(userId, username, actualStolen, `stolen from ${target.username}`);
-      const successEmbed = new EmbedBuilder().setColor('#3B6D11').setTitle('🤫 Successful Steal!')
+      const embed = new EmbedBuilder().setColor('#3B6D11').setTitle('🤫 Successful Steal!')
         .setDescription(`**${username}** successfully stole **${actualStolen} BB** from **${target.username}**!
 
 Slick moves.`)
@@ -1882,8 +1730,8 @@ Slick moves.`)
           { name: `${target.username}'s balance`, value: `${targetUser.balance - actualStolen} BB`, inline: true }
         )
         .setFooter({ text: "Bully's World • Watch your pockets." }).setTimestamp();
-      await pendingMsg.edit({ embeds: [successEmbed] });
-      // Bounty payout
+      await message.reply({ embeds: [embed] });
+      // Check and pay bounty
       const bounties = getActiveBounties(target.id);
       if (bounties.length) {
         const totalBounty = bounties.reduce((sum, b) => sum + b.amount, 0);
@@ -1891,25 +1739,25 @@ Slick moves.`)
         addBB(userId, username, totalBounty, `bounty collected on ${target.username}`);
         await message.channel.send(`🎯 **${username}** collected a **${totalBounty} BB** bounty on **${target.username}**!`);
       }
-      try { await target.send(`🚨 **${username}** just stole **${actualStolen} BB** from you in Bully's World! Watch your back.`); } catch {}
+      try {
+        await target.send(`🚨 **${username}** just stole **${actualStolen} BB** from you in Bully's World! Watch your back.`);
+      } catch {}
     } else {
-      const penalty = getStealPenalty(stealAmount);
-      const thiefUser = getUser(userId, username);
-      const actualPenalty = Math.min(penalty, thiefUser.balance);
-      if (actualPenalty > 0) {
-        db.prepare('UPDATE balances SET balance = balance - ? WHERE user_id = ?').run(actualPenalty, userId);
-        db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(userId, -actualPenalty, `caught stealing from ${target.username}`);
-      }
-      const failEmbed = new EmbedBuilder().setColor('#8B0000').setTitle('🚨 Caught Red Handed!')
+      const penalty = Math.max(1, Math.floor(amount * 0.5));
+      const u = getUser(userId, username);
+      const actualPenalty = Math.min(penalty, u.balance);
+      db.prepare('UPDATE balances SET balance = balance - ? WHERE user_id = ?').run(actualPenalty, userId);
+      db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(userId, -actualPenalty, `caught stealing from ${target.username}`);
+      const embed = new EmbedBuilder().setColor('#8B0000').setTitle('🚨 Caught Red Handed!')
         .setDescription(`**${username}** tried to steal from **${target.username}** and got caught!
 
 **${actualPenalty} BB** was taken as a penalty.`)
         .addFields(
-          { name: `${username}'s balance`, value: `${thiefUser.balance - actualPenalty} BB`, inline: true },
+          { name: `${username}'s balance`, value: `${u.balance - actualPenalty} BB`, inline: true },
           { name: `${target.username}'s balance`, value: `${targetUser.balance} BB`, inline: true }
         )
         .setFooter({ text: "Bully's World • Crime doesn't pay." }).setTimestamp();
-      await pendingMsg.edit({ embeds: [failEmbed] });
+      await message.reply({ embeds: [embed] });
     }
     return;
   }
@@ -2238,7 +2086,6 @@ let heistMessages = []; // track all heist messages for cleanup // { userId, cha
 let shopSelectionPending = new Map(); // userId -> waiting for shop item number
 let lotterySelectionPending = new Map(); // userId -> waiting for ticket count
 let activeDuels = new Map(); // challenged_id -> duel info
-const pendingStealBlocks = new Map(); // stealId -> { stealerId, victimId, amount, resolve, ... }
 
 let activeAuction = null;
 let auctionTimer = null;
@@ -3939,6 +3786,48 @@ client.on('messageCreate', async function(message) {
     return;
   }
 
+  // !inventory / !inv — roles + chests
+  if (content === '!inventory' || content === '!inv') {
+    const roles = getRoleInventory(userId);
+    const chests = db.prepare('SELECT tier, COUNT(*) as count FROM raid_chest_inventory WHERE user_id = ? AND opened = 0 GROUP BY tier ORDER BY CASE tier WHEN "Legendary" THEN 1 WHEN "Rare" THEN 2 ELSE 3 END').all(userId);
+
+    const roleSection = roles.length
+      ? roles.map(function(r) { return (r.equipped ? '✅' : '○') + ' **' + r.role_name + '** _(' + r.rarity + ')_'; }).join('\n')
+      : '_No roles in inventory._';
+
+    const chestSection = chests.length
+      ? chests.map(function(c) { return chestEmoji(c.tier) + ' **' + c.tier + '** — ' + c.count + ' chest' + (c.count !== 1 ? 's' : ''); }).join('\n')
+      : '_No chests. Win raids to earn them!_';
+
+    const embed = new EmbedBuilder()
+      .setColor('#FF6B00')
+      .setTitle('🎒 ' + username + "'s Inventory")
+      .addFields(
+        { name: '🎭 Roles', value: roleSection },
+        { name: '📦 Raid Chests', value: chestSection + '\n\n_Use the buttons below to open chests._' }
+      )
+      .setFooter({ text: 'Bully\'s World • Your gear, your glory.' })
+      .setTimestamp();
+
+    const chestButtons = [];
+    const tierOrder = ['Legendary', 'Rare', 'Common'];
+    for (let ti = 0; ti < tierOrder.length; ti++) {
+      const tier = tierOrder[ti];
+      const chestRow = chests.find(function(c) { return c.tier === tier; });
+      if (chestRow) {
+        chestButtons.push(
+          new ButtonBuilder()
+            .setCustomId('inv_openchest.' + tier)
+            .setLabel('Open ' + chestEmoji(tier) + ' ' + tier + ' (' + chestRow.count + ')')
+            .setStyle(tier === 'Legendary' ? ButtonStyle.Success : tier === 'Rare' ? ButtonStyle.Primary : ButtonStyle.Secondary)
+        );
+      }
+    }
+
+    const components = chestButtons.length ? [new ActionRowBuilder().addComponents.apply(new ActionRowBuilder(), chestButtons.slice(0, 5))] : [];
+    await message.reply({ embeds: [embed], components: components });
+    return;
+  }
 });
 
 // ─── ADMIN COMMANDS ───────────────────────────────────────────────────────────
@@ -3983,25 +3872,6 @@ client.on('interactionCreate', async function(interaction) {
   const channel = interaction.channel;
   const userId = user.id;
   const username = user.username;
-
-  // ── Steal block button ─────────────────────────────────────────────────────
-  if (customId.startsWith('steal_block.')) {
-    const pending = pendingStealBlocks.get(customId);
-    if (!pending) {
-      // Already resolved (timed out) or invalid
-      await interaction.reply({ content: 'This steal attempt has already resolved.', ephemeral: true });
-      return;
-    }
-    // Only the victim can press this button
-    if (userId !== pending.victimId) {
-      await interaction.reply({ content: "That's not your steal to block!", ephemeral: true });
-      return;
-    }
-    // Resolve the promise as blocked
-    pending.resolve(true);
-    await interaction.reply({ content: '🛡️ You blocked the steal! The thief has been penalised.', ephemeral: true });
-    return;
-  }
 
   // Main menu: Raid / Boss Raid
   if (customId === 'bg_raid' || customId === 'bg_bossraid') {
