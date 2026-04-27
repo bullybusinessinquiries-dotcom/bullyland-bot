@@ -23,10 +23,7 @@ const client = new Client({
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 // ─── DATABASE ──────────────────────────────────────────────────────────────
-const fs = require('fs');
-const DATA_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || '.';
-if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-const db = new Database(`${DATA_DIR}/bullyland.db`);
+const db = new Database('bullyland.db');
 db.exec(`
   CREATE TABLE IF NOT EXISTS balances (
     user_id TEXT PRIMARY KEY, username TEXT,
