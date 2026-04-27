@@ -193,15 +193,19 @@ const CONFIG = {
   },
 
   // Shop items
-  // Role prices by rarity — loaded from Google Sheet at boot
-  ROLE_PRICES: {
-    Common:    75,
-    Uncommon:  150,
-    Rare:      300,
-    Legendary: 600,
-  },
-  // Roles are loaded from Google Sheet — SHOP_ITEMS kept minimal for non-role items
-  SHOP_ITEMS: [],
+  SHOP_ITEMS: [
+    { id: '5percent',      label: '5% Discount Code',    cost: 300,  prob: 0.22, type: 'discount' },
+    { id: '10percent',     label: '10% Discount Code',   cost: 600,  prob: 0.12, type: 'discount' },
+    { id: '15percent',     label: '15% Discount Code',   cost: 1500, prob: 0.05, type: 'discount' },
+    { id: 'giveaway1',    label: 'Giveaway Entry x1',   cost: 500,  prob: 0.15, type: 'giveaway', tickets: 1 },
+    { id: 'giveaway3',    label: 'Giveaway Entry x3',   cost: 1000, prob: 0.10, type: 'giveaway', tickets: 3 },
+    { id: 'priority',     label: 'Stream Priority Pass',cost: 1000, prob: 0.08, type: 'priority' },
+    { id: 'role_common',  label: 'Common Role',          cost: 75,   prob: 0.13, type: 'role', rarity: 'Common' },
+    { id: 'role_uncommon',label: 'Uncommon Role',        cost: 100,  prob: 0.07, type: 'role', rarity: 'Uncommon' },
+    { id: 'role_rare',    label: 'Rare Role',            cost: 125,  prob: 0.04, type: 'role', rarity: 'Rare' },
+    { id: 'role_legendary',label:'Legendary Role',       cost: 150,  prob: 0.01, type: 'role', rarity: 'Legendary' },
+    { id: '20percent',    label: '20% Discount Code',   cost: 2000, prob: 0.03, type: 'discount' },
+  ],
 
   // Mystery drop tiers
   DROP_TIERS: [
@@ -285,89 +289,6 @@ async function unequipRole(member, roleName, userId) {
   const role = guildRoles.find(r => r.name === roleName);
   if (role) await member.roles.remove(role).catch(()=>{});
   db.prepare('UPDATE role_inventory SET equipped = 0 WHERE user_id = ? AND role_name = ?').run(userId, roleName);
-}
-
-// ── Inventory embed builder ──────────────────────────────────────────────────
-const INV_RARITY_EMOJI = { Common: '⬜', Uncommon: '🟦', Rare: '🟣', Legendary: '🟡' };
-
-async function sendInventoryEmbed(channel, userId, username, page, messageOrInteraction) {
-  const inv = getRoleInventory(userId);
-  const equipped = inv.filter(r => r.equipped === 1);
-  const unequipped = inv.filter(r => r.equipped === 0);
-
-  // Build description
-  let desc = '';
-  if (!inv.length) {
-    desc = '_Your inventory is empty. Head to the shop with **!shop** to grab some roles!_';
-  } else {
-    if (equipped.length) {
-      desc += `**✅ Equipped (${equipped.length}/3):**\n`;
-      desc += equipped.map(r => `${INV_RARITY_EMOJI[r.rarity] || '⬜'} **${r.role_name}** [${r.rarity}]`).join('\n');
-      desc += '\n\n';
-    }
-    if (unequipped.length) {
-      desc += `**📦 In Inventory (${unequipped.length}):**\n`;
-      desc += unequipped.map(r => `${INV_RARITY_EMOJI[r.rarity] || '⬜'} **${r.role_name}** [${r.rarity}]`).join('\n');
-    }
-  }
-
-  const embed = new EmbedBuilder()
-    .setColor('#c9a84c')
-    .setTitle(`🎒 ${username}'s Inventory`)
-    .setDescription(desc)
-    .setFooter({ text: `Bully's World • ${equipped.length}/3 slots equipped${inv.length ? ' · Click a button to equip or unequip' : ''}` })
-    .setTimestamp();
-
-  // Build equip/unequip buttons — show unequipped roles as "Equip", equipped as "Unequip"
-  const rows = [];
-
-  if (unequipped.length) {
-    // Equip buttons (up to 5 per row, max 2 rows = 10 unequipped shown)
-    const canEquip = equipped.length < 3;
-    const equipChunks = [];
-    for (let i = 0; i < Math.min(unequipped.length, 10); i += 5) equipChunks.push(unequipped.slice(i, i + 5));
-    for (const chunk of equipChunks) {
-      rows.push(new ActionRowBuilder().addComponents(
-        chunk.map(r => new ButtonBuilder()
-          .setCustomId(`inv_equip.${Buffer.from(r.role_name).toString('base64').slice(0,80)}`)
-          .setLabel((r.role_name.length > 22 ? r.role_name.slice(0,20)+'…' : r.role_name) + ' ▲')
-          .setStyle(ButtonStyle.Success)
-          .setDisabled(!canEquip)
-        )
-      ));
-    }
-  }
-
-  if (equipped.length) {
-    // Unequip buttons
-    const unequipChunks = [];
-    for (let i = 0; i < equipped.length; i += 5) unequipChunks.push(equipped.slice(i, i + 5));
-    for (const chunk of unequipChunks) {
-      rows.push(new ActionRowBuilder().addComponents(
-        chunk.map(r => new ButtonBuilder()
-          .setCustomId(`inv_unequip.${Buffer.from(r.role_name).toString('base64').slice(0,80)}`)
-          .setLabel((r.role_name.length > 20 ? r.role_name.slice(0,18)+'…' : r.role_name) + ' ✕')
-          .setStyle(ButtonStyle.Danger)
-        )
-      ));
-    }
-  }
-
-  // If no buttons, add a shop shortcut
-  if (!rows.length) {
-    rows.push(new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('shop_page.0').setLabel('🛍️ Visit Shop').setStyle(ButtonStyle.Primary)
-    ));
-  }
-
-  const payload = { embeds: [embed], components: rows.slice(0, 5) };
-
-  // Reply or send depending on context
-  if (messageOrInteraction?.reply) {
-    return messageOrInteraction.reply(payload);
-  } else {
-    return channel.send(payload);
-  }
 }
 
 function pickUniqueCode(tierKey, userId) {
@@ -491,117 +412,50 @@ async function postCheckin() {
 }
 
 // ─── SHOP ──────────────────────────────────────────────────────────────────
-
-// In-memory role catalogue loaded from Google Sheet
-let SHOP_ROLES = []; // [{ name, rarity, cost }]
-
-async function loadRolesFromSheet() {
+async function loadEventRoles() {
   try {
-    const auth = new JWT({
-      email: process.env.GOOGLE_SERVICE_EMAIL,
-      key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-      scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
-    });
-    const doc = new GoogleSpreadsheet(process.env.GOOGLE_ROLES_SHEET_ID, auth);
+    const auth = new JWT({ email: process.env.GOOGLE_SERVICE_EMAIL, key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g,'\n'), scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'] });
+    const doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEET_ID, auth);
     await doc.loadInfo();
-    // Try the roles sheet — try common tab names
-    const sheet = doc.sheetsByTitle['Sheet1'] || doc.sheetsByTitle['Roles'] || doc.sheetsByTitle['BULLYLAND Roles'] || doc.sheetsByIndex[0];
-    if (!sheet) { console.log('[Shop] Could not find roles sheet tab'); return []; }
+    const sheet = doc.sheetsByTitle['Event Roles'];
+    if (!sheet) return [];
     const rows = await sheet.getRows();
-    const loaded = rows
-      .filter(r => {
-        const active = (r.get('active') || r.get('Active') || '').toString().trim().toUpperCase();
-        return active === 'TRUE' || active === 'YES' || active === '1';
-      })
-      .map(r => {
-        const name = (r.get('role_name') || r.get('Role Name') || '').trim();
-        const rarity = (r.get('rarity') || r.get('Rarity') || 'Common').trim();
-        const cost = CONFIG.ROLE_PRICES[rarity] || CONFIG.ROLE_PRICES['Common'];
-        return { name, rarity, cost };
-      })
-      .filter(r => r.name);
-    console.log(`[Shop] Loaded ${loaded.length} roles from Google Sheet`);
-    return loaded;
-  } catch (err) {
-    console.error('[Shop] Failed to load roles from sheet:', err.message);
-    return [];
-  }
+    const today = new Date().toISOString().slice(0,10);
+    return rows.filter(r=>r.get('Active')==='YES'&&(!r.get('Expiry')||r.get('Expiry')>=today)).map(r=>({name:r.get('Role Name'),rarity:r.get('Rarity')}));
+  } catch { return []; }
 }
-
-// Rarity order for sorting
-const RARITY_ORDER = { Common: 0, Uncommon: 1, Rare: 2, Legendary: 3 };
-const RARITY_COLOR = { Common: '#aaaaaa', Uncommon: '#57a8ff', Rare: '#cc44ff', Legendary: '#FFD700' };
-const RARITY_EMOJI = { Common: '⬜', Uncommon: '🟦', Rare: '🟣', Legendary: '🟡' };
-
 async function refreshShop() {
-  SHOP_ROLES = await loadRolesFromSheet();
-  const channel = await client.channels.fetch(CONFIG.CHANNELS.SHOP).catch(() => null);
+  const channel = await client.channels.fetch(CONFIG.CHANNELS.SHOP).catch(()=>null);
   if (!channel) return;
+  const selected = []; const usedIds = new Set();
+  while (selected.length < 5) {
+    const roll = Math.random(); let cum = 0;
+    for (const item of CONFIG.SHOP_ITEMS) {
+      cum += item.prob;
+      if (roll < cum && !usedIds.has(item.id)) {
+        usedIds.add(item.id);
+        let roleName = null;
+        if (item.type==='role') roleName = getRandomRole(item.rarity);
+        selected.push({ item, roleName });
+        break;
+      }
+    }
+    if (selected.length >= CONFIG.SHOP_ITEMS.filter(i=>!usedIds.has(i.id)).length + selected.length) break;
+  }
+  activeShop = selected;
+  const nextRefresh = new Date(Date.now() + 12*60*60*1000);
+  shopRefreshTime = nextRefresh;
+  const lines = activeShop.map((e,i)=>`${i+1}. ${e.roleName?`${e.roleName} [${e.item.rarity}]`:e.item.label} — ${e.item.cost} BB`).join('\n');
+  const embed = new EmbedBuilder().setColor('#1a1a1a').setTitle('SHOP REFRESH')
+    .setDescription(`The shop just updated. Here's what's available:\n\n${lines}\n\nType **!shop** to browse anytime.\nType **!buy [number]** to purchase.\nRefreshes <t:${Math.floor(nextRefresh.getTime()/1000)}:R>`)
+    .setFooter({text:"Bully's World • Spend wisely."}).setTimestamp();
+  // Delete previous shop message
   if (lastShopMessageId) {
-    const old = await channel.messages.fetch(lastShopMessageId).catch(() => null);
-    if (old) await old.delete().catch(() => {});
-    lastShopMessageId = null;
+    const oldMsg = await channel.messages.fetch(lastShopMessageId).catch(()=>null);
+    if (oldMsg) await oldMsg.delete().catch(()=>{});
   }
-  if (!SHOP_ROLES.length) {
-    const msg = await channel.send({ embeds: [new EmbedBuilder().setColor('#1a1a1a').setTitle("🛍️ BULLY'S STORE").setDescription('The shop is loading. Check back shortly.').setFooter({ text: "Bully's World" }).setTimestamp()] });
-    lastShopMessageId = msg.id;
-    return;
-  }
-  const msg = await postShopEmbed(channel, 0);
-  if (msg) lastShopMessageId = msg.id;
-}
-
-async function postShopEmbed(channel, page) {
-  const PAGE_SIZE = 10;
-  const sorted = [...SHOP_ROLES].sort((a, b) => (RARITY_ORDER[a.rarity] || 0) - (RARITY_ORDER[b.rarity] || 0));
-  const totalPages = Math.ceil(sorted.length / PAGE_SIZE);
-  const pageRoles = sorted.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
-
-  const desc = pageRoles.map(r =>
-    `${RARITY_EMOJI[r.rarity] || '⬜'} **${r.name}** [${r.rarity}] — **${r.cost} BB**`
-  ).join('\n');
-
-  const embed = new EmbedBuilder()
-    .setColor('#c9a84c')
-    .setTitle("🛍️ BULLY'S STORE")
-    .setDescription(
-      `Browse and buy collectible roles. They go straight to your inventory!\n\n${desc}\n\n` +
-      `_Page ${page + 1} of ${totalPages} · Use **!inventory** to manage your roles._`
-    )
-    .addFields(
-      { name: '💰 Prices', value: Object.entries(CONFIG.ROLE_PRICES).map(([r, p]) => `${RARITY_EMOJI[r]} ${r}: **${p} BB**`).join(' · '), inline: false }
-    )
-    .setFooter({ text: "Bully's World • Click a role to buy it." })
-    .setTimestamp();
-
-  // Build buy buttons (max 5 per row, max 4 rows = 20 items per page)
-  const rows = [];
-  for (let i = 0; i < pageRoles.length; i += 5) {
-    const chunk = pageRoles.slice(i, i + 5);
-    rows.push(new ActionRowBuilder().addComponents(
-      chunk.map((r, ci) => new ButtonBuilder()
-        .setCustomId(`shopbuy_role.${page}.${i + ci}`)
-        .setLabel(r.name.length > 25 ? r.name.slice(0, 23) + '…' : r.name)
-        .setStyle(
-          r.rarity === 'Legendary' ? ButtonStyle.Success :
-          r.rarity === 'Rare' ? ButtonStyle.Primary :
-          r.rarity === 'Uncommon' ? ButtonStyle.Secondary :
-          ButtonStyle.Secondary
-        )
-      )
-    ));
-  }
-
-  // Nav buttons if multiple pages
-  if (totalPages > 1) {
-    const navRow = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`shop_page.${page - 1}`).setLabel('◀ Previous').setStyle(ButtonStyle.Secondary).setDisabled(page === 0),
-      new ButtonBuilder().setCustomId(`shop_page.${page + 1}`).setLabel('Next ▶').setStyle(ButtonStyle.Secondary).setDisabled(page >= totalPages - 1),
-    );
-    rows.push(navRow);
-  }
-
-  return channel.send({ embeds: [embed], components: rows });
+  const shopMsg = await channel.send({ embeds: [embed] });
+  lastShopMessageId = shopMsg.id;
 }
 
 // ─── TESTER GATE ────────────────────────────────────────────────────────────
@@ -1143,18 +997,75 @@ client.on('messageCreate', async(message) => {
   }
 
   // ── !shop ──
-  // !shop — redirect to button shop in the shop channel, or show inline
   if (content === '!shop') {
-    if (!SHOP_ROLES.length) { await message.reply('The shop is loading. Check back shortly.'); return; }
-    await postShopEmbed(message.channel, 0);
+    if (!message.member?.roles.cache.has(CONFIG.SHOP_ACCESS_ROLE)) { await message.reply(CONFIG.SHOP_LOCKED_MSG); return; }
+    if (!activeShop.length) { await message.reply('The shop is loading. Check back shortly.'); return; }
+    const lines = activeShop.map((e,i)=>{ const name = e.roleName ? `${e.roleName} [${e.item.rarity}]` : e.item.label; return `**${i+1}.** ${name} — ${e.item.cost} BB`; }).join('\n');
+    const embed = new EmbedBuilder().setColor('#1a1a1a').setTitle('🛍️ Current Shop')
+      .setDescription(`${lines}
+
+Type the **number** of the item you want to buy.
+Refreshes <t:${Math.floor(shopRefreshTime.getTime()/1000)}:R>`)
+      .setFooter({text:"Bully's World • Spend wisely."}).setTimestamp();
+    await message.reply({ embeds: [embed] });
+    shopSelectionPending.set(userId, true);
+    setTimeout(() => shopSelectionPending.delete(userId), 30000);
     return;
   }
 
-  // !buy redirect
-  if (content.startsWith('!buy')) {
-    const r = await message.reply('🛍️ The shop is now fully button-based! Use **!shop** or visit the shop channel to browse and buy.');
-    setTimeout(() => r.delete().catch(() => {}), 8000);
-    setTimeout(() => message.delete().catch(() => {}), 8000);
+  // ── Shop number selection ──
+  if (shopSelectionPending.has(userId) && /^[1-5]$/.test(content)) {
+    shopSelectionPending.delete(userId);
+    if (!message.member?.roles.cache.has(CONFIG.SHOP_ACCESS_ROLE)) { await message.reply(CONFIG.SHOP_LOCKED_MSG); return; }
+    const num = parseInt(content);
+    if (num < 1 || num > activeShop.length) { await message.reply(`Pick a number between 1 and ${activeShop.length}.`); return; }
+    const { item, roleName } = activeShop[num-1];
+    const u = getUser(userId, username);
+    if (u.balance < item.cost) { await message.reply(`Not enough BB. You have ${u.balance} BB, this costs ${item.cost} BB.`); return; }
+    spendBB(userId, item.cost);
+    db.prepare('INSERT INTO shop_purchases (user_id, item_name, cost) VALUES (?, ?, ?)').run(userId, roleName||item.label, item.cost);
+    let dmText = '';
+    if (item.type==='discount') {
+      const code = pickUniqueCode(item.id, userId);
+      dmText = `Your ${item.label} discount code: \`${code}\`\nShop: ${CONFIG.SHOP_URL}\n\nDon't share it.`;
+    } else if (item.type==='giveaway') {
+      const current = getGiveawayEntries(userId);
+      const actual = Math.min(item.tickets, CONFIG.GIVEAWAY_MAX_TICKETS - current);
+      if (actual <= 0) { await message.reply(`You already have the max ${CONFIG.GIVEAWAY_MAX_TICKETS} tickets this cycle.`); db.prepare('UPDATE balances SET balance = balance + ? WHERE user_id = ?').run(item.cost, userId); return; }
+      addGiveawayEntries(userId, username, actual);
+      dmText = `You now have ${current+actual} of ${CONFIG.GIVEAWAY_MAX_TICKETS} max tickets this cycle. Good luck!`;
+    } else if (item.type==='priority') {
+      dmText = `Your Stream Priority Pass is active for the next TikTok live event.`;
+    } else if (item.type==='role') {
+      const guild = await client.guilds.fetch(CONFIG.GUILD_ID);
+      const mem = await guild.members.fetch(userId).catch(()=>null);
+      addToInventory(userId, roleName, item.rarity);
+      const equipped = getEquippedRoles(userId);
+      if (equipped.length <= 3) {
+        // Auto equip — under the limit
+        if (mem) await equipRole(mem, roleName, item.rarity, userId);
+        dmText = `**${roleName}** [${item.rarity}] has been added to your inventory and equipped!\n\nYou have ${equipped.length}/3 roles equipped.\n\nUse **!inventory** to see your collection.`;
+      } else {
+        // Already at 3 — add to inventory unequipped, ask them to swap
+        db.prepare('UPDATE role_inventory SET equipped = 0 WHERE user_id = ? AND role_name = ?').run(userId, roleName);
+        const equippedList = equipped.map((r,i)=>`${i+1}. ${r.role_name} [${r.rarity}]`).join('\n');
+        dmText = `**${roleName}** [${item.rarity}] has been added to your inventory!\n\nYou already have 3 roles equipped. Use **!equip ${roleName}** to swap one out.\n\nCurrently equipped:\n${equippedList}`;
+      }
+    }
+    try {
+      const dmEmbed = new EmbedBuilder().setColor('#c9a84c').setTitle('Purchase confirmed').setDescription(dmText).setFooter({text:"Bully's World • Good buy."}).setTimestamp();
+      await message.author.send({ embeds: [dmEmbed] });
+    } catch {}
+    await message.reply('Purchase confirmed. Check your DMs.');
+    return;
+  }
+
+  // ── !buy (fallback) ──
+  if (content.startsWith('!buy ')) {
+    if (!message.member?.roles.cache.has(CONFIG.SHOP_ACCESS_ROLE)) { await message.reply(CONFIG.SHOP_LOCKED_MSG); return; }
+    const num = parseInt(content.split(' ')[1]);
+    if (isNaN(num)||num<1||num>activeShop.length) { await message.reply(`Pick a number between 1 and ${activeShop.length}.`); return; }
+    await message.reply('Type **!shop** first to browse the shop, then type the item number to buy.');
     return;
   }
 
@@ -1200,17 +1111,54 @@ client.on('messageCreate', async(message) => {
     await message.reply(`Code claimed! **${row.amount} BB** added to your balance.`); return;
   }
 
-  // ── !inventory / !inv ──
-  if (content === '!inventory' || content === '!inv') {
-    await sendInventoryEmbed(message.channel, userId, username, 0, message);
+  // ── !inventory ──
+  if (content === '!inventory') {
+    const inv = getRoleInventory(userId);
+    if (!inv.length) { await message.reply("Your inventory is empty. Buy roles from the shop with **!shop**."); return; }
+    const equipped = inv.filter(r=>r.equipped===1);
+    const unequipped = inv.filter(r=>r.equipped===0);
+    let desc = '';
+    if (equipped.length) desc += `**Equipped (${equipped.length}/3):**\n${equipped.map(r=>`✅ ${r.role_name} [${r.rarity}]`).join('\n')}\n\n`;
+    if (unequipped.length) desc += `**Unequipped:**\n${unequipped.map(r=>`📦 ${r.role_name} [${r.rarity}]`).join('\n')}\n\n`;
+    desc += `Use **!equip [role name]** or **!unequip [role name]** to manage your roles.`;
+    const embed = new EmbedBuilder().setColor('#c9a84c').setTitle(`${username}'s Role Inventory`)
+      .setDescription(desc).setFooter({text:"Bully's World • Collect them all."}).setTimestamp();
+    await message.reply({ embeds: [embed] });
     return;
   }
 
-  // ── !equip / !unequip — redirect to inventory ──
-  if (content.startsWith('!equip') || content.startsWith('!unequip')) {
-    const r = await message.reply('🎒 Equip and unequip your roles using the buttons in **!inventory**!');
-    setTimeout(() => r.delete().catch(() => {}), 8000);
-    setTimeout(() => message.delete().catch(() => {}), 8000);
+  // ── !equip ──
+  if (content.startsWith('!equip ')) {
+    const roleName = message.content.trim().slice(7).trim();
+    if (!roleName) { await message.reply('Usage: `!equip [role name]`'); return; }
+    const owned = ownsRole(userId, roleName);
+    if (!owned) { await message.reply(`You don't own **${roleName}**. Check your inventory with **!inventory**.`); return; }
+    if (owned.equipped) { await message.reply(`**${roleName}** is already equipped.`); return; }
+    const equipped = getEquippedRoles(userId);
+    if (equipped.length >= 3) {
+      const equippedList = equipped.map((r,i)=>`${i+1}. ${r.role_name}`).join('\n');
+      await message.reply(`You already have 3 roles equipped:\n${equippedList}\n\nUse **!unequip [role name]** to remove one first.`);
+      return;
+    }
+    const guild = await client.guilds.fetch(CONFIG.GUILD_ID);
+    const mem = await guild.members.fetch(userId).catch(()=>null);
+    if (mem) await equipRole(mem, roleName, owned.rarity, userId);
+    await message.reply(`✅ **${roleName}** [${owned.rarity}] is now equipped! You have ${equipped.length+1}/3 roles equipped.`);
+    return;
+  }
+
+  // ── !unequip ──
+  if (content.startsWith('!unequip ')) {
+    const roleName = message.content.trim().slice(9).trim();
+    if (!roleName) { await message.reply('Usage: `!unequip [role name]`'); return; }
+    const owned = ownsRole(userId, roleName);
+    if (!owned) { await message.reply(`You don't own **${roleName}**. Check your inventory with **!inventory**.`); return; }
+    if (!owned.equipped) { await message.reply(`**${roleName}** is already unequipped.`); return; }
+    const guild = await client.guilds.fetch(CONFIG.GUILD_ID);
+    const mem = await guild.members.fetch(userId).catch(()=>null);
+    if (mem) await unequipRole(mem, roleName, userId);
+    const equipped = getEquippedRoles(userId);
+    await message.reply(`📦 **${roleName}** has been unequipped and stored in your inventory. You now have ${equipped.length}/3 roles equipped.`);
     return;
   }
 
@@ -2670,58 +2618,106 @@ function casinoOpen(isAdmin) {
 const _bj = new Map();
 const _rl = new Map();
 
-// ── Shop role purchase handler ───────────────────────────────────────────────
-async function fulfillRolePurchase(interaction, userId, username, roleName, rarity, cost) {
-  // Check if already owned
-  if (ownsRole(userId, roleName)) {
-    await interaction.reply({ content: `You already own **${roleName}**! Check your **!inventory**.`, ephemeral: true });
-    return;
-  }
+async function fulfillShopPurchase(interaction, userId, username, itemIdx) {
+  const entry = activeShop[itemIdx];
+  if (!entry) { await interaction.reply({ content: '❌ Item no longer available.', ephemeral: true }); return; }
+  const { item, roleName } = entry;
   const u = getUser(userId, username);
-  if (u.balance < cost) {
-    await interaction.reply({ content: `❌ You need **${cost} BB** but only have **${u.balance} BB**.`, ephemeral: true });
-    return;
+  if (u.balance < item.cost) { await interaction.reply({ content: `❌ Need **${item.cost} BB**. You have **${u.balance} BB**.`, ephemeral: true }); return; }
+  spendBB(userId, item.cost);
+  db.prepare('INSERT INTO shop_purchases (user_id, item_name, cost) VALUES (?, ?, ?)').run(userId, roleName || item.label, item.cost);
+  let dmText = '';
+  if (item.type === 'discount') {
+    const code = pickUniqueCode(item.id, userId);
+    dmText = `Your **${item.label}** discount code: \`${code}\`
+Shop: ${CONFIG.SHOP_URL}
+
+Don't share it.`;
+  } else if (item.type === 'giveaway') {
+    const current = getGiveawayEntries(userId);
+    const actual = Math.min(item.tickets, CONFIG.GIVEAWAY_MAX_TICKETS - current);
+    if (actual <= 0) { await interaction.reply({ content: `You're already at max giveaway tickets!`, ephemeral: true }); db.prepare('UPDATE balances SET balance = balance + ? WHERE user_id = ?').run(item.cost, userId); return; }
+    addGiveawayEntries(userId, username, actual);
+    dmText = `You now have **${current + actual}** of ${CONFIG.GIVEAWAY_MAX_TICKETS} giveaway tickets!`;
+  } else if (item.type === 'priority') {
+    dmText = `Your **Stream Priority Pass** is active for the next TikTok live!`;
+  } else if (item.type === 'role') {
+    const guild = await client.guilds.fetch(CONFIG.GUILD_ID);
+    const mem = await guild.members.fetch(userId).catch(() => null);
+    addToInventory(userId, roleName, item.rarity);
+    const equipped = getEquippedRoles(userId);
+    if (equipped.length < 3) {
+      if (mem) await equipRole(mem, roleName, item.rarity, userId);
+      dmText = `**${roleName}** [${item.rarity}] added and equipped! (${equipped.length + 1}/3 slots)`;
+    } else {
+      dmText = `**${roleName}** [${item.rarity}] added to inventory. Use **!inventory** to swap a role.`;
+    }
   }
-  spendBB(userId, cost);
-  db.prepare('INSERT INTO shop_purchases (user_id, item_name, cost) VALUES (?, ?, ?)').run(userId, roleName, cost);
-
-  // Add to inventory
-  addToInventory(userId, roleName, rarity);
-
-  // Auto-equip if slot available
-  const guild = await client.guilds.fetch(CONFIG.GUILD_ID);
-  const mem = await guild.members.fetch(userId).catch(() => null);
-  const equipped = getEquippedRoles(userId);
-  let equipMsg = '';
-  if (equipped.length < 3) {
-    if (mem) await equipRole(mem, roleName, rarity, userId);
-    equipMsg = ` Equipped automatically! (${equipped.length + 1}/3 slots)`;
-  } else {
-    // Added to inventory unequipped (addToInventory inserts with equipped=1, fix that)
-    db.prepare('UPDATE role_inventory SET equipped = 0 WHERE user_id = ? AND role_name = ?').run(userId, roleName);
-    equipMsg = ' Stored in inventory — use **!inventory** to equip it.';
-  }
-
-  const rarityColors = { Common: '#aaaaaa', Uncommon: '#57a8ff', Rare: '#cc44ff', Legendary: '#FFD700' };
-  await interaction.reply({
-    embeds: [new EmbedBuilder()
-      .setColor(rarityColors[rarity] || '#c9a84c')
-      .setTitle('✅ Role Purchased!')
-      .setDescription(`**${roleName}** [${rarity}] is now yours!${equipMsg}`)
-      .setFooter({ text: "Bully's World • Wear it well." })
-      .setTimestamp()
-    ],
-    ephemeral: true
-  });
+  try { await interaction.user.send({ embeds: [new EmbedBuilder().setColor('#c9a84c').setTitle('✅ Purchase Confirmed').setDescription(dmText).setFooter({ text: "Bully's World • Good buy." })] }); } catch (_) {}
+  await interaction.reply({ content: `✅ **${roleName || item.label}** purchased! Check your DMs.`, ephemeral: true });
 }
 
-// !shop — show current shop page 0
+async function postShopWithButtons(channel, userBalance) {
+  if (!activeShop.length) return null;
+  const nextRefresh = shopRefreshTime || new Date(Date.now() + 12 * 60 * 60 * 1000);
+  const embed = new EmbedBuilder().setColor('#1a1a1a').setTitle("🛍️ BULLY'S STORE")
+    .setDescription(
+      activeShop.map((e, i) => {
+        const name = e.roleName ? `${e.roleName} [${e.item.rarity}]` : e.item.label;
+        const canAfford = (userBalance || 0) >= e.item.cost;
+        return `**${i + 1}.** ${name}
+💰 **${e.item.cost} BB**${canAfford ? '' : ' *(not enough BB)*'}`;
+      }).join('\n\n') +
+      `\n\nRefreshes <t:${Math.floor(nextRefresh.getTime() / 1000)}:R>`
+    )
+    .setFooter({ text: "Bully's World • Spend wisely." }).setTimestamp();
+  const btns = activeShop.map((e, i) => {
+    const raw = e.roleName || e.item.label;
+    const label = (raw.length > 20 ? raw.slice(0, 18) + '…' : raw) + ` — ${e.item.cost} BB`;
+    return new ButtonBuilder().setCustomId(`shopbuy.${i}`).setLabel(label).setStyle(ButtonStyle.Primary);
+  });
+  const rows = [];
+  for (let i = 0; i < btns.length; i += 3) rows.push(new ActionRowBuilder().addComponents(btns.slice(i, i + 3)));
+  return channel.send({ embeds: [embed], components: rows });
+}
+
+const _origRefreshShop = refreshShop;
+refreshShop = async function () {
+  const channel = await client.channels.fetch(CONFIG.CHANNELS.SHOP).catch(() => null);
+  if (!channel) return;
+  const selected = [], usedIds = new Set();
+  while (selected.length < 5) {
+    const roll = Math.random(); let cum = 0;
+    for (const item of CONFIG.SHOP_ITEMS) {
+      cum += item.prob;
+      if (roll < cum && !usedIds.has(item.id)) {
+        usedIds.add(item.id); let roleName = null;
+        if (item.type === 'role') roleName = getRandomRole(item.rarity);
+        selected.push({ item, roleName }); break;
+      }
+    }
+    if (selected.length >= CONFIG.SHOP_ITEMS.filter(i => !usedIds.has(i.id)).length + selected.length) break;
+  }
+  activeShop = selected;
+  const nextRefresh = new Date(Date.now() + 12 * 60 * 60 * 1000);
+  shopRefreshTime = nextRefresh;
+  if (lastShopMessageId) {
+    const old = await channel.messages.fetch(lastShopMessageId).catch(() => null);
+    if (old) await old.delete().catch(() => {});
+  }
+  const msg = await postShopWithButtons(channel, 0);
+  if (msg) lastShopMessageId = msg.id;
+};
+
+// !shop
 client.on('messageCreate', async msg => {
   if (msg.author?.bot || !msg.guild) return;
   if (TESTING_MODE && !hasAccess(msg.member)) return;
   if (msg.content.trim().toLowerCase() !== '!shop') return;
-  if (!SHOP_ROLES.length) { await msg.reply('The shop is loading. Check back shortly.'); return; }
-  await postShopEmbed(msg.channel, 0);
+  if (!msg.member?.roles.cache.has(CONFIG.SHOP_ACCESS_ROLE)) { await msg.reply(CONFIG.SHOP_LOCKED_MSG); return; }
+  if (!activeShop.length) { await msg.reply('The shop is loading. Try again shortly.'); return; }
+  const bal = db.prepare('SELECT balance FROM balances WHERE user_id = ?').get(msg.author.id)?.balance || 0;
+  await postShopWithButtons(msg.channel, bal);
 });
 
 // !bullygames
@@ -2756,90 +2752,8 @@ client.on('interactionCreate', async interaction => {
   const getBal = () => db.prepare('SELECT balance FROM balances WHERE user_id = ?').get(userId)?.balance || 0;
 
   try {
-    // ── SHOP: role buy button ─────────────────────────────────────────────────
-    if (customId.startsWith('shopbuy_role.')) {
-      // customId = shopbuy_role.{page}.{indexInPage}
-      const parts = customId.split('.');
-      const page = parseInt(parts[1]);
-      const idxInPage = parseInt(parts[2]);
-      const PAGE_SIZE = 10;
-      const sorted = [...SHOP_ROLES].sort((a, b) => (RARITY_ORDER[a.rarity] || 0) - (RARITY_ORDER[b.rarity] || 0));
-      const role = sorted[page * PAGE_SIZE + idxInPage];
-      if (!role) { await interaction.reply({ content: '❌ Role not found. The shop may have refreshed.', ephemeral: true }); return; }
-      await fulfillRolePurchase(interaction, userId, username, role.name, role.rarity, role.cost);
-      return;
-    }
-
-    // ── SHOP: page nav ────────────────────────────────────────────────────────
-    if (customId.startsWith('shop_page.')) {
-      const page = parseInt(customId.split('.')[1]);
-      if (!SHOP_ROLES.length) { await interaction.reply({ content: 'The shop is loading. Try again shortly.', ephemeral: true }); return; }
-      // Edit the message in place if possible, otherwise send new
-      try {
-        const PAGE_SIZE = 10;
-        const sorted = [...SHOP_ROLES].sort((a, b) => (RARITY_ORDER[a.rarity] || 0) - (RARITY_ORDER[b.rarity] || 0));
-        const totalPages = Math.ceil(sorted.length / PAGE_SIZE);
-        const safePage = Math.max(0, Math.min(page, totalPages - 1));
-        const pageRoles = sorted.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE);
-        const desc = pageRoles.map(r => `${RARITY_EMOJI[r.rarity] || '⬜'} **${r.name}** [${r.rarity}] — **${r.cost} BB**`).join('\n');
-        const embed = new EmbedBuilder()
-          .setColor('#c9a84c')
-          .setTitle("🛍️ BULLY'S STORE")
-          .setDescription(`Browse and buy collectible roles. They go straight to your inventory!\n\n${desc}\n\n_Page ${safePage + 1} of ${totalPages} · Use **!inventory** to manage your roles._`)
-          .addFields({ name: '💰 Prices', value: Object.entries(CONFIG.ROLE_PRICES).map(([r, p]) => `${RARITY_EMOJI[r]} ${r}: **${p} BB**`).join(' · '), inline: false })
-          .setFooter({ text: "Bully's World • Click a role to buy it." }).setTimestamp();
-        const rows = [];
-        for (let i = 0; i < pageRoles.length; i += 5) {
-          const chunk = pageRoles.slice(i, i + 5);
-          rows.push(new ActionRowBuilder().addComponents(chunk.map((r, ci) => new ButtonBuilder()
-            .setCustomId(`shopbuy_role.${safePage}.${i + ci}`)
-            .setLabel(r.name.length > 25 ? r.name.slice(0, 23) + '…' : r.name)
-            .setStyle(r.rarity === 'Legendary' ? ButtonStyle.Success : r.rarity === 'Rare' ? ButtonStyle.Primary : ButtonStyle.Secondary)
-          )));
-        }
-        if (totalPages > 1) {
-          rows.push(new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId(`shop_page.${safePage - 1}`).setLabel('◀ Previous').setStyle(ButtonStyle.Secondary).setDisabled(safePage === 0),
-            new ButtonBuilder().setCustomId(`shop_page.${safePage + 1}`).setLabel('Next ▶').setStyle(ButtonStyle.Secondary).setDisabled(safePage >= totalPages - 1),
-          ));
-        }
-        await interaction.update({ embeds: [embed], components: rows });
-      } catch (e) {
-        await interaction.reply({ content: '❌ Could not navigate pages. Try `!shop` again.', ephemeral: true });
-      }
-      return;
-    }
-
-    // ── INVENTORY: equip button ───────────────────────────────────────────────
-    if (customId.startsWith('inv_equip.')) {
-      const b64 = customId.slice('inv_equip.'.length);
-      const roleName = Buffer.from(b64, 'base64').toString('utf8');
-      const owned = ownsRole(userId, roleName);
-      if (!owned) { await interaction.reply({ content: `You don't own **${roleName}**.`, ephemeral: true }); return; }
-      if (owned.equipped) { await interaction.reply({ content: `**${roleName}** is already equipped.`, ephemeral: true }); return; }
-      const equipped = getEquippedRoles(userId);
-      if (equipped.length >= 3) { await interaction.reply({ content: `You already have 3 roles equipped. Unequip one first.`, ephemeral: true }); return; }
-      const guild = await client.guilds.fetch(CONFIG.GUILD_ID);
-      const mem = await guild.members.fetch(userId).catch(() => null);
-      if (mem) await equipRole(mem, roleName, owned.rarity, userId);
-      await interaction.reply({ content: `✅ **${roleName}** equipped! (${equipped.length + 1}/3 slots)`, ephemeral: true });
-      return;
-    }
-
-    // ── INVENTORY: unequip button ─────────────────────────────────────────────
-    if (customId.startsWith('inv_unequip.')) {
-      const b64 = customId.slice('inv_unequip.'.length);
-      const roleName = Buffer.from(b64, 'base64').toString('utf8');
-      const owned = ownsRole(userId, roleName);
-      if (!owned) { await interaction.reply({ content: `You don't own **${roleName}**.`, ephemeral: true }); return; }
-      if (!owned.equipped) { await interaction.reply({ content: `**${roleName}** is already unequipped.`, ephemeral: true }); return; }
-      const guild = await client.guilds.fetch(CONFIG.GUILD_ID);
-      const mem = await guild.members.fetch(userId).catch(() => null);
-      if (mem) await unequipRole(mem, roleName, userId);
-      const stillEquipped = getEquippedRoles(userId);
-      await interaction.reply({ content: `📦 **${roleName}** unequipped and stored. You now have ${stillEquipped.length}/3 roles equipped.`, ephemeral: true });
-      return;
-    }
+    // SHOP
+    if (customId.startsWith('shopbuy.')) { await fulfillShopPurchase(interaction, userId, username, parseInt(customId.split('.')[1])); return; }
 
     // MAIN MENU
     if (customId === 'menu.lottery') { await interaction.reply({ content: '🎟️ Use `!lottery [amount]` to buy tickets for **30 BB each**. Weekly draw every Sunday!', ephemeral: true }); return; }
