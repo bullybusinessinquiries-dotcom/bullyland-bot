@@ -533,8 +533,39 @@ const RARITY_ORDER = { Common: 0, Uncommon: 1, Rare: 2, Legendary: 3 };
 const RARITY_COLOR = { Common: '#aaaaaa', Uncommon: '#57a8ff', Rare: '#cc44ff', Legendary: '#FFD700' };
 const RARITY_EMOJI = { Common: '⬜', Uncommon: '🟦', Rare: '🟣', Legendary: '🟡' };
 
+// ── Shop rotation: pick a small weighted-random selection every 12 hours ──────
+// With 60 roles and 5 shown per cycle (2x/day), a user would need ~6 cycles per
+// role on average = ~180 days to see all roles if they check every refresh.
+// Rarity weights make Common appear more often, Legendary very rarely.
+const SHOP_RARITY_WEIGHTS = { Common: 10, Uncommon: 5, Rare: 2, Legendary: 1 };
+const SHOP_SLOT_COUNT = 5; // roles shown per 12h cycle
+
+let activeShopRoles = []; // the current 5 roles on sale
+
+function pickShopRoles(allRoles) {
+  if (!allRoles.length) return [];
+  // Build weighted pool
+  const pool = [];
+  for (const role of allRoles) {
+    const w = SHOP_RARITY_WEIGHTS[role.rarity] || 1;
+    for (let i = 0; i < w; i++) pool.push(role);
+  }
+  // Fisher-Yates shuffle then pick unique roles
+  const shuffled = [...pool].sort(() => Math.random() - 0.5);
+  const seen = new Set();
+  const picked = [];
+  for (const r of shuffled) {
+    if (!seen.has(r.name) && picked.length < SHOP_SLOT_COUNT) {
+      seen.add(r.name);
+      picked.push(r);
+    }
+  }
+  return picked;
+}
+
 async function refreshShop() {
   SHOP_ROLES = await loadRolesFromSheet();
+  activeShopRoles = pickShopRoles(SHOP_ROLES);
   const channel = await client.channels.fetch(CONFIG.CHANNELS.SHOP).catch(() => null);
   if (!channel) return;
   if (lastShopMessageId) {
@@ -542,22 +573,20 @@ async function refreshShop() {
     if (old) await old.delete().catch(() => {});
     lastShopMessageId = null;
   }
-  if (!SHOP_ROLES.length) {
+  if (!activeShopRoles.length) {
     const msg = await channel.send({ embeds: [new EmbedBuilder().setColor('#1a1a1a').setTitle("🛍️ BULLY'S STORE").setDescription('The shop is loading. Check back shortly.').setFooter({ text: "Bully's World" }).setTimestamp()] });
     lastShopMessageId = msg.id;
     return;
   }
-  const msg = await postShopEmbed(channel, 0);
+  const msg = await postShopEmbed(channel);
   if (msg) lastShopMessageId = msg.id;
 }
 
-async function postShopEmbed(channel, page) {
-  const PAGE_SIZE = 10;
-  const sorted = [...SHOP_ROLES].sort((a, b) => (RARITY_ORDER[a.rarity] || 0) - (RARITY_ORDER[b.rarity] || 0));
-  const totalPages = Math.ceil(sorted.length / PAGE_SIZE);
-  const pageRoles = sorted.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+async function postShopEmbed(channel) {
+  const nextRefresh = shopRefreshTime || new Date(Date.now() + 12 * 60 * 60 * 1000);
+  const roles = activeShopRoles;
 
-  const desc = pageRoles.map(r =>
+  const desc = roles.map(r =>
     `${RARITY_EMOJI[r.rarity] || '⬜'} **${r.name}** [${r.rarity}] — **${r.cost} BB**`
   ).join('\n');
 
@@ -565,40 +594,29 @@ async function postShopEmbed(channel, page) {
     .setColor('#c9a84c')
     .setTitle("🛍️ BULLY'S STORE")
     .setDescription(
-      `Browse and buy collectible roles. They go straight to your inventory!\n\n${desc}\n\n` +
-      `_Page ${page + 1} of ${totalPages} · Use **!inventory** to manage your roles._`
+      `New roles available! They go straight to your inventory when purchased.\n\n${desc}\n\n` +
+      `_Refreshes <t:${Math.floor(nextRefresh.getTime() / 1000)}:R> · Use **!inventory** to manage your roles._`
     )
     .addFields(
       { name: '💰 Prices', value: Object.entries(CONFIG.ROLE_PRICES).map(([r, p]) => `${RARITY_EMOJI[r]} ${r}: **${p} BB**`).join(' · '), inline: false }
     )
-    .setFooter({ text: "Bully's World • Click a role to buy it." })
+    .setFooter({ text: "Bully's World • Check back every 12 hours for new roles." })
     .setTimestamp();
 
-  // Build buy buttons (max 5 per row, max 4 rows = 20 items per page)
-  const rows = [];
-  for (let i = 0; i < pageRoles.length; i += 5) {
-    const chunk = pageRoles.slice(i, i + 5);
-    rows.push(new ActionRowBuilder().addComponents(
-      chunk.map((r, ci) => new ButtonBuilder()
-        .setCustomId(`shopbuy_role.${page}.${i + ci}`)
-        .setLabel(r.name.length > 25 ? r.name.slice(0, 23) + '…' : r.name)
-        .setStyle(
-          r.rarity === 'Legendary' ? ButtonStyle.Success :
-          r.rarity === 'Rare' ? ButtonStyle.Primary :
-          r.rarity === 'Uncommon' ? ButtonStyle.Secondary :
-          ButtonStyle.Secondary
-        )
-      )
-    ));
-  }
+  // One row of buy buttons — one per role (max 5)
+  const btns = roles.map((r, i) => new ButtonBuilder()
+    .setCustomId(`shopbuy_role.${i}`)
+    .setLabel(r.name.length > 25 ? r.name.slice(0, 23) + '…' : r.name)
+    .setStyle(
+      r.rarity === 'Legendary' ? ButtonStyle.Success :
+      r.rarity === 'Rare'      ? ButtonStyle.Primary :
+      ButtonStyle.Secondary
+    )
+  );
 
-  // Nav buttons if multiple pages
-  if (totalPages > 1) {
-    const navRow = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`shop_page.${page - 1}`).setLabel('◀ Previous').setStyle(ButtonStyle.Secondary).setDisabled(page === 0),
-      new ButtonBuilder().setCustomId(`shop_page.${page + 1}`).setLabel('Next ▶').setStyle(ButtonStyle.Secondary).setDisabled(page >= totalPages - 1),
-    );
-    rows.push(navRow);
+  const rows = [];
+  for (let i = 0; i < btns.length; i += 5) {
+    rows.push(new ActionRowBuilder().addComponents(...btns.slice(i, i + 5)));
   }
 
   return channel.send({ embeds: [embed], components: rows });
@@ -1143,10 +1161,22 @@ client.on('messageCreate', async(message) => {
   }
 
   // ── !shop ──
-  // !shop — redirect to button shop in the shop channel, or show inline
+  // !shop — show current rotating shop inline
   if (content === '!shop') {
-    if (!SHOP_ROLES.length) { await message.reply('The shop is loading. Check back shortly.'); return; }
-    await postShopEmbed(message.channel, 0);
+    if (!activeShopRoles.length) { await message.reply('The shop is loading. Check back shortly.'); return; }
+    await postShopEmbed(message.channel);
+    return;
+  }
+
+  // !feedback
+  if (content === '!feedback') {
+    const embed = new EmbedBuilder()
+      .setColor('#c9a84c')
+      .setTitle('💬 Leave Feedback')
+      .setDescription('Got something to say? We want to hear it!\n\n**[Click here to fill out the feedback form](https://forms.gle/WKCQasR9yemQFzKW7)**\n\nYour feedback helps make BULLYLAND better for everyone.')
+      .setFooter({ text: "Bully's World • Every response is read." })
+      .setTimestamp();
+    await message.reply({ embeds: [embed] });
     return;
   }
 
@@ -2715,14 +2745,7 @@ async function fulfillRolePurchase(interaction, userId, username, roleName, rari
   });
 }
 
-// !shop — show current shop page 0
-client.on('messageCreate', async msg => {
-  if (msg.author?.bot || !msg.guild) return;
-  if (TESTING_MODE && !hasAccess(msg.member)) return;
-  if (msg.content.trim().toLowerCase() !== '!shop') return;
-  if (!SHOP_ROLES.length) { await msg.reply('The shop is loading. Check back shortly.'); return; }
-  await postShopEmbed(msg.channel, 0);
-});
+// !shop — handled in main message handler above
 
 // !bullygames
 client.on('messageCreate', async msg => {
@@ -2758,55 +2781,10 @@ client.on('interactionCreate', async interaction => {
   try {
     // ── SHOP: role buy button ─────────────────────────────────────────────────
     if (customId.startsWith('shopbuy_role.')) {
-      // customId = shopbuy_role.{page}.{indexInPage}
-      const parts = customId.split('.');
-      const page = parseInt(parts[1]);
-      const idxInPage = parseInt(parts[2]);
-      const PAGE_SIZE = 10;
-      const sorted = [...SHOP_ROLES].sort((a, b) => (RARITY_ORDER[a.rarity] || 0) - (RARITY_ORDER[b.rarity] || 0));
-      const role = sorted[page * PAGE_SIZE + idxInPage];
-      if (!role) { await interaction.reply({ content: '❌ Role not found. The shop may have refreshed.', ephemeral: true }); return; }
+      const idx = parseInt(customId.split('.')[1]);
+      const role = activeShopRoles[idx];
+      if (!role) { await interaction.reply({ content: '❌ Role not found. The shop may have just refreshed — try **!shop** again.', ephemeral: true }); return; }
       await fulfillRolePurchase(interaction, userId, username, role.name, role.rarity, role.cost);
-      return;
-    }
-
-    // ── SHOP: page nav ────────────────────────────────────────────────────────
-    if (customId.startsWith('shop_page.')) {
-      const page = parseInt(customId.split('.')[1]);
-      if (!SHOP_ROLES.length) { await interaction.reply({ content: 'The shop is loading. Try again shortly.', ephemeral: true }); return; }
-      // Edit the message in place if possible, otherwise send new
-      try {
-        const PAGE_SIZE = 10;
-        const sorted = [...SHOP_ROLES].sort((a, b) => (RARITY_ORDER[a.rarity] || 0) - (RARITY_ORDER[b.rarity] || 0));
-        const totalPages = Math.ceil(sorted.length / PAGE_SIZE);
-        const safePage = Math.max(0, Math.min(page, totalPages - 1));
-        const pageRoles = sorted.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE);
-        const desc = pageRoles.map(r => `${RARITY_EMOJI[r.rarity] || '⬜'} **${r.name}** [${r.rarity}] — **${r.cost} BB**`).join('\n');
-        const embed = new EmbedBuilder()
-          .setColor('#c9a84c')
-          .setTitle("🛍️ BULLY'S STORE")
-          .setDescription(`Browse and buy collectible roles. They go straight to your inventory!\n\n${desc}\n\n_Page ${safePage + 1} of ${totalPages} · Use **!inventory** to manage your roles._`)
-          .addFields({ name: '💰 Prices', value: Object.entries(CONFIG.ROLE_PRICES).map(([r, p]) => `${RARITY_EMOJI[r]} ${r}: **${p} BB**`).join(' · '), inline: false })
-          .setFooter({ text: "Bully's World • Click a role to buy it." }).setTimestamp();
-        const rows = [];
-        for (let i = 0; i < pageRoles.length; i += 5) {
-          const chunk = pageRoles.slice(i, i + 5);
-          rows.push(new ActionRowBuilder().addComponents(chunk.map((r, ci) => new ButtonBuilder()
-            .setCustomId(`shopbuy_role.${safePage}.${i + ci}`)
-            .setLabel(r.name.length > 25 ? r.name.slice(0, 23) + '…' : r.name)
-            .setStyle(r.rarity === 'Legendary' ? ButtonStyle.Success : r.rarity === 'Rare' ? ButtonStyle.Primary : ButtonStyle.Secondary)
-          )));
-        }
-        if (totalPages > 1) {
-          rows.push(new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId(`shop_page.${safePage - 1}`).setLabel('◀ Previous').setStyle(ButtonStyle.Secondary).setDisabled(safePage === 0),
-            new ButtonBuilder().setCustomId(`shop_page.${safePage + 1}`).setLabel('Next ▶').setStyle(ButtonStyle.Secondary).setDisabled(safePage >= totalPages - 1),
-          ));
-        }
-        await interaction.update({ embeds: [embed], components: rows });
-      } catch (e) {
-        await interaction.reply({ content: '❌ Could not navigate pages. Try `!shop` again.', ephemeral: true });
-      }
       return;
     }
 
