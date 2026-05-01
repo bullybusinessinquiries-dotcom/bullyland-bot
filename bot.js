@@ -125,6 +125,12 @@ db.exec(`
     last_steal TEXT
   );
 
+  CREATE TABLE IF NOT EXISTS heist_completions (
+    user_id TEXT,
+    heist_index INTEGER,
+    PRIMARY KEY (user_id, heist_index)
+  );
+
   CREATE TABLE IF NOT EXISTS role_inventory (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id TEXT, role_name TEXT, rarity TEXT,
@@ -156,6 +162,7 @@ const CONFIG = {
     GIVEAWAY:         process.env.CHANNEL_GIVEAWAY,
     AUCTION:          process.env.CHANNEL_AUCTION,
     GENERAL:          process.env.CHANNEL_GENERAL,
+    GAMES:            process.env.CHANNEL_GAMES,
   },
 
   ROLES: {
@@ -165,8 +172,8 @@ const CONFIG = {
   },
 
   // Bully Bucks
-  MESSAGE_BB: 1,
-  MESSAGE_COOLDOWN_MS: 60 * 1000,
+  MESSAGE_BB: 3,
+  MESSAGE_COOLDOWN_MS: 30 * 1000,
   CHECKIN_WINDOW_MS: 3 * 60 * 1000,
   CHECKIN_BASE: 25,
   STREAK_TIERS: [
@@ -473,18 +480,21 @@ async function postMysteryDrop() {
 async function postCheckin() {
   const channel = await client.channels.fetch(CONFIG.CHANNELS.CHECKIN).catch(()=>null);
   if (!channel) return;
-  if (activeCheckin && !activeCheckin.claimed && Date.now() < activeCheckin.expiresAt) return;
+  if (activeCheckin && !activeCheckin.expired && Date.now() < activeCheckin.expiresAt) return;
   const expiresAt = Date.now() + CONFIG.CHECKIN_WINDOW_MS;
   const embed = new EmbedBuilder().setColor('#c9a84c').setTitle('DAILY CHECK-IN')
     .setDescription(`Type **!checkin** in the next **3 minutes** to claim your daily Bully Bucks.\n\nDon't miss it — your streak is on the line.`)
     .addFields({name:'Expires',value:`<t:${Math.floor(expiresAt/1000)}:R>`,inline:true})
     .setFooter({text:"Bully's World • Show up every day."}).setTimestamp();
   const msg = await channel.send({ content: '@everyone', embeds: [embed] });
-  activeCheckin = { messageId: msg.id, expiresAt, claimed: false };
+  activeCheckin = { messageId: msg.id, expiresAt, claimedUsers: new Set(), expired: false };
   setTimeout(async () => {
-    if (activeCheckin && !activeCheckin.claimed && activeCheckin.messageId === msg.id) {
-      activeCheckin = null;
-      const exp = new EmbedBuilder().setColor('#444441').setTitle('CHECK-IN EXPIRED').setDescription('Too slow. Come back tomorrow.\n\nSet your alarm.').setFooter({text:"Bully's World • Don't sleep next time."}).setTimestamp();
+    if (activeCheckin && !activeCheckin.expired && activeCheckin.messageId === msg.id) {
+      activeCheckin.expired = true;
+      const count = activeCheckin.claimedUsers.size;
+      const exp = new EmbedBuilder().setColor('#444441').setTitle('CHECK-IN CLOSED')
+        .setDescription(count > 0 ? `**${count} member${count !== 1 ? 's' : ''}** checked in today. Good work.\n\nCome back tomorrow.` : 'Nobody checked in. Come back tomorrow.\n\nSet your alarm.')
+        .setFooter({text:"Bully's World • Don't sleep next time."}).setTimestamp();
       await msg.edit({ embeds: [exp] }).catch(()=>{});
     }
   }, CONFIG.CHECKIN_WINDOW_MS);
@@ -623,9 +633,8 @@ async function postShopEmbed(channel) {
 }
 
 // ─── TESTER GATE ────────────────────────────────────────────────────────────
-// While in test mode, only admins and users with the @tester role can use the bot.
-// To open to everyone: set TESTING_MODE to false, or remove this block entirely.
-const TESTING_MODE = true;
+// Toggle with !testingmode on/off (admin only). Off by default for live use.
+let TESTING_MODE = false;
 const TESTER_ROLE_ID = '1498127933963767987';
 
 function hasAccess(member) {
@@ -925,9 +934,8 @@ async function executeHeist(channelArg) {
   console.log(`[Heist] Executing: ${heist.name} with ${crew.length} crew members`);
 
   if (crew.length < 2) {
-    // Refund solo member
-    addBB(crew[0].id, crew[0].username, heist.entry, 'heist refund — not enough crew');
-    await channel.send(`🦹 **${heist.name}** was called off — not enough crew members showed up. Entry fee refunded.`);
+    crew.forEach(m => addBB(m.id, m.username, heist.entry, 'heist refund — not enough crew'));
+    await channel.send(`🦹 **${heist.name}** was called off — not enough crew showed up. Entry fees refunded.`);
     return;
   }
 
@@ -1035,6 +1043,11 @@ async function executeHeist(channelArg) {
   if (success) {
     const share = Math.floor(heist.payout / crew.length);
     crew.forEach(m => addBB(m.id, m.username, share, `heist win — ${heist.name}`));
+    // Record heist completion for the leader (unlocks next heist for them to lead)
+    const completedIndex = HEISTS.findIndex(h => h.name === heist.name);
+    if (completedIndex >= 0 && crew[0]) {
+      db.prepare('INSERT OR IGNORE INTO heist_completions (user_id, heist_index) VALUES (?, ?)').run(crew[0].id, completedIndex);
+    }
     const embed = new EmbedBuilder().setColor('#3B6D11').setTitle(`🦹 HEIST SUCCESS — ${heist.name}`)
       .setDescription(
         `The crew pulled it off!
@@ -1095,8 +1108,9 @@ client.on('messageCreate', async(message) => {
   // ── !checkin ──
   if (content === '!checkin') {
     if (message.channelId !== CONFIG.CHANNELS.CHECKIN) { const r = await message.reply(`Check-ins only count in <#${CONFIG.CHANNELS.CHECKIN}>.`); setTimeout(()=>r.delete().catch(()=>{}),5000); return; }
-    if (!activeCheckin || activeCheckin.claimed || Date.now() > activeCheckin.expiresAt) { const r = await message.reply('No active check-in right now. Stay on your notifications.'); setTimeout(()=>r.delete().catch(()=>{}),5000); await message.delete().catch(()=>{}); return; }
-    activeCheckin.claimed = true;
+    if (!activeCheckin || activeCheckin.expired || Date.now() > activeCheckin.expiresAt) { const r = await message.reply('No active check-in right now. Stay on your notifications.'); setTimeout(()=>r.delete().catch(()=>{}),5000); await message.delete().catch(()=>{}); return; }
+    if (activeCheckin.claimedUsers.has(userId)) { const r = await message.reply('You already checked in today!'); setTimeout(()=>r.delete().catch(()=>{}),5000); await message.delete().catch(()=>{}); return; }
+    activeCheckin.claimedUsers.add(userId);
     await message.delete().catch(()=>{});
     const u = getUser(userId, username);
     const lastCI = u.last_checkin ? new Date(u.last_checkin).toISOString().slice(0,10) : null;
@@ -1112,10 +1126,6 @@ client.on('messageCreate', async(message) => {
         .setFooter({text:"Bully's World • Show up every day."}).setTimestamp();
       await message.author.send({ embeds: [dmEmbed] });
     } catch {}
-    const ch = await client.channels.fetch(CONFIG.CHANNELS.CHECKIN).catch(()=>null);
-    const orig = ch ? await ch.messages.fetch(activeCheckin.messageId).catch(()=>null) : null;
-    if (orig) { const ce = new EmbedBuilder().setColor('#3B6D11').setTitle('CHECK-IN CLAIMED').setDescription('Someone claimed it. Check your DMs.\n\nCome back tomorrow.').setFooter({text:"Bully's World"}).setTimestamp(); await orig.edit({embeds:[ce]}).catch(()=>{}); }
-    activeCheckin = null;
     return;
   }
 
@@ -1168,6 +1178,29 @@ client.on('messageCreate', async(message) => {
     return;
   }
 
+  // !heistrules
+  if (content === '!heistrules') {
+    const heistLines = HEISTS.map((h, i) => {
+      const prev = i > 0 ? HEISTS[i - 1].name : null;
+      const lock = prev ? `*(Lead requires completing ${prev} first)*` : '*(Available to all)*';
+      return `**${i + 1}. ${h.name}**\n${h.description}\nEntry: **${h.entry} BB** · Base odds: **${Math.round(h.chance * 100)}%** · Payout: **${h.payout} BB** split\n${lock}`;
+    }).join('\n\n');
+    const embed = new EmbedBuilder().setColor('#FF4500').setTitle('🦹 Heist Rules & Info')
+      .setDescription(
+        `**How heists work:**\nOne member leads and picks the heist. Others join by clicking the button and choosing a role. Each member pays an entry fee. The crew has 2 minutes to fill before the heist launches automatically.\n\n` +
+        `**Minimum crew:** 2 members (leader + 1). Max: 5.\n\n` +
+        `**Odds improve with crew size:** +3% success chance per extra member, up to +20% total.\n\n` +
+        `**Level bonus:** Members who have earned 1,000+ BB add +2% each to the odds.\n\n` +
+        `**On success:** The payout is split evenly across all crew members.\n**On failure:** Entry fees are lost — no refunds for a busted heist.\n**On cancel:** All entry fees are refunded.\n\n` +
+        `**Leader progression:** To lead a heist, you must have successfully led the one before it. Anyone can *join* any heist regardless of progression.\n\n` +
+        `─────────────────────\n\n` +
+        `**The Heists:**\n\n${heistLines}`
+      )
+      .setFooter({ text: "Bully's World • Plan the job. Work the crew. Don't get caught." }).setTimestamp();
+    await message.reply({ embeds: [embed] });
+    return;
+  }
+
   // !feedback
   if (content === '!feedback') {
     const embed = new EmbedBuilder()
@@ -1213,7 +1246,7 @@ client.on('messageCreate', async(message) => {
   // ── !help ──
   if (content === '!help') {
     const embed = new EmbedBuilder().setColor('#1a1a1a').setTitle("Bully's World — How It Works")
-      .setDescription(`**Earning Bully Bucks:**\n• Chat — 1 BB per message (1 min cooldown)\n• Daily check-in — 25-400 BB depending on streak\n• Win on-stream TikTok events — gifted by Bully\n\n**Commands:**\n!balance — your BB & streak\n!checkin — claim daily BB\n!shop — browse current shop (Rookie+)\n!buy [number] — purchase item\n!leaderboard — monthly top earners\n!history — last 5 transactions\n!stats — server economy\n!claim — claim a mystery drop\n!redeem CODE — redeem a stream event code\n\n**Streaks double every 7 days:** 25 → 50 → 100 → 200 → 400 BB`)
+      .setDescription(`**Earning Bully Bucks:**\n• Chat — 3 BB per message (30 sec cooldown)\n• Daily check-in — 25-400 BB depending on streak\n• Win on-stream TikTok events — gifted by Bully\n\n**Essential Commands:**\n!balance — your BB & streak\n!checkin — claim daily BB (during check-in window)\n!bullygames — access all games (Raids, Heist, Casino, Lottery)\n!heistrules — how heists work\n!steal @user [amount] — try to steal BB from another member\n!gift @user [amount] — send your own BB to another member\n!shop — browse current shop (Rookie+)\n!buy [number] — purchase item\n!leaderboard — monthly top earners\n!history — last 5 transactions\n!stats — server economy\n!claim — claim a mystery drop\n!feedback — share your thoughts\n!redeem CODE — redeem a stream event code\n\n**Streaks double every 7 days:** 25 → 50 → 100 → 200 → 400 BB`)
       .setFooter({text:"Bully's World • Now get to earning."}).setTimestamp();
     await message.reply({ embeds: [embed] }); return;
   }
@@ -1611,111 +1644,10 @@ This challenge expires in 60 seconds.`)
     return;
   }
 
-  // ── !steal ──
-  if (content.startsWith('!steal ')) {
-    const parts = message.content.trim().split(' ');
-    const target = message.mentions.users.first();
-    const stealAmount = parseInt(parts[2]);
-    if (!target) { await message.reply('Usage: `!steal @user [amount]` — Example: `!steal @user 50`'); return; }
-    if (isNaN(stealAmount) || stealAmount < 1) { await message.reply('Please specify an amount. Example: `!steal @user 50`'); return; }
-    if (target.id === userId) { await message.reply("You can't steal from yourself."); return; }
-    if (target.bot) { await message.reply("You can't steal from a bot."); return; }
+  // ── !steal — handled by the dedicated steal handler below (DM-block system) ──
 
-    // Check cooldown (1 hour)
-    const cooldownRow = db.prepare('SELECT last_steal FROM steal_cooldown WHERE user_id = ?').get(userId);
-    if (cooldownRow) {
-      const lastSteal = new Date(cooldownRow.last_steal).getTime();
-      const remaining = 3 * 60 * 1000 - (Date.now() - lastSteal);
-      if (remaining > 0) {
-        const mins = Math.ceil(remaining / 60000);
-        await message.reply(`You need to wait **${mins} more minute${mins !== 1 ? 's' : ''}** before stealing again.`);
-        return;
-      }
-    }
-
-    // Check max 5 total steal attempts per day
-    const today = new Date().toISOString().slice(0, 10);
-    const totalSteals = db.prepare("SELECT COUNT(*) as c FROM steal_log WHERE stealer_id = ? AND DATE(created_at) = ?").get(userId, today);
-    if (totalSteals.c >= 10) {
-      await message.reply("You've used all 10 of your steal attempts for today. Come back tomorrow.");
-      return;
-    }
-
-    // Check shield
-    if (hasShield(target.id)) {
-      await message.reply(`**${target.username}** is protected by a shield. You can't steal from them right now.`);
-      return;
-    }
-
-    // Check target has BB to steal
-    const targetUser = getUser(target.id, target.username);
-    if (targetUser.balance < 1) {
-      await message.reply(`**${target.username}** is broke. Nothing to steal.`);
-      return;
-    }
-
-    // Update cooldown and log
-    db.prepare('INSERT OR REPLACE INTO steal_cooldown (user_id, last_steal) VALUES (?, ?)').run(userId, new Date().toISOString());
-    db.prepare('INSERT INTO steal_log (stealer_id, target_id) VALUES (?, ?)').run(userId, target.id);
-
-    // Tiered odds based on steal amount
-    let successChance;
-    if (stealAmount <= 25) successChance = 0.50;
-    else if (stealAmount <= 50) successChance = 0.35;
-    else if (stealAmount <= 100) successChance = 0.20;
-    else successChance = 0.05;
-
-    const success = Math.random() < successChance;
-    const amount = stealAmount;
-
-    if (success) {
-      const actualStolen = Math.min(amount, targetUser.balance);
-      db.prepare('UPDATE balances SET balance = balance - ? WHERE user_id = ?').run(actualStolen, target.id);
-      db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(target.id, -actualStolen, `stolen by ${username}`);
-      addBB(userId, username, actualStolen, `stolen from ${target.username}`);
-      const embed = new EmbedBuilder().setColor('#3B6D11').setTitle('🤫 Successful Steal!')
-        .setDescription(`**${username}** successfully stole **${actualStolen} BB** from **${target.username}**!
-
-Slick moves.`)
-        .addFields(
-          { name: `${username}'s balance`, value: `${getUser(userId, username).balance} BB`, inline: true },
-          { name: `${target.username}'s balance`, value: `${targetUser.balance - actualStolen} BB`, inline: true }
-        )
-        .setFooter({ text: "Bully's World • Watch your pockets." }).setTimestamp();
-      await message.reply({ embeds: [embed] });
-      // Check and pay bounty
-      const bounties = getActiveBounties(target.id);
-      if (bounties.length) {
-        const totalBounty = bounties.reduce((sum, b) => sum + b.amount, 0);
-        bounties.forEach(b => db.prepare('UPDATE bounties SET claimed = 1 WHERE id = ?').run(b.id));
-        addBB(userId, username, totalBounty, `bounty collected on ${target.username}`);
-        await message.channel.send(`🎯 **${username}** collected a **${totalBounty} BB** bounty on **${target.username}**!`);
-      }
-      try {
-        await target.send(`🚨 **${username}** just stole **${actualStolen} BB** from you in Bully's World! Watch your back.`);
-      } catch {}
-    } else {
-      const penalty = Math.max(1, Math.floor(amount * 0.5));
-      const u = getUser(userId, username);
-      const actualPenalty = Math.min(penalty, u.balance);
-      db.prepare('UPDATE balances SET balance = balance - ? WHERE user_id = ?').run(actualPenalty, userId);
-      db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(userId, -actualPenalty, `caught stealing from ${target.username}`);
-      const embed = new EmbedBuilder().setColor('#8B0000').setTitle('🚨 Caught Red Handed!')
-        .setDescription(`**${username}** tried to steal from **${target.username}** and got caught!
-
-**${actualPenalty} BB** was taken as a penalty.`)
-        .addFields(
-          { name: `${username}'s balance`, value: `${u.balance - actualPenalty} BB`, inline: true },
-          { name: `${target.username}'s balance`, value: `${targetUser.balance} BB`, inline: true }
-        )
-        .setFooter({ text: "Bully's World • Crime doesn't pay." }).setTimestamp();
-      await message.reply({ embeds: [embed] });
-    }
-    return;
-  }
-
-  // ── !give ──
-  if (content.startsWith('!give ')) {
+  // ── !gift / !give ──
+  if (content.startsWith('!gift ') || content.startsWith('!give ')) {
     const mention = message.mentions.users.first();
     const amount = parseInt(message.content.trim().split(' ')[2]);
     if (!mention) { await message.reply('Usage: `!give @user amount`'); return; }
@@ -2752,6 +2684,12 @@ client.on('messageCreate', async msg => {
   if (msg.author?.bot || !msg.guild) return;
   if (TESTING_MODE && !hasAccess(msg.member)) return;
   if (msg.content.trim().toLowerCase() !== '!bullygames') return;
+  if (CONFIG.CHANNELS.GAMES && msg.channelId !== CONFIG.CHANNELS.GAMES) {
+    const r = await msg.reply(`🎮 Games only run in <#${CONFIG.CHANNELS.GAMES}>. Head over there!`);
+    setTimeout(() => r.delete().catch(() => {}), 6000);
+    await msg.delete().catch(() => {});
+    return;
+  }
   const embed = new EmbedBuilder().setColor('#c9a84c').setTitle('🎮 BULLYLAND Games')
     .setDescription('**Welcome to the game room.** Pick a game below.\n\n⚔️ **Raid** — Team battles\n👹 **Boss Raid** — Legendary bosses\n🦹 **Heist** — Crew heists for BB\n🎰 **Casino** — Slots, Blackjack, Roulette, Horse Racing\n🎟️ **Lottery** — Weekly jackpot draw')
     .setFooter({ text: "Bully's World" }).setTimestamp();
@@ -2777,6 +2715,17 @@ client.on('interactionCreate', async interaction => {
   const userId = user.id, username = user.username;
   const isAdmin = interaction.member?.permissions?.has(PermissionsBitField.Flags.Administrator) || userId === process.env.OWNER_ID;
   const getBal = () => db.prepare('SELECT balance FROM balances WHERE user_id = ?').get(userId)?.balance || 0;
+
+  // Game interactions must happen in the games channel
+  const GAME_CUSTOMS = ['menu.raid','menu.boss','menu.heist','menu.casino','menu.lottery'];
+  const isGameInteraction = GAME_CUSTOMS.some(k => customId.startsWith(k)) ||
+    customId.startsWith('raid.') || customId.startsWith('boss.') ||
+    customId.startsWith('heist.') || customId.startsWith('casino.') ||
+    customId.startsWith('lottery.') || customId.startsWith('slots.') ||
+    customId.startsWith('bj.') || customId.startsWith('roulette.') || customId.startsWith('race.');
+  if (isGameInteraction && CONFIG.CHANNELS.GAMES && interaction.channelId !== CONFIG.CHANNELS.GAMES) {
+    await interaction.reply({ content: `🎮 Games only run in <#${CONFIG.CHANNELS.GAMES}>.`, ephemeral: true }); return;
+  }
 
   try {
     // ── SHOP: role buy button ─────────────────────────────────────────────────
@@ -2840,20 +2789,27 @@ client.on('interactionCreate', async interaction => {
       }
       const memberRoles = interaction.member?.roles.cache;
       const heistMinRoles = [null, null, process.env.ROLE_ROOKIE, process.env.ROLE_VETERAN, process.env.ROLE_OG, process.env.ROLE_VIP];
-      const availableHeists = HEISTS.filter((_, i) => !heistMinRoles[i] || memberRoles?.has(heistMinRoles[i]));
-      const lockedHeists = HEISTS.filter((_, i) => heistMinRoles[i] && !memberRoles?.has(heistMinRoles[i]));
+      // Build per-heist availability: role-unlocked AND progression-unlocked (or admin)
+      const heistList = HEISTS.map((h, i) => {
+        const roleOk = isAdmin || !heistMinRoles[i] || memberRoles?.has(heistMinRoles[i]);
+        const prevCompleted = isAdmin || i === 0 || !!db.prepare('SELECT 1 FROM heist_completions WHERE user_id = ? AND heist_index = ?').get(userId, i - 1);
+        return { heist: h, index: i, roleOk, prevCompleted, canLead: roleOk && prevCompleted };
+      });
       const roleNames = [null, null, 'Rookie', 'Veteran', 'OG', 'VIP'];
-      const heistList = availableHeists.map((h, i) => `**${i + 1}.** ${h.name} — **${h.entry} BB** · **${Math.round(h.chance * 100)}%** · **${h.payout} BB** payout
-*${h.description}*`).join('\n\n');
-      const lockedText = lockedHeists.length ? `
-
-🔒 **Locked:** ${lockedHeists.map(h => `${h.name} (needs ${roleNames[HEISTS.indexOf(h)]})`).join(', ')}` : '';
-      const embed = new EmbedBuilder().setColor('#FF4500').setTitle('🦹 CHOOSE YOUR HEIST').setDescription(`${heistList}${lockedText}`).setFooter({ text: "Bully's World • Choose wisely." }).setTimestamp();
+      const availableHeists = heistList.filter(e => e.canLead).map(e => e.heist);
+      const heistDesc = heistList.map(e => {
+        const lockReason = !e.roleOk ? `🔒 needs ${roleNames[e.index] || 'higher role'}` : !e.prevCompleted ? `🔒 complete ${HEISTS[e.index - 1].name} first` : null;
+        return `**${e.index + 1}.** ${e.heist.name} — **${e.heist.entry} BB** · **${Math.round(e.heist.chance * 100)}%** · **${e.heist.payout} BB** payout\n*${e.heist.description}*${lockReason ? `\n${lockReason}` : ''}`;
+      }).join('\n\n');
+      const embed = new EmbedBuilder().setColor('#FF4500').setTitle('🦹 CHOOSE YOUR HEIST')
+        .setDescription(`${heistDesc}\n\n*Anyone can join a heist. Only leaders need progression unlocked.*`)
+        .setFooter({ text: "Bully's World • Choose wisely." }).setTimestamp();
       const rows = [];
       [availableHeists.slice(0, 3), availableHeists.slice(3, 6)].forEach((chunk, ri) => {
         if (!chunk.length) return;
         rows.push(new ActionRowBuilder().addComponents(chunk.map((h, ci) => new ButtonBuilder().setCustomId(`heist_sel.${ri * 3 + ci}`).setLabel(`${ri * 3 + ci + 1}. ${h.name}`).setStyle(ButtonStyle.Secondary))));
       });
+      if (!availableHeists.length) { await interaction.reply({ content: '🔒 No heists available for you to lead yet. Complete lower-tier heists first or check your role level.', ephemeral: true }); return; }
       heistSelectionPending = { userId, username, channel: interaction.channel, availableHeists };
       setTimeout(() => { if (heistSelectionPending?.userId === userId) heistSelectionPending = null; }, 60000);
       await interaction.reply({ embeds: [embed], components: rows, ephemeral: false });
@@ -2867,6 +2823,13 @@ client.on('interactionCreate', async interaction => {
       const { availableHeists, channel: hCh } = heistSelectionPending;
       if (idx >= availableHeists.length) { await interaction.reply({ content: '❌ Invalid selection.', ephemeral: true }); return; }
       const heist = availableHeists[idx];
+      // Double-check progression (defence against stale menus)
+      if (!isAdmin) {
+        const heistIndex = HEISTS.indexOf(heist);
+        if (heistIndex > 0 && !db.prepare('SELECT 1 FROM heist_completions WHERE user_id = ? AND heist_index = ?').get(userId, heistIndex - 1)) {
+          await interaction.reply({ content: `❌ You need to successfully lead **${HEISTS[heistIndex - 1].name}** before you can lead this one.`, ephemeral: true }); return;
+        }
+      }
       const u = getUser(userId, username);
       if (u.balance < heist.entry) { await interaction.reply({ content: `❌ Need **${heist.entry} BB**. You have **${u.balance} BB**.`, ephemeral: true }); return; }
       spendBB(userId, heist.entry);
@@ -3170,10 +3133,12 @@ client.on('messageCreate', async msg => {
     const today = new Date().toISOString().slice(0, 10);
     const ts = db.prepare("SELECT COUNT(*) as c FROM steal_log WHERE stealer_id = ? AND DATE(created_at) = ?").get(userId, today);
     if (ts.c >= 10) { await msg.reply("You've hit your 10 steal limit for today."); return; }
+    const stealerUser = getUser(userId, username);
+    if (stealerUser.balance <= -50) { await msg.reply("You're too broke to steal. You need to get back above **-50 BB** first."); return; }
   }
   if (hasShield(target.id)) { await msg.reply(`**${target.username}** is shielded.`); return; }
   const targetUser = getUser(target.id, target.username);
-  if (targetUser.balance < 1) { await msg.reply(`**${target.username}** is broke.`); return; }
+  if (targetUser.balance <= 10) { await msg.reply(`**${target.username}** only has **${targetUser.balance} BB**. You can't steal from someone with 10 BB or less.`); return; }
   if (targetUser.balance < stealAmount) { await msg.reply(`**${target.username}** only has **${targetUser.balance} BB**.`); return; }
   db.prepare('INSERT OR REPLACE INTO steal_cooldown (user_id, last_steal) VALUES (?, ?)').run(userId, new Date().toISOString());
   db.prepare('INSERT INTO steal_log (stealer_id, target_id) VALUES (?, ?)').run(userId, target.id);
@@ -3220,6 +3185,14 @@ Click **BLOCK IT** within **${windowSecs} seconds**!`).setFooter({ text: "Bully'
     }
     try { await target.send(`🚨 **${username}** stole **${actualStolen} BB** from you!`); } catch (_) {}
   }
+
+  // Notify stealer how many attempts they have left today (only visible to them)
+  if (!isAdminSteal) {
+    const today2 = new Date().toISOString().slice(0, 10);
+    const used = db.prepare("SELECT COUNT(*) as c FROM steal_log WHERE stealer_id = ? AND DATE(created_at) = ?").get(userId, today2).c;
+    const left = Math.max(0, 10 - used);
+    try { await msg.author.send(`🕵️ You have **${left} steal attempt${left !== 1 ? 's' : ''}** left today.`); } catch (_) {}
+  }
 });
 
 // ============================================================================
@@ -3244,7 +3217,8 @@ client.on('messageCreate', async msg => {
         '`!testreset` — Reset your balance to 0\n' +
         '`!set @user [amount]` — Set a user balance to exact amount\n' +
         '`!resetall` — Set EVERYONE balance to 0 (requires confirm)\n' +
-        '`!giveall [amount]` — Give every member BB (requires confirm)\n\n' +
+        '`!giftall [amount]` — Gift every server member BB (requires confirm)\n' +
+        '`!giveall [amount]` — Give every DB user BB (requires confirm)\n\n' +
         '**CASINO** *(admins bypass hours)*\n' +
         '`!testcasino` — Open casino now\n\n' +
         '**SHOP**\n' +
@@ -3252,7 +3226,15 @@ client.on('messageCreate', async msg => {
         '**HEIST** *(admins bypass cooldowns)*\n' +
         '`!testheiststart` · `!testheistcancel`\n\n' +
         '**OTHER**\n' +
-        '`!testlottery` · `!testchest` · `!testdrop` · `!testcheckin` · `!adminstatus`'
+        '`!testlottery` · `!testchest` · `!testdrop` · `!testcheckin` · `!adminstatus`\n\n' +
+        '**TESTING MODE**\n' +
+        '`!testingmode on` · `!testingmode off`\n\n' +
+        '**CONSTRUCTION ZONE**\n' +
+        '`!servershutdown [time] ["msg"]` — shut down now or at a time\n' +
+        '`!serverrestore` — restore immediately\n' +
+        '`!schedulerestore [time]` — schedule restore\n' +
+        '`!cancelschedule` — cancel scheduled shutdown/restore\n' +
+        '`!constructionstatus` — view construction zone state'
       ).setFooter({ text: "Bully's World Admin" }).setTimestamp();
     await msg.reply({ embeds: [embed] }); return;
   }
@@ -3282,20 +3264,40 @@ client.on('messageCreate', async msg => {
     return;
   }
 
-  // ── !giveall [amount] ──
-  if (lower.startsWith('!giveall ')) {
+  // ── !giftall [amount] — gift every server member (creates records if needed) ──
+  if (lower.startsWith('!giftall ') && !lower.endsWith(' confirm') && !msg.mentions.roles.size) {
     const amount = parseInt(content.split(' ')[1]);
-    if (isNaN(amount) || amount < 1) { await msg.reply('Usage: `!giveall [amount]`'); return; }
-    await msg.reply(`⚠️ Give **${amount} BB** to every user in the DB? Type **!giveall ${amount} confirm** to proceed.`);
+    if (isNaN(amount) || amount < 1) { await msg.reply('Usage: `!giftall [amount]` — gifts every server member. Add **confirm** to proceed.'); return; }
+    const guild = await client.guilds.fetch(CONFIG.GUILD_ID);
+    const members = await guild.members.fetch();
+    const humans = members.filter(m => !m.user.bot);
+    await msg.reply(`⚠️ Gift **${amount} BB** to all **${humans.size}** server members? Type **!giftall ${amount} confirm** to proceed.`);
     return;
   }
+  if (lower.startsWith('!giftall ') && lower.endsWith(' confirm') && !msg.mentions.roles.size) {
+    const amount = parseInt(content.split(' ')[1]);
+    if (isNaN(amount) || amount < 1) { await msg.reply('Usage: `!giftall [amount] confirm`'); return; }
+    const guild = await client.guilds.fetch(CONFIG.GUILD_ID);
+    const members = await guild.members.fetch();
+    const humans = members.filter(m => !m.user.bot);
+    humans.forEach(m => addBB(m.id, m.user.username, amount, 'mass gift from admin'));
+    await msg.reply(`✅ Gifted **${amount} BB** to **${humans.size}** server members.`);
+    return;
+  }
+
+  // ── !giveall [amount] — confirm must be checked FIRST ──
   if (lower.startsWith('!giveall ') && lower.endsWith(' confirm')) {
-    const parts = content.split(' ');
-    const amount = parseInt(parts[1]);
+    const amount = parseInt(content.split(' ')[1]);
     if (isNaN(amount) || amount < 1) { await msg.reply('Usage: `!giveall [amount] confirm`'); return; }
     db.prepare('UPDATE balances SET balance = balance + ?, total_earned = total_earned + ?').run(amount, amount);
     const count = db.prepare('SELECT COUNT(*) as c FROM balances').get()?.c || 0;
     await msg.reply(`✅ Gave **${amount} BB** to **${count}** users.`);
+    return;
+  }
+  if (lower.startsWith('!giveall ')) {
+    const amount = parseInt(content.split(' ')[1]);
+    if (isNaN(amount) || amount < 1) { await msg.reply('Usage: `!giveall [amount]`'); return; }
+    await msg.reply(`⚠️ Give **${amount} BB** to every user in the DB? Type **!giveall ${amount} confirm** to proceed.`);
     return;
   }
 
@@ -3336,6 +3338,9 @@ client.on('messageCreate', async msg => {
     const name = activeHeist.heist.name; activeHeist = null; await cleanupHeistMessages();
     await msg.reply(`✅ **${name}** cancelled and fees refunded.`); return;
   }
+  if (lower === '!testingmode on' || lower === '!testingmodeon') { TESTING_MODE = true; await msg.reply('🔒 Testing mode **ON** — only admins and @tester can use the bot.'); return; }
+  if (lower === '!testingmode off' || lower === '!testingmodeoff') { TESTING_MODE = false; await msg.reply('✅ Testing mode **OFF** — bot is open to everyone.'); return; }
+
   if (lower === '!testlottery') { await msg.reply('🎟️ Triggering lottery...'); await runLottery(); return; }
   if (lower === '!testchest') { await msg.reply('📦 Spawning chest...'); await spawnTreasureChest(); return; }
   if (lower === '!testdrop') { await msg.reply('✨ Triggering drop...'); await postMysteryDrop(); return; }
@@ -3354,6 +3359,195 @@ client.on('messageCreate', async msg => {
         { name: '🛍️ Shop', value: `${activeShop.length} items`, inline: true },
         { name: '🔒 Test Mode', value: TESTING_MODE ? '✅ ON' : '❌ OFF', inline: true },
       ).setFooter({ text: "Bully's World Admin" }).setTimestamp()] }); return;
+  }
+});
+
+// ============================================================================
+// CONSTRUCTION ZONE SYSTEM
+// ============================================================================
+
+const CONSTRUCTION_CHANNEL_ID = process.env.CHANNEL_CONSTRUCTION || '1498196898677395609';
+const _EVERYONE_ID = CONFIG.EVERYONE_ROLE_ID;
+
+let _constructionActive = false;
+let _constructionMsgId  = null;
+let _scheduledStart     = null;
+let _scheduledEnd       = null;
+let _savedOverwrites    = [];
+
+function parseShutdownTime(str) {
+  if (!str) return null;
+  str = str.trim().toLowerCase();
+  let hours, minutes;
+  const ampm = str.match(/^(\d{1,2})(?::(\d{2}))?(am|pm)$/);
+  const mil   = str.match(/^(\d{1,2}):(\d{2})$/);
+  if (ampm) {
+    hours   = parseInt(ampm[1]);
+    minutes = parseInt(ampm[2] || '0');
+    if (ampm[3] === 'pm' && hours !== 12) hours += 12;
+    if (ampm[3] === 'am' && hours === 12) hours = 0;
+  } else if (mil) {
+    hours   = parseInt(mil[1]);
+    minutes = parseInt(mil[2]);
+  } else {
+    return null;
+  }
+  const now = new Date();
+  const fmt = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
+  const p = Object.fromEntries(fmt.formatToParts(now).map(x => [x.type, x.value]));
+  const ctNowHour = parseInt(p.hour === '24' ? '0' : p.hour);
+  const ctNowMin  = parseInt(p.minute);
+  let daysToAdd = (hours < ctNowHour || (hours === ctNowHour && minutes <= ctNowMin)) ? 1 : 0;
+  const dd = String(parseInt(p.day) + daysToAdd).padStart(2, '0');
+  const hh = String(hours).padStart(2, '0');
+  const mm = String(minutes).padStart(2, '0');
+  const isoLike = `${p.year}-${p.month}-${dd}T${hh}:${mm}:00`;
+  const tempDate = new Date(isoLike + 'Z');
+  const tzName = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', timeZoneName: 'shortOffset' }).formatToParts(tempDate).find(x => x.type === 'timeZoneName')?.value || 'GMT-5';
+  const offsetMatch = tzName.match(/GMT([+-])(\d+)(?::(\d+))?/);
+  const offsetHours = offsetMatch ? parseInt(offsetMatch[1] + offsetMatch[2]) : -5;
+  const target = new Date(isoLike + 'Z');
+  target.setUTCHours(target.getUTCHours() - offsetHours);
+  return target;
+}
+
+async function activateConstructionZone(returnMessage) {
+  if (_constructionActive) return;
+  _constructionActive = true;
+  console.log('[Construction] Activating...');
+  try {
+    const guild = await client.guilds.fetch(CONFIG.GUILD_ID);
+    const channels = await guild.channels.fetch();
+    _savedOverwrites = [];
+    for (const [id, ch] of channels) {
+      if (!ch || id === CONSTRUCTION_CHANNEL_ID) continue;
+      const ow = ch.permissionOverwrites?.cache.get(_EVERYONE_ID);
+      _savedOverwrites.push({ channelId: id, allow: ow?.allow?.bitfield ?? 0n, deny: ow?.deny?.bitfield ?? 0n });
+      await ch.permissionOverwrites.edit(_EVERYONE_ID, { ViewChannel: false }).catch(() => {});
+    }
+    const cch = await guild.channels.fetch(CONSTRUCTION_CHANNEL_ID).catch(() => null);
+    if (cch) {
+      await cch.permissionOverwrites.edit(_EVERYONE_ID, { ViewChannel: true, SendMessages: false });
+      const returnStr = returnMessage ? `\n\n🕐 **Expected return:** ${returnMessage}` : '\n\n⏳ We\'ll be back soon. Sit tight.';
+      const embed = new EmbedBuilder().setColor('#FF6B1A').setTitle('🚧  BULLY\'S WORLD IS UNDER CONSTRUCTION')
+        .setDescription('We\'re making some big changes behind the scenes.\n\nThe server will be back up shortly with new updates and improvements.' + returnStr + '\n\nThank you for your patience! 🧡')
+        .setFooter({ text: "Bully's World • Back soon." }).setTimestamp();
+      try { await cch.bulkDelete(10).catch(() => {}); } catch (_) {}
+      const m = await cch.send({ embeds: [embed] });
+      _constructionMsgId = m.id;
+      await m.pin().catch(() => {});
+    }
+    console.log('[Construction] Server shut down.');
+  } catch (err) {
+    console.error('[Construction] Error activating:', err.message);
+    _constructionActive = false;
+  }
+}
+
+async function deactivateConstructionZone() {
+  if (!_constructionActive) return;
+  _constructionActive = false;
+  console.log('[Construction] Restoring...');
+  try {
+    const guild = await client.guilds.fetch(CONFIG.GUILD_ID);
+    for (const saved of _savedOverwrites) {
+      const ch = await guild.channels.fetch(saved.channelId).catch(() => null);
+      if (!ch) continue;
+      await ch.permissionOverwrites.edit(_EVERYONE_ID, { ViewChannel: null }).catch(() => {});
+    }
+    _savedOverwrites = [];
+    const cch = await guild.channels.fetch(CONSTRUCTION_CHANNEL_ID).catch(() => null);
+    if (cch) {
+      await cch.permissionOverwrites.edit(_EVERYONE_ID, { ViewChannel: false });
+      if (_constructionMsgId) {
+        const m = await cch.messages.fetch(_constructionMsgId).catch(() => null);
+        if (m) await m.delete().catch(() => {});
+        _constructionMsgId = null;
+      }
+    }
+    const general = await client.channels.fetch(CONFIG.CHANNELS.GENERAL).catch(() => null);
+    if (general) {
+      const embed = new EmbedBuilder().setColor('#3B6D11').setTitle("🎉 Bully's World is back!")
+        .setDescription("We're back online. Thanks for your patience!\n\nCheck out what's new and get back in the game. 🧡")
+        .setFooter({ text: "Bully's World • We're live." }).setTimestamp();
+      await general.send({ content: '@everyone', embeds: [embed] });
+    }
+    console.log('[Construction] Server restored.');
+  } catch (err) {
+    console.error('[Construction] Error deactivating:', err.message);
+  }
+}
+
+client.on('messageCreate', async msg => {
+  if (msg.author?.bot || !msg.guild) return;
+  const isAdmin = msg.author.id === process.env.OWNER_ID || msg.member?.permissions?.has(PermissionsBitField.Flags.Administrator);
+  if (!isAdmin) return;
+  const raw   = msg.content.trim();
+  const lower = raw.toLowerCase();
+  const parts = raw.split(/\s+/);
+
+  if (lower.startsWith('!servershutdown')) {
+    const quotedMatch = raw.match(/"([^"]+)"/);
+    const returnMessage = quotedMatch ? quotedMatch[1] : null;
+    const timeStr = parts[1] && !parts[1].startsWith('"') ? parts[1] : null;
+    if (timeStr) {
+      const startAt = parseShutdownTime(timeStr);
+      if (!startAt) { await msg.reply('❌ Bad time format. Use: `6:00am`, `11:30pm`, or `14:00`.'); return; }
+      const msUntil = startAt - Date.now();
+      if (_scheduledStart) clearTimeout(_scheduledStart);
+      _scheduledStart = setTimeout(() => activateConstructionZone(returnMessage), msUntil);
+      await msg.reply(`✅ Shutdown scheduled for <t:${Math.floor(startAt.getTime()/1000)}:F> (<t:${Math.floor(startAt.getTime()/1000)}:R>).\nReturn message: *${returnMessage || 'none'}*\n\nCancel with \`!cancelschedule\``);
+    } else {
+      await msg.reply('✅ Activating construction zone now...');
+      await activateConstructionZone(returnMessage);
+    }
+    return;
+  }
+
+  if (lower === '!serverrestore') {
+    if (!_constructionActive) { await msg.reply('❌ Server is not in construction mode.'); return; }
+    await msg.reply('✅ Restoring server...');
+    await deactivateConstructionZone();
+    return;
+  }
+
+  if (lower.startsWith('!schedulerestore')) {
+    const timeStr = parts[1];
+    if (!timeStr) { await msg.reply('Usage: `!schedulerestore 8:00am`'); return; }
+    const endAt = parseShutdownTime(timeStr);
+    if (!endAt) { await msg.reply('❌ Bad time format. Use: `8:00am`, `12:00pm`, or `20:00`.'); return; }
+    if (_scheduledEnd) clearTimeout(_scheduledEnd);
+    _scheduledEnd = setTimeout(() => deactivateConstructionZone(), endAt - Date.now());
+    await msg.reply(`✅ Restore scheduled for <t:${Math.floor(endAt.getTime()/1000)}:F> (<t:${Math.floor(endAt.getTime()/1000)}:R>).\n\nCancel with \`!cancelschedule\``);
+    return;
+  }
+
+  if (lower === '!cancelschedule') {
+    const cancelled = [];
+    if (_scheduledStart) { clearTimeout(_scheduledStart); _scheduledStart = null; cancelled.push('scheduled shutdown'); }
+    if (_scheduledEnd)   { clearTimeout(_scheduledEnd);   _scheduledEnd   = null; cancelled.push('scheduled restore'); }
+    await msg.reply(cancelled.length ? `✅ Cancelled: **${cancelled.join(' and ')}**.` : 'Nothing was scheduled.');
+    return;
+  }
+
+  if (lower === '!constructionstatus') {
+    await msg.reply([
+      `**Construction mode:** ${_constructionActive ? '🚧 ACTIVE' : '✅ Off'}`,
+      `**Scheduled shutdown:** ${_scheduledStart ? '⏳ Pending' : 'None'}`,
+      `**Scheduled restore:**  ${_scheduledEnd   ? '⏳ Pending' : 'None'}`,
+    ].join('\n'));
+    return;
+  }
+});
+
+// Hide construction channel on boot if not active
+client.once('ready', async () => {
+  if (!_constructionActive) {
+    try {
+      const guild = await client.guilds.fetch(CONFIG.GUILD_ID);
+      const cch = await guild.channels.fetch(CONSTRUCTION_CHANNEL_ID).catch(() => null);
+      if (cch) await cch.permissionOverwrites.edit(_EVERYONE_ID, { ViewChannel: false }).catch(() => {});
+    } catch (_) {}
   }
 });
 
