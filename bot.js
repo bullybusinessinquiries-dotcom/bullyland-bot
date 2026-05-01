@@ -2684,8 +2684,9 @@ client.on('messageCreate', async msg => {
   if (msg.author?.bot || !msg.guild) return;
   if (TESTING_MODE && !hasAccess(msg.member)) return;
   if (msg.content.trim().toLowerCase() !== '!bullygames') return;
-  if (CONFIG.CHANNELS.GAMES && msg.channelId !== CONFIG.CHANNELS.GAMES) {
-    const r = await msg.reply(`🎮 Games only run in <#${CONFIG.CHANNELS.GAMES}>. Head over there!`);
+  const GAME_CHANNELS = ['1492571851178901706', '1492228049272438834'];
+  if (!GAME_CHANNELS.includes(msg.channelId)) {
+    const r = await msg.reply(`🎮 Games only run in <#1492571851178901706>. Head over there!`);
     setTimeout(() => r.delete().catch(() => {}), 6000);
     await msg.delete().catch(() => {});
     return;
@@ -2723,8 +2724,9 @@ client.on('interactionCreate', async interaction => {
     customId.startsWith('heist.') || customId.startsWith('casino.') ||
     customId.startsWith('lottery.') || customId.startsWith('slots.') ||
     customId.startsWith('bj.') || customId.startsWith('roulette.') || customId.startsWith('race.');
-  if (isGameInteraction && CONFIG.CHANNELS.GAMES && interaction.channelId !== CONFIG.CHANNELS.GAMES) {
-    await interaction.reply({ content: `🎮 Games only run in <#${CONFIG.CHANNELS.GAMES}>.`, ephemeral: true }); return;
+  const ALLOWED_GAME_CHANNELS = ['1492571851178901706', '1492228049272438834'];
+  if (isGameInteraction && !ALLOWED_GAME_CHANNELS.includes(interaction.channelId)) {
+    await interaction.reply({ content: `🎮 Games only run in <#1492571851178901706>.`, ephemeral: true }); return;
   }
 
   try {
@@ -3196,6 +3198,28 @@ Click **BLOCK IT** within **${windowSecs} seconds**!`).setFooter({ text: "Bully'
 });
 
 // ============================================================================
+// ANNOUNCEMENT SYSTEM
+// ============================================================================
+const ANNOUNCEMENT_CHANNEL_ID = '1353949538393526283';
+const _pendingAnnouncements = new Map(); // userId → { state, text, timer }
+const _announcementQueue = []; // { id, text, postAt, timeoutHandle }
+let _announcementNextId = 1;
+
+function scheduleAnnouncement(text, postAt) {
+  const id = _announcementNextId++;
+  const buildEmbed = (t) => new EmbedBuilder().setColor('#c9a84c').setTitle('📢 Announcement')
+    .setDescription(t).setFooter({ text: "Bully's World" }).setTimestamp();
+  const handle = setTimeout(async () => {
+    const idx = _announcementQueue.findIndex(a => a.id === id);
+    if (idx !== -1) _announcementQueue.splice(idx, 1);
+    const ch = await client.channels.fetch(ANNOUNCEMENT_CHANNEL_ID).catch(() => null);
+    if (ch) await ch.send({ content: '@everyone', embeds: [buildEmbed(text)] });
+  }, postAt - Date.now());
+  _announcementQueue.push({ id, text, postAt, timeoutHandle: handle });
+  return id;
+}
+
+// ============================================================================
 // ADMIN BB CONTROL COMMANDS
 // ============================================================================
 client.on('messageCreate', async msg => {
@@ -3204,6 +3228,95 @@ client.on('messageCreate', async msg => {
   if (!isAdmin) return;
   const content = msg.content.trim();
   const lower = content.toLowerCase();
+
+  // ── Announcement flow — capture mid-session replies before command checks ──
+  if (_pendingAnnouncements.has(msg.author.id) && !lower.startsWith('!')) {
+    const session = _pendingAnnouncements.get(msg.author.id);
+    clearTimeout(session.timer);
+
+    if (session.state === 'awaiting_text') {
+      session.text = content;
+      session.state = 'awaiting_time';
+      session.timer = setTimeout(() => _pendingAnnouncements.delete(msg.author.id), 5 * 60 * 1000);
+      await msg.reply('⏰ When should this be posted?\n\nReply **`now`** to post immediately, or a time like **`6:00pm`** or **`8:30am`** (CT).\n\nType **`cancel`** to abort.');
+      return;
+    }
+
+    if (session.state === 'awaiting_time') {
+      if (lower === 'cancel') {
+        _pendingAnnouncements.delete(msg.author.id);
+        await msg.reply('❌ Announcement cancelled.');
+        return;
+      }
+      const announceCh = await client.channels.fetch(ANNOUNCEMENT_CHANNEL_ID).catch(() => null);
+      if (!announceCh) { _pendingAnnouncements.delete(msg.author.id); await msg.reply('❌ Could not find the announcements channel.'); return; }
+      const buildEmbed = (text) => new EmbedBuilder().setColor('#c9a84c').setTitle('📢 Announcement')
+        .setDescription(text).setFooter({ text: "Bully's World" }).setTimestamp();
+      if (lower === 'now') {
+        _pendingAnnouncements.delete(msg.author.id);
+        await announceCh.send({ content: '@everyone', embeds: [buildEmbed(session.text)] });
+        await msg.reply('✅ Announcement posted!');
+      } else {
+        const postAt = parseShutdownTime(lower);
+        if (!postAt) {
+          session.timer = setTimeout(() => _pendingAnnouncements.delete(msg.author.id), 5 * 60 * 1000);
+          await msg.reply("❌ Couldn't parse that time. Try **`now`**, **`6:00pm`**, or **`14:30`**. Or type **`cancel`** to abort.");
+          return;
+        }
+        _pendingAnnouncements.delete(msg.author.id); // clear session immediately so user can queue another
+        const unix = Math.floor(postAt.getTime() / 1000);
+        const queuedId = scheduleAnnouncement(session.text, postAt);
+        await msg.reply(`✅ Announcement **#${queuedId}** queued for <t:${unix}:F> (<t:${unix}:R>).\nUse \`!announcementqueue\` to view all queued, or \`!cancelannouncement ${queuedId}\` to remove it.`);
+      }
+      return;
+    }
+  }
+
+  // ── !announcement ──
+  if (lower === '!announcement') {
+    if (_pendingAnnouncements.has(msg.author.id)) {
+      const old = _pendingAnnouncements.get(msg.author.id);
+      clearTimeout(old.timer);
+      _pendingAnnouncements.delete(msg.author.id);
+      await msg.reply('Previous announcement session cleared. Starting fresh.\n\n📢 What would you like to announce? Type your message now.\n\nType **`cancel`** at any point to abort.');
+    } else {
+      await msg.reply('📢 What would you like to announce? Type your message now.\n\nType **`cancel`** at any point to abort.');
+    }
+    const timer = setTimeout(() => _pendingAnnouncements.delete(msg.author.id), 5 * 60 * 1000);
+    _pendingAnnouncements.set(msg.author.id, { state: 'awaiting_text', text: null, timer });
+    return;
+  }
+
+  // ── !announcementqueue ──
+  if (lower === '!announcementqueue') {
+    if (_announcementQueue.length === 0) {
+      await msg.reply('📭 No announcements are currently queued.');
+      return;
+    }
+    const lines = _announcementQueue.map(a => {
+      const unix = Math.floor(a.postAt / 1000);
+      const preview = a.text.length > 80 ? a.text.slice(0, 80) + '…' : a.text;
+      return `**#${a.id}** — <t:${unix}:F> (<t:${unix}:R>)\n> ${preview}`;
+    });
+    const embed = new EmbedBuilder().setColor('#c9a84c').setTitle(`📢 Announcement Queue (${_announcementQueue.length})`)
+      .setDescription(lines.join('\n\n'))
+      .setFooter({ text: 'Use !cancelannouncement [id] to remove one' }).setTimestamp();
+    await msg.reply({ embeds: [embed] });
+    return;
+  }
+
+  // ── !cancelannouncement [id] ──
+  if (lower.startsWith('!cancelannouncement')) {
+    const parts = lower.split(' ');
+    const id = parseInt(parts[1], 10);
+    if (isNaN(id)) { await msg.reply('Usage: `!cancelannouncement [id]` — get IDs from `!announcementqueue`'); return; }
+    const idx = _announcementQueue.findIndex(a => a.id === id);
+    if (idx === -1) { await msg.reply(`❌ No queued announcement with ID **#${id}**.`); return; }
+    clearTimeout(_announcementQueue[idx].timeoutHandle);
+    _announcementQueue.splice(idx, 1);
+    await msg.reply(`✅ Announcement **#${id}** cancelled and removed from the queue.`);
+    return;
+  }
 
   // ── !adminhelp ──
   if (lower === '!adminhelp') {
@@ -3227,6 +3340,10 @@ client.on('messageCreate', async msg => {
         '`!testheiststart` · `!testheistcancel`\n\n' +
         '**OTHER**\n' +
         '`!testlottery` · `!testchest` · `!testdrop` · `!testcheckin` · `!adminstatus`\n\n' +
+        '**ANNOUNCEMENTS**\n' +
+        '`!announcement` — Start a new announcement (text → time → queued)\n' +
+        '`!announcementqueue` — View all scheduled announcements with IDs\n' +
+        '`!cancelannouncement [id]` — Cancel a queued announcement by ID\n\n' +
         '**TESTING MODE**\n' +
         '`!testingmode on` · `!testingmode off`\n\n' +
         '**CONSTRUCTION ZONE**\n' +
