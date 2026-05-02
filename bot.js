@@ -1242,7 +1242,7 @@ client.on('messageCreate', async(message) => {
         `**How heists work:**\nOne member leads and picks the heist. Others join by clicking the button and choosing a role. Each member pays an entry fee. The crew has 2 minutes to fill before the heist launches automatically.\n\n` +
         `**Minimum crew:** 2 members (leader + 1). Max: 5.\n\n` +
         `**Odds improve with crew size:** +3% success chance per extra member, up to +20% total.\n\n` +
-        `**Level bonus:** Members who have earned 1,000+ BB add +2% each to the odds.\n\n` +
+        `**Level bonus:** The higher your server level, the more you contribute to the crew's odds. Each high-level member adds +2% to the success chance.\n\n` +
         `**On success:** The payout is split evenly across all crew members.\n**On failure:** Entry fees are lost — no refunds for a busted heist.\n**On cancel:** All entry fees are refunded.\n\n` +
         `**Leader progression:** To lead a heist, you must have successfully led the one before it. Anyone can *join* any heist regardless of progression.\n\n` +
         `─────────────────────\n\n` +
