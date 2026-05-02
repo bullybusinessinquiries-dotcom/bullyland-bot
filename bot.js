@@ -1,4 +1,5 @@
 require('dotenv').config();
+const path = require('path');
 let stripe = null;
 try { const Stripe = require('stripe'); stripe = Stripe(process.env.STRIPE_SECRET_KEY); } catch(e) { console.log('[Stripe] Not installed — auction payments disabled.'); }
 const Anthropic = require('@anthropic-ai/sdk');
@@ -23,7 +24,7 @@ const client = new Client({
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 // ─── DATABASE ──────────────────────────────────────────────────────────────
-const db = new Database('bullyland.db');
+const db = new Database(path.join(__dirname, 'bullyland.db'));
 db.exec(`
   CREATE TABLE IF NOT EXISTS balances (
     user_id TEXT PRIMARY KEY, username TEXT,
@@ -3169,6 +3170,13 @@ client.on('messageCreate', async msg => {
   if (msg.author?.bot || !msg.guild) return;
   if (TESTING_MODE && !hasAccess(msg.member)) return;
   if (!msg.content.trim().toLowerCase().startsWith('!steal ')) return;
+  const STEAL_ALLOWED = ['1492571851178901706', '1492228049272438834'];
+  if (!STEAL_ALLOWED.includes(msg.channelId)) {
+    const r = await msg.reply(`🎮 Head to <#1492571851178901706> to use bot commands.`);
+    setTimeout(() => r.delete().catch(() => {}), 5000);
+    await msg.delete().catch(() => {});
+    return;
+  }
   const parts = msg.content.trim().split(' ');
   const target = msg.mentions.users.first();
   const stealAmount = parseInt(parts[2]);
