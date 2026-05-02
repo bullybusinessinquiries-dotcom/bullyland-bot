@@ -243,6 +243,7 @@ let shopRefreshTime = null;
 let activeCasino = false;
 let dropsEnabled = true;
 let lastShopMessageId = null;
+let lastLeaderboardMessageId = null;
 
 // ─── DB HELPERS ────────────────────────────────────────────────────────────
 function getUser(userId, username) {
@@ -589,7 +590,10 @@ async function refreshShop() {
     return;
   }
   const msg = await postShopEmbed(channel);
-  if (msg) lastShopMessageId = msg.id;
+  if (msg) {
+    lastShopMessageId = msg.id;
+    setTimeout(() => msg.delete().catch(() => {}), 12 * 60 * 60 * 1000);
+  }
 }
 
 async function postShopEmbed(channel) {
@@ -666,6 +670,27 @@ async function doMonthlyReset() {
     .setFooter({text:"Bully's World • The top spot is up for grabs again."}).setTimestamp();
   await channel.send({ embeds: [embed] });
   db.prepare('DELETE FROM monthly_earnings WHERE month = ?').run(month);
+}
+
+async function postDailyLeaderboard() {
+  const channel = await client.channels.fetch(CONFIG.CHANNELS.LEADERBOARD).catch(() => null);
+  if (!channel) return;
+  // Delete previous daily leaderboard embed
+  if (lastLeaderboardMessageId) {
+    const old = await channel.messages.fetch(lastLeaderboardMessageId).catch(() => null);
+    if (old) await old.delete().catch(() => {});
+    lastLeaderboardMessageId = null;
+  }
+  const month = new Date().toISOString().slice(0, 7);
+  const top = db.prepare('SELECT * FROM monthly_earnings WHERE month = ? ORDER BY earned_this_month DESC LIMIT 10').all(month);
+  if (!top.length) return;
+  const embed = new EmbedBuilder().setColor('#c9a84c').setTitle('📊 Monthly Leaderboard')
+    .setDescription(top.map((u, i) => `${i + 1}. ${u.username} — ${u.earned_this_month} BB`).join('\n') + '\n\nTop earner at month end wins the **BIG BALLER💴** role + bonus BB.')
+    .setFooter({ text: "Bully's World • Come for that top spot." }).setTimestamp();
+  const msg = await channel.send({ embeds: [embed] });
+  lastLeaderboardMessageId = msg.id;
+  // Auto-delete after 24 hours (replaced by next morning's post)
+  setTimeout(() => msg.delete().catch(() => {}), 24 * 60 * 60 * 1000);
 }
 
 // ─── GIVEAWAY CHANNEL VISIBILITY ──────────────────────────────────────────
@@ -1197,10 +1222,10 @@ client.on('messageCreate', async(message) => {
   }
 
   // ── !shop ──
-  // !shop — show current rotating shop inline
   if (content === '!shop') {
-    if (!activeShopRoles.length) { await message.reply('The shop is loading. Check back shortly.'); return; }
-    await postShopEmbed(message.channel);
+    const r = await message.reply(`🛍️ Check out <#1490066033250406511> to see the current store!`);
+    setTimeout(() => r.delete().catch(() => {}), 6000);
+    await message.delete().catch(() => {});
     return;
   }
 
@@ -1241,9 +1266,9 @@ client.on('messageCreate', async(message) => {
 
   // !buy redirect
   if (content.startsWith('!buy')) {
-    const r = await message.reply('🛍️ The shop is now fully button-based! Use **!shop** or visit the shop channel to browse and buy.');
-    setTimeout(() => r.delete().catch(() => {}), 8000);
-    setTimeout(() => message.delete().catch(() => {}), 8000);
+    const r = await message.reply(`🛍️ Head to <#1490066033250406511> to browse and buy!`);
+    setTimeout(() => r.delete().catch(() => {}), 6000);
+    await message.delete().catch(() => {});
     return;
   }
 
@@ -2492,6 +2517,7 @@ function startScheduler() {
   });
   schedule.scheduleJob('0 */12 * * *', ()=>refreshShop());
   schedule.scheduleJob({ rule:'0 0 1 * *', tz:CONFIG.TIMEZONE }, ()=>doMonthlyReset());
+  schedule.scheduleJob({ rule:'0 6 * * *', tz:CONFIG.TIMEZONE }, ()=>postDailyLeaderboard());
   // Weekly lottery draw — Sunday at 8pm CT
   schedule.scheduleJob({ rule: '0 20 * * 0', tz: CONFIG.TIMEZONE }, () => runLottery());
 
@@ -3245,6 +3271,63 @@ function scheduleAnnouncement(text, postAt, mention) {
   return id;
 }
 
+// ── DM BLAST SYSTEM ──────────────────────────────────────────────────────────
+const _pendingDMs = new Map(); // userId → { state, text, recipientIds, recipientLabel, timer }
+const _dmQueue = []; // { id, text, recipientIds, recipientLabel, adminId, postAt, timeoutHandle }
+let _dmNextId = 1;
+
+async function resolveRecipients(guild, msg) {
+  const lower = msg.content.trim().toLowerCase();
+  if (lower === '@everyone') {
+    const members = await guild.members.fetch();
+    return { ids: members.filter(m => !m.user.bot).map(m => m.user.id), label: '@everyone' };
+  }
+  if (msg.mentions.roles.size > 0) {
+    await guild.members.fetch();
+    const ids = new Set();
+    const names = [];
+    msg.mentions.roles.forEach(role => {
+      names.push(role.name);
+      role.members.filter(m => !m.user.bot).forEach(m => ids.add(m.user.id));
+    });
+    return { ids: [...ids], label: names.map(n => `@${n}`).join(', ') };
+  }
+  if (msg.mentions.users.size > 0) {
+    const users = msg.mentions.users.filter(u => !u.bot);
+    return { ids: [...users.values()].map(u => u.id), label: `${users.size} specific user${users.size !== 1 ? 's' : ''}` };
+  }
+  return null;
+}
+
+async function executeDMBlast(text, recipientIds, adminId) {
+  let sent = 0, failed = 0;
+  const embed = new EmbedBuilder().setColor('#c9a84c').setTitle("📬 Message from Bully's World")
+    .setDescription(text).setFooter({ text: "Bully's World" }).setTimestamp();
+  for (const uid of recipientIds) {
+    try {
+      const user = await client.users.fetch(uid);
+      await user.send({ embeds: [embed] });
+      sent++;
+    } catch (_) { failed++; }
+    await new Promise(r => setTimeout(r, 300)); // stay within rate limits
+  }
+  try {
+    const admin = await client.users.fetch(adminId);
+    await admin.send(`✅ DM blast complete: **${sent}** delivered, **${failed}** failed (DMs closed).`);
+  } catch (_) {}
+}
+
+function scheduleDMBlast(text, recipientIds, recipientLabel, adminId, postAt) {
+  const id = _dmNextId++;
+  const handle = setTimeout(async () => {
+    const idx = _dmQueue.findIndex(d => d.id === id);
+    if (idx !== -1) _dmQueue.splice(idx, 1);
+    await executeDMBlast(text, recipientIds, adminId);
+  }, postAt - Date.now());
+  _dmQueue.push({ id, text, recipientIds, recipientLabel, adminId, postAt, timeoutHandle: handle });
+  return id;
+}
+
 // ============================================================================
 // ADMIN BB CONTROL COMMANDS
 // ============================================================================
@@ -3312,6 +3395,57 @@ client.on('messageCreate', async msg => {
     }
   }
 
+  // ── DM blast flow — capture mid-session replies ──
+  if (_pendingDMs.has(msg.author.id) && !lower.startsWith('!')) {
+    const session = _pendingDMs.get(msg.author.id);
+    clearTimeout(session.timer);
+
+    if (session.state === 'awaiting_text') {
+      session.text = msg.content.trim();
+      session.state = 'awaiting_recipients';
+      session.timer = setTimeout(() => _pendingDMs.delete(msg.author.id), 5 * 60 * 1000);
+      await msg.reply('📋 Who should receive this DM?\n\nReply **`@everyone`**, a role mention like **`@Rookie`**, or tag specific users.\n\nType **`cancel`** to abort.');
+      return;
+    }
+
+    if (session.state === 'awaiting_recipients') {
+      if (lower === 'cancel') { _pendingDMs.delete(msg.author.id); await msg.reply('❌ DM blast cancelled.'); return; }
+      const result = await resolveRecipients(msg.guild, msg);
+      if (!result || result.ids.length === 0) {
+        session.timer = setTimeout(() => _pendingDMs.delete(msg.author.id), 5 * 60 * 1000);
+        await msg.reply("❌ Couldn't identify any recipients. Use `@everyone`, a role mention, or tag specific users. Type `cancel` to abort.");
+        return;
+      }
+      session.recipientIds = result.ids;
+      session.recipientLabel = result.label;
+      session.state = 'awaiting_time';
+      session.timer = setTimeout(() => _pendingDMs.delete(msg.author.id), 5 * 60 * 1000);
+      await msg.reply(`✅ Recipients: **${result.label}** (${result.ids.length} member${result.ids.length !== 1 ? 's' : ''})\n\n⏰ When should this be sent?\n\nReply **\`now\`** to send immediately, or a time like **\`6:00pm\`** or **\`8:30am\`** (CT).\n\nType **\`cancel\`** to abort.`);
+      return;
+    }
+
+    if (session.state === 'awaiting_time') {
+      if (lower === 'cancel') { _pendingDMs.delete(msg.author.id); await msg.reply('❌ DM blast cancelled.'); return; }
+      if (lower === 'now') {
+        _pendingDMs.delete(msg.author.id);
+        await msg.reply(`📨 Sending DMs to **${session.recipientLabel}** (${session.recipientIds.length} member${session.recipientIds.length !== 1 ? 's' : ''})...`);
+        executeDMBlast(session.text, session.recipientIds, msg.author.id);
+      } else {
+        const postAt = parseShutdownTime(lower);
+        if (!postAt) {
+          session.timer = setTimeout(() => _pendingDMs.delete(msg.author.id), 5 * 60 * 1000);
+          await msg.reply("❌ Couldn't parse that time. Try **`now`**, **`6:00pm`**, or **`14:30`**. Or type **`cancel`** to abort.");
+          return;
+        }
+        _pendingDMs.delete(msg.author.id);
+        const unix = Math.floor(postAt.getTime() / 1000);
+        const queuedId = scheduleDMBlast(session.text, session.recipientIds, session.recipientLabel, msg.author.id, postAt);
+        await msg.reply(`✅ DM blast **#${queuedId}** scheduled for <t:${unix}:F> (<t:${unix}:R>) → **${session.recipientLabel}** (${session.recipientIds.length} members).\nUse \`!dmqueue\` to view all queued, or \`!canceldm ${queuedId}\` to remove it.`);
+      }
+      return;
+    }
+  }
+
   // ── !announcement ──
   if (lower === '!announcement') {
     if (_pendingAnnouncements.has(msg.author.id)) {
@@ -3358,6 +3492,48 @@ client.on('messageCreate', async msg => {
     return;
   }
 
+  // ── !dm ──
+  if (lower === '!dm') {
+    if (_pendingDMs.has(msg.author.id)) {
+      const old = _pendingDMs.get(msg.author.id);
+      clearTimeout(old.timer);
+      _pendingDMs.delete(msg.author.id);
+      await msg.reply('Previous DM session cleared. Starting fresh.\n\n📬 What message would you like to send? Type it now.\n\nType **`cancel`** at any point to abort.');
+    } else {
+      await msg.reply('📬 What message would you like to DM? Type it now.\n\nType **`cancel`** at any point to abort.');
+    }
+    const timer = setTimeout(() => _pendingDMs.delete(msg.author.id), 5 * 60 * 1000);
+    _pendingDMs.set(msg.author.id, { state: 'awaiting_text', text: null, recipientIds: [], recipientLabel: '', timer });
+    return;
+  }
+
+  // ── !dmqueue ──
+  if (lower === '!dmqueue') {
+    if (_dmQueue.length === 0) { await msg.reply('📭 No DM blasts are currently queued.'); return; }
+    const lines = _dmQueue.map(d => {
+      const unix = Math.floor(d.postAt / 1000);
+      const preview = d.text.length > 60 ? d.text.slice(0, 60) + '…' : d.text;
+      return `**#${d.id}** → **${d.recipientLabel}** (${d.recipientIds.length}) — <t:${unix}:F> (<t:${unix}:R>)\n> ${preview}`;
+    });
+    const embed = new EmbedBuilder().setColor('#c9a84c').setTitle(`📬 DM Queue (${_dmQueue.length})`)
+      .setDescription(lines.join('\n\n'))
+      .setFooter({ text: 'Use !canceldm [id] to remove one' }).setTimestamp();
+    await msg.reply({ embeds: [embed] });
+    return;
+  }
+
+  // ── !canceldm [id] ──
+  if (lower.startsWith('!canceldm')) {
+    const id = parseInt(lower.split(' ')[1], 10);
+    if (isNaN(id)) { await msg.reply('Usage: `!canceldm [id]` — get IDs from `!dmqueue`'); return; }
+    const idx = _dmQueue.findIndex(d => d.id === id);
+    if (idx === -1) { await msg.reply(`❌ No queued DM blast with ID **#${id}**.`); return; }
+    clearTimeout(_dmQueue[idx].timeoutHandle);
+    _dmQueue.splice(idx, 1);
+    await msg.reply(`✅ DM blast **#${id}** cancelled and removed from the queue.`);
+    return;
+  }
+
   // ── !adminhelp ──
   if (lower === '!adminhelp') {
     const embed = new EmbedBuilder().setColor('#FF4500').setTitle('🛠️ Admin Commands')
@@ -3381,9 +3557,13 @@ client.on('messageCreate', async msg => {
         '**OTHER**\n' +
         '`!testlottery` · `!testchest` · `!testdrop` · `!testcheckin` · `!adminstatus`\n\n' +
         '**ANNOUNCEMENTS**\n' +
-        '`!announcement` — Start a new announcement (text → time → queued)\n' +
+        '`!announcement` — Start a new announcement (text → mention → time → queued)\n' +
         '`!announcementqueue` — View all scheduled announcements with IDs\n' +
         '`!cancelannouncement [id]` — Cancel a queued announcement by ID\n\n' +
+        '**DM BLASTS**\n' +
+        '`!dm` — DM a group (text → recipients → time → queued)\n' +
+        '`!dmqueue` — View all scheduled DM blasts with IDs\n' +
+        '`!canceldm [id]` — Cancel a queued DM blast by ID\n\n' +
         '**TESTING MODE**\n' +
         '`!testingmode on` · `!testingmode off`\n\n' +
         '**CONSTRUCTION ZONE**\n' +
