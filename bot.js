@@ -1097,6 +1097,32 @@ client.on('messageCreate', async(message) => {
   const userId = message.author.id, username = message.author.username;
   const content = message.content.trim().toLowerCase();
 
+  // ── Channel gate — restrict commands to designated channels ──
+  if (content.startsWith('!')) {
+    const cid = message.channelId;
+    const inGameChannel = ['1492571851178901706', '1492228049272438834'].includes(cid);
+    const inLobby = cid === '1352881884769550336';
+    const inMysteryDrops = cid === process.env.CHANNEL_MYSTERY_DROPS;
+    if (inGameChannel) {
+      // all commands allowed
+    } else if (inLobby) {
+      const cmd = content.split(' ')[0];
+      if (!['!help', '!feedback', '!checkin'].includes(cmd)) {
+        const r = await message.reply(`🎮 Head to <#1492571851178901706> to use bot commands.`);
+        setTimeout(() => r.delete().catch(() => {}), 5000);
+        await message.delete().catch(() => {});
+        return;
+      }
+    } else if (inMysteryDrops) {
+      // pass through — !claim handles its own channel check
+    } else {
+      const r = await message.reply(`🎮 Head to <#1492571851178901706> to use bot commands.`);
+      setTimeout(() => r.delete().catch(() => {}), 5000);
+      await message.delete().catch(() => {});
+      return;
+    }
+  }
+
   // Passive BB
   const user = getUser(userId, username);
   const lastMsg = user.last_message ? new Date(user.last_message).getTime() : 0;
@@ -3205,7 +3231,7 @@ const _pendingAnnouncements = new Map(); // userId → { state, text, timer }
 const _announcementQueue = []; // { id, text, postAt, timeoutHandle }
 let _announcementNextId = 1;
 
-function scheduleAnnouncement(text, postAt) {
+function scheduleAnnouncement(text, postAt, mention) {
   const id = _announcementNextId++;
   const buildEmbed = (t) => new EmbedBuilder().setColor('#c9a84c').setTitle('📢 Announcement')
     .setDescription(t).setFooter({ text: "Bully's World" }).setTimestamp();
@@ -3213,9 +3239,9 @@ function scheduleAnnouncement(text, postAt) {
     const idx = _announcementQueue.findIndex(a => a.id === id);
     if (idx !== -1) _announcementQueue.splice(idx, 1);
     const ch = await client.channels.fetch(ANNOUNCEMENT_CHANNEL_ID).catch(() => null);
-    if (ch) await ch.send({ content: '@everyone', embeds: [buildEmbed(text)] });
+    if (ch) await ch.send({ content: mention || '', embeds: [buildEmbed(text)] });
   }, postAt - Date.now());
-  _announcementQueue.push({ id, text, postAt, timeoutHandle: handle });
+  _announcementQueue.push({ id, text, postAt, mention, timeoutHandle: handle });
   return id;
 }
 
@@ -3235,7 +3261,20 @@ client.on('messageCreate', async msg => {
     clearTimeout(session.timer);
 
     if (session.state === 'awaiting_text') {
-      session.text = content;
+      session.text = msg.content.trim(); // preserve original casing
+      session.state = 'awaiting_mention';
+      session.timer = setTimeout(() => _pendingAnnouncements.delete(msg.author.id), 5 * 60 * 1000);
+      await msg.reply('🔔 Who should be mentioned?\n\nReply **`@everyone`**, **`@here`**, a role mention, or **`none`** for no ping.\n\nType **`cancel`** to abort.');
+      return;
+    }
+
+    if (session.state === 'awaiting_mention') {
+      if (lower === 'cancel') {
+        _pendingAnnouncements.delete(msg.author.id);
+        await msg.reply('❌ Announcement cancelled.');
+        return;
+      }
+      session.mention = lower === 'none' ? '' : msg.content.trim();
       session.state = 'awaiting_time';
       session.timer = setTimeout(() => _pendingAnnouncements.delete(msg.author.id), 5 * 60 * 1000);
       await msg.reply('⏰ When should this be posted?\n\nReply **`now`** to post immediately, or a time like **`6:00pm`** or **`8:30am`** (CT).\n\nType **`cancel`** to abort.');
@@ -3252,9 +3291,10 @@ client.on('messageCreate', async msg => {
       if (!announceCh) { _pendingAnnouncements.delete(msg.author.id); await msg.reply('❌ Could not find the announcements channel.'); return; }
       const buildEmbed = (text) => new EmbedBuilder().setColor('#c9a84c').setTitle('📢 Announcement')
         .setDescription(text).setFooter({ text: "Bully's World" }).setTimestamp();
+      const mention = session.mention || '';
       if (lower === 'now') {
         _pendingAnnouncements.delete(msg.author.id);
-        await announceCh.send({ content: '@everyone', embeds: [buildEmbed(session.text)] });
+        await announceCh.send({ content: mention, embeds: [buildEmbed(session.text)] });
         await msg.reply('✅ Announcement posted!');
       } else {
         const postAt = parseShutdownTime(lower);
@@ -3265,7 +3305,7 @@ client.on('messageCreate', async msg => {
         }
         _pendingAnnouncements.delete(msg.author.id); // clear session immediately so user can queue another
         const unix = Math.floor(postAt.getTime() / 1000);
-        const queuedId = scheduleAnnouncement(session.text, postAt);
+        const queuedId = scheduleAnnouncement(session.text, postAt, mention);
         await msg.reply(`✅ Announcement **#${queuedId}** queued for <t:${unix}:F> (<t:${unix}:R>).\nUse \`!announcementqueue\` to view all queued, or \`!cancelannouncement ${queuedId}\` to remove it.`);
       }
       return;
