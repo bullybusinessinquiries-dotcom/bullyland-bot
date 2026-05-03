@@ -873,7 +873,7 @@ client.on('messageReactionAdd', async (reaction, user) => {
   if (reaction.message.id !== activeChest.messageId) return;
   if (reaction.emoji.name !== '🧡') return;
 
-  const { tier, messageId } = activeChest;
+  const { tier, generalChannelId, generalAnnouncementMsgId } = activeChest;
   activeChest = null;
 
   const amount = Math.floor(Math.random() * (tier.max - tier.min + 1)) + tier.min;
@@ -883,27 +883,26 @@ client.on('messageReactionAdd', async (reaction, user) => {
 
   addBB(user.id, user.username, amount, `treasure chest — ${tier.name}`);
 
-  const wonEmbed = new EmbedBuilder().setColor(tier.color)
-    .setTitle(`${tier.emoji} ${tier.name} Chest Claimed!`)
-    .setDescription(`**${user.username}** found the treasure chest and claimed **${amount} BB**!
+  // Delete the chest message in the hidden channel
+  await reaction.message.delete().catch(()=>{});
 
-Quick eyes. Quick moves.`)
-    .setFooter({text:"Bully's World • The riches are theirs."}).setTimestamp();
+  // Delete the general "chest appeared" announcement
+  if (generalChannelId && generalAnnouncementMsgId) {
+    const general = await client.channels.fetch(generalChannelId).catch(()=>null);
+    if (general) {
+      const announcementMsg = await general.messages.fetch(generalAnnouncementMsgId).catch(()=>null);
+      if (announcementMsg) await announcementMsg.delete().catch(()=>{});
 
-  const channel = await client.channels.fetch(reaction.message.channelId).catch(()=>null);
-  await reaction.message.edit({ embeds: [wonEmbed] }).catch(()=>{});
-  await reaction.message.reactions.removeAll().catch(()=>{});
-
-  // Announce in general
-  const general = await client.channels.fetch(CONFIG.CHANNELS.GENERAL).catch(()=>null);
-  if (general) {
-    await general.send({
-      embeds: [new EmbedBuilder().setColor(tier.color)
-        .setTitle(`${tier.emoji} Treasure Chest Claimed!`)
-        .setDescription(`<@${user.id}> found the **${tier.name}** treasure chest and walked away with **${amount} BB**!`)
-        .setFooter({text:"Bully's World • Keep exploring."}).setTimestamp()
-      ]
-    });
+      // Post winner notice and auto-delete after 20 seconds
+      const winnerMsg = await general.send({
+        embeds: [new EmbedBuilder().setColor(tier.color)
+          .setTitle(`${tier.emoji} Treasure Chest Claimed!`)
+          .setDescription(`<@${user.id}> found the **${tier.name}** treasure chest and walked away with **${amount} BB**!`)
+          .setFooter({text:"Bully's World • Keep exploring."}).setTimestamp()
+        ]
+      }).catch(()=>null);
+      if (winnerMsg) setTimeout(() => winnerMsg.delete().catch(()=>{}), 20000);
+    }
   }
 });
 
@@ -1950,10 +1949,11 @@ async function spawnTreasureChest() {
 
   const expiresAt = Date.now() + 30 * 60 * 1000;
 
-  // Announce in general chat
+  // Announce in general chat — track message for cleanup on claim
   const general = await client.channels.fetch(CONFIG.CHANNELS.GENERAL).catch(()=>null);
+  let generalAnnouncementMsgId = null;
   if (general) {
-    await general.send({
+    const generalMsg = await general.send({
       embeds: [new EmbedBuilder().setColor(tier.color)
         .setTitle('📦 A treasure chest has appeared in BULLYLAND!')
         .setDescription(`A **${tier.name}** treasure chest has been hidden somewhere in the server...
@@ -1964,6 +1964,7 @@ Find it and react with 🧡 to claim the riches!
         .setFooter({text:"Bully's World • Explore the server to find it."}).setTimestamp()
       ]
     });
+    generalAnnouncementMsgId = generalMsg.id;
   }
 
   // Post chest in the hidden channel
@@ -1979,7 +1980,7 @@ React with 🧡 to claim it!
   const chestMsg = await channel.send({ embeds: [chestEmbed] });
   await chestMsg.react('🧡').catch(()=>{});
 
-  activeChest = { messageId: chestMsg.id, channelId, tier, expiresAt };
+  activeChest = { messageId: chestMsg.id, channelId, tier, expiresAt, generalChannelId: CONFIG.CHANNELS.GENERAL, generalAnnouncementMsgId };
 
   // Auto expire after 30 minutes
   setTimeout(async () => {
