@@ -272,14 +272,23 @@ function getUser(userId, username) {
   return user;
 }
 function addBB(userId, username, amount, reason) {
-  getUser(userId, username);
-  db.prepare('UPDATE balances SET balance = balance + ?, total_earned = total_earned + ?, username = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?').run(amount, amount > 0 ? amount : 0, username, userId);
-  db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(userId, amount, reason);
-  if (amount > 0) {
-    const month = new Date().toISOString().slice(0,7);
-    const ex = db.prepare('SELECT * FROM monthly_earnings WHERE user_id = ? AND month = ?').get(userId, month);
-    if (ex) db.prepare('UPDATE monthly_earnings SET earned_this_month = earned_this_month + ?, username = ? WHERE user_id = ? AND month = ?').run(amount, username, userId, month);
-    else db.prepare('INSERT INTO monthly_earnings (user_id, username, earned_this_month, month) VALUES (?, ?, ?, ?)').run(userId, username, amount, month);
+  try {
+    getUser(userId, username);
+    db.prepare('UPDATE balances SET balance = balance + ?, total_earned = total_earned + ?, username = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?').run(amount, amount > 0 ? amount : 0, username, userId);
+    db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(userId, amount, reason);
+    if (amount > 0) {
+      const month = new Date().toISOString().slice(0,7);
+      // UPSERT: same month → accumulate; old month → reset; no row → insert
+      db.prepare(`
+        INSERT INTO monthly_earnings (user_id, username, earned_this_month, month) VALUES (?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+          earned_this_month = CASE WHEN month = excluded.month THEN earned_this_month + excluded.earned_this_month ELSE excluded.earned_this_month END,
+          month = excluded.month,
+          username = excluded.username
+      `).run(userId, username, amount, month);
+    }
+  } catch (err) {
+    console.error(`[addBB] Error for ${userId} (${username}): ${err.message}`);
   }
 }
 function spendBB(userId, amount) {
