@@ -27,7 +27,6 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'bullyland.db');
 const db = new Database(DB_PATH);
 console.log(`\n[DB] Using database: ${DB_PATH}`);
-{ const count = db.prepare('SELECT COUNT(*) as c FROM balances').get()?.c ?? '?'; console.log(`[DB] Users loaded: ${count}`); }
 db.exec(`
   CREATE TABLE IF NOT EXISTS balances (
     user_id TEXT PRIMARY KEY, username TEXT,
@@ -148,6 +147,9 @@ db.exec(`
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
   );
 `);
+
+// Integrity check — runs after tables are guaranteed to exist
+{ const count = db.prepare('SELECT COUNT(*) as c FROM balances').get()?.c ?? 0; console.log(`[DB] Users in database: ${count}${count === 0 ? ' ⚠️  (empty — check DB_PATH if this is unexpected)' : ''}`); }
 
 // ─── CONFIG ────────────────────────────────────────────────────────────────
 const CONFIG = {
