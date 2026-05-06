@@ -173,8 +173,8 @@ const CONFIG = {
   },
 
   // Bully Bucks
-  MESSAGE_BB: 3,
-  MESSAGE_COOLDOWN_MS: 30 * 1000,
+  MESSAGE_BB: 5,
+  MESSAGE_COOLDOWN_MS: 5 * 1000,
   CHECKIN_WINDOW_MS: 3 * 60 * 1000,
   CHECKIN_BASE: 25,
   STREAK_TIERS: [
@@ -488,7 +488,7 @@ async function postCheckin() {
     .setDescription(`Type **!checkin** in the next **3 minutes** to claim your daily Bully Bucks.\n\nDon't miss it — your streak is on the line.`)
     .addFields({name:'Expires',value:`<t:${Math.floor(expiresAt/1000)}:R>`,inline:true})
     .setFooter({text:"Bully's World • Show up every day."}).setTimestamp();
-  const msg = await channel.send({ content: '@everyone', embeds: [embed] });
+  const msg = await channel.send({ content: '@here', embeds: [embed] });
   activeCheckin = { messageId: msg.id, expiresAt, claimedUsers: new Set(), expired: false };
   setTimeout(async () => {
     if (activeCheckin && !activeCheckin.expired && activeCheckin.messageId === msg.id) {
@@ -943,19 +943,19 @@ client.on('guildMemberAdd', async(member) => {
   } catch { console.log(`[Welcome DM] Could not DM ${member.user.username}`); }
 });
 
-async function cleanupHeistMessages() {
-  if (!heistMessages.length) return;
-  await Promise.all(heistMessages.map(m => m.delete().catch(()=>{})));
-  heistMessages = [];
+async function cleanupHeistMessages(heistId) {
+  const msgs = heistMessageMap.get(heistId) || [];
+  await Promise.all(msgs.map(m => m.delete().catch(() => {})));
+  heistMessageMap.delete(heistId);
 }
 
-async function executeHeist(channelArg) {
-  if (!activeHeist) return;
-  const { heist, crew } = activeHeist;
-  // Fetch channel fresh or use stored one from activeHeist
-  const channel = activeHeist.channel || channelArg || await client.channels.fetch(CONFIG.CHANNELS.GENERAL).catch(()=>null);
-  activeHeist = null;
-  heistTimer = null;
+async function executeHeist(heistId, channelArg) {
+  const hData = activeHeists.get(heistId);
+  if (!hData) return;
+  const { heist, crew } = hData;
+  const channel = hData.channel || channelArg || await client.channels.fetch(CONFIG.CHANNELS.GENERAL).catch(() => null);
+  activeHeists.delete(heistId);
+  heistTimers.delete(heistId);
   console.log(`[Heist] Executing: ${heist.name} with ${crew.length} crew members`);
 
   if (crew.length < 2) {
@@ -974,7 +974,7 @@ async function executeHeist(channelArg) {
     const u = getUser(member.id, member.username);
     if (u.total_earned > 1000) successChance += 0.02;
   }
-  successChance = Math.min(successChance, heist.chance + 0.20); // Cap at +20%
+  successChance = Math.min(successChance, heist.chance + 0.25); // Cap at +25%
 
   const success = Math.random() < successChance;
   const crewList = crew.map(m => m.username).join(', ');
@@ -1088,7 +1088,7 @@ async function executeHeist(channelArg) {
         `**Payout:** ${heist.payout} BB split — **${share} BB each**`
       )
       .setFooter({text:"Bully's World • Crime paid this time."}).setTimestamp();
-    await cleanupHeistMessages();
+    await cleanupHeistMessages(heistId);
     await channel.send({ embeds: [embed] });
   } else {
     const embed = new EmbedBuilder().setColor('#8B0000').setTitle(`🦹 HEIST FAILED — ${heist.name}`)
@@ -1106,7 +1106,7 @@ async function executeHeist(channelArg) {
         `**Entry fees lost:** ${heist.entry} BB each`
       )
       .setFooter({text:"Bully's World • Crime didn't pay this time."}).setTimestamp();
-    await cleanupHeistMessages();
+    await cleanupHeistMessages(heistId);
     await channel.send({ embeds: [embed] });
   }
 }
@@ -1297,7 +1297,7 @@ client.on('messageCreate', async(message) => {
   // ── !help ──
   if (content === '!help') {
     const embed = new EmbedBuilder().setColor('#1a1a1a').setTitle("Bully's World — How It Works")
-      .setDescription(`**Earning Bully Bucks:**\n• Chat — 3 BB per message (30 sec cooldown)\n• Daily check-in — 25-400 BB depending on streak\n• Win on-stream TikTok events — gifted by Bully\n\n**Essential Commands:**\n!balance — your BB & streak\n!checkin — claim daily BB (during check-in window)\n!bullygames — access all games (Raids, Heist, Casino, Lottery)\n!heistrules — how heists work\n!steal @user [amount] — try to steal BB from another member\n!gift @user [amount] — send your own BB to another member\n!shop — browse current shop (Rookie+)\n!buy [number] — purchase item\n!leaderboard — monthly top earners\n!history — last 5 transactions\n!stats — server economy\n!claim — claim a mystery drop\n!feedback — share your thoughts\n!redeem CODE — redeem a stream event code\n\n**Streaks double every 7 days:** 25 → 50 → 100 → 200 → 400 BB`)
+      .setDescription(`**Earning Bully Bucks:**\n• Chat — 5 BB per message (5 sec cooldown)\n• Daily check-in — 25-400 BB depending on streak\n• Win on-stream TikTok events — gifted by Bully\n\n**Essential Commands:**\n!balance — your BB & streak\n!checkin — claim daily BB (during check-in window)\n!bullygames — access all games (Raids, Heist, Casino, Lottery)\n!heistrules — how heists work\n!steal @user [amount] — try to steal BB from another member\n!gift @user [amount] — send your own BB to another member\n!shop — browse current shop (Rookie+)\n!buy [number] — purchase item\n!leaderboard — monthly top earners\n!history — last 5 transactions\n!stats — server economy\n!claim — claim a mystery drop\n!feedback — share your thoughts\n!redeem CODE — redeem a stream event code\n\n**Streaks double every 7 days:** 25 → 50 → 100 → 200 → 400 BB`)
       .setFooter({text:"Bully's World • Now get to earning."}).setTimestamp();
     await message.reply({ embeds: [embed] }); return;
   }
@@ -1328,30 +1328,11 @@ client.on('messageCreate', async(message) => {
     return;
   }
 
-  // ── !lottery ──
+  // ── !lottery — redirected to !bullygames ──
   if (content.startsWith('!lottery')) {
-    const parts = content.split(' ');
-    const qty = parseInt(parts[1]) || 1;
-    if (isNaN(qty) || qty < 1) { await message.reply('Usage: `!lottery [amount]` — buy lottery tickets for 30 BB each. Example: `!lottery 5`'); return; }
-    const cost = qty * 30;
-    const u = getUser(userId, username);
-    if (u.balance < cost) { await message.reply(`Not enough BB. ${qty} ticket${qty !== 1 ? 's' : ''} costs **${cost} BB** and you have **${u.balance} BB**.`); return; }
-    spendBB(userId, cost);
-    const week = getCurrentLotteryWeek();
-    const ex = db.prepare('SELECT * FROM lottery_tickets WHERE user_id = ? AND week = ?').get(userId, week);
-    if (ex) db.prepare('UPDATE lottery_tickets SET tickets = tickets + ? WHERE user_id = ? AND week = ?').run(qty, userId, week);
-    else db.prepare('INSERT INTO lottery_tickets (user_id, username, tickets, week) VALUES (?, ?, ?, ?)').run(userId, username, qty, week);
-    const total = (ex ? ex.tickets : 0) + qty;
-    const pot = db.prepare('SELECT SUM(tickets) as t FROM lottery_tickets WHERE week = ?').get(week).t || 0;
-    const embed = new EmbedBuilder().setColor('#FFD700').setTitle('🎟️ Lottery Tickets Purchased!')
-      .setDescription(`You bought **${qty} ticket${qty !== 1 ? 's' : ''}** for **${cost} BB**!
-
-You now have **${total} tickets** this week.
-Current pot: **${pot * 30} BB**
-
-Draw is every Sunday at 8pm CT. Good luck!`)
-      .setFooter({ text: "Bully's World • May the odds be in your favor." }).setTimestamp();
-    await message.reply({ embeds: [embed] });
+    const r = await message.reply('🎟️ Buy lottery tickets through **!bullygames** → 🎟️ Lottery!');
+    setTimeout(() => r.delete().catch(() => {}), 6000);
+    await message.delete().catch(() => {});
     return;
   }
 
@@ -1998,10 +1979,11 @@ React with 🧡 to claim it!
   console.log(`[Treasure Chest] Spawned ${tier.name} chest in channel ${channelId}`);
 }
 
-let activeHeist = null;
-let heistTimer = null;
-let heistSelectionPending = null;
-let heistMessages = []; // track all heist messages for cleanup // { userId, channel } waiting for heist number selection
+const activeHeists = new Map();          // heistId → { id, heist, crew, expiresAt, channel }
+const heistTimers = new Map();           // heistId → timer
+const heistMessageMap = new Map();       // heistId → [messages]
+const heistSelectionPending = new Map(); // userId → { username, channel, availableHeists }
+let _heistIdCounter = 0;
 let shopSelectionPending = new Map(); // userId -> waiting for shop item number
 let lotterySelectionPending = new Map(); // userId -> waiting for ticket count
 let activeDuels = new Map(); // challenged_id -> duel info
@@ -2272,15 +2254,6 @@ async function openCasino() {
     .setFooter({text:"Bully's Casino • High risk. High reward."}).setTimestamp();
   await channel.send({ content: '@everyone', embeds: [embed] });
 
-  setTimeout(async () => {
-    if (activeCasino) {
-      activeCasino = false;
-      const closed = new EmbedBuilder().setColor('#444441').setTitle(`🎰  BULLY'S CASINO IS CLOSED`)
-        .setDescription(`The house always wins eventually.\n\nCome back tomorrow night.`)
-        .setFooter({text:"Bully's Casino • See you next time."}).setTimestamp();
-      await channel.send({ embeds: [closed] });
-    }
-  }, 15 * 60 * 1000);
 }
 
 async function runLottery() {
@@ -2523,24 +2496,7 @@ function startScheduler() {
   // Weekly lottery draw — Sunday at 8pm CT
   schedule.scheduleJob({ rule: '0 20 * * 0', tz: CONFIG.TIMEZONE }, () => runLottery());
 
-  // Bully's Casino — 3 random nights per week at a random time between 7pm-10pm CT
-  function scheduleCasinoWeek() {
-    const days = [0,1,2,3,4,5,6];
-    const shuffled = days.sort(()=>Math.random()-0.5);
-    const casinoNights = shuffled.slice(0,3);
-    const dayNames = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
-    console.log(`[Casino] This week's nights: ${casinoNights.map(d=>dayNames[d]).join(', ')}`);
-    casinoNights.forEach(day => {
-      const delay = Math.floor(Math.random() * 180);
-      schedule.scheduleJob({ rule:`${delay} 19 * * ${day}`, tz:CONFIG.TIMEZONE }, ()=>{
-        openCasino();
-        console.log(`[Casino] Opening now (${dayNames[day]})`);
-      });
-    });
-  }
-  scheduleCasinoWeek();
-  // Reschedule every Sunday at midnight for the new week
-  schedule.scheduleJob({ rule:'0 0 * * 0', tz:CONFIG.TIMEZONE }, ()=>scheduleCasinoWeek());
+  // Casino is always open — no scheduled windows needed
   schedule.scheduleJob({ rule:'0 12 24 1,4,7,10 *', tz:CONFIG.TIMEZONE }, ()=>postGiveawayOpening());
   // Treasure chest — Tuesday and Friday at random times between 12pm-8pm CT
   ['2', '5'].forEach(day => {
@@ -2562,6 +2518,7 @@ function startScheduler() {
 // ─── BOOT ──────────────────────────────────────────────────────────────────
 client.once('ready', async()=>{
   console.log(`\n✅ Bully's World Bot online as ${client.user.tag}`);
+  activeCasino = true; // Casino is always open
   await setGiveawayChannelVisible(false);
   await refreshShop();
   startScheduler();
@@ -2825,14 +2782,56 @@ client.on('interactionCreate', async interaction => {
     }
 
     // MAIN MENU
-    if (customId === 'menu.lottery') { await interaction.reply({ content: '🎟️ Use `!lottery [amount]` to buy tickets for **30 BB each**. Weekly draw every Sunday!', ephemeral: true }); return; }
+    if (customId === 'menu.lottery') {
+      const week = getCurrentLotteryWeek();
+      const ex = db.prepare('SELECT * FROM lottery_tickets WHERE user_id = ? AND week = ?').get(userId, week);
+      const owned = ex ? ex.tickets : 0;
+      const u = getUser(userId, username);
+      const pot = db.prepare('SELECT SUM(tickets) as t FROM lottery_tickets WHERE week = ?').get(week).t || 0;
+      const makeBuyBtn = (qty) => {
+        const cost = qty * 30;
+        const canBuy = owned + qty <= 10 && u.balance >= cost;
+        return new ButtonBuilder().setCustomId(`lottery_buy.${qty}`).setLabel(`${qty} ticket${qty !== 1 ? 's' : ''} — ${cost} BB`).setStyle(ButtonStyle.Primary).setDisabled(!canBuy);
+      };
+      const embed = new EmbedBuilder().setColor('#FFD700').setTitle('🎟️ Bully\'s World Lottery')
+        .setDescription(`Tickets cost **30 BB each** · Max **10 per draw**\n\nYou have **${owned}/10 tickets** this week.\nCurrent pot: **${pot * 30} BB**\n\nDraw: Every Sunday at 8pm CT`)
+        .setFooter({ text: "Bully's World • May the odds be in your favor." }).setTimestamp();
+      const components = owned < 10
+        ? [new ActionRowBuilder().addComponents(makeBuyBtn(1), makeBuyBtn(3), makeBuyBtn(5), makeBuyBtn(10))]
+        : [];
+      await interaction.reply({ embeds: [embed], components, ephemeral: true });
+      return;
+    }
+
+    if (customId.startsWith('lottery_buy.')) {
+      const qty = parseInt(customId.split('.')[1]);
+      const week = getCurrentLotteryWeek();
+      const ex = db.prepare('SELECT * FROM lottery_tickets WHERE user_id = ? AND week = ?').get(userId, week);
+      const owned = ex ? ex.tickets : 0;
+      if (owned + qty > 10) { await interaction.reply({ content: `❌ That would put you over the **10 ticket** limit. You have **${owned}** — you can buy up to **${10 - owned}** more.`, ephemeral: true }); return; }
+      const u = getUser(userId, username);
+      const cost = qty * 30;
+      if (u.balance < cost) { await interaction.reply({ content: `❌ You need **${cost} BB** for ${qty} ticket${qty !== 1 ? 's' : ''}. You have **${u.balance} BB**.`, ephemeral: true }); return; }
+      spendBB(userId, cost);
+      if (ex) db.prepare('UPDATE lottery_tickets SET tickets = tickets + ? WHERE user_id = ? AND week = ?').run(qty, userId, week);
+      else db.prepare('INSERT INTO lottery_tickets (user_id, username, tickets, week) VALUES (?, ?, ?, ?)').run(userId, username, qty, week);
+      const newTotal = owned + qty;
+      const pot = db.prepare('SELECT SUM(tickets) as t FROM lottery_tickets WHERE week = ?').get(week).t || 0;
+      await interaction.reply({
+        embeds: [new EmbedBuilder().setColor('#FFD700').setTitle('🎟️ Tickets Purchased!')
+          .setDescription(`You bought **${qty} ticket${qty !== 1 ? 's' : ''}** for **${cost} BB**!\n\nYou now have **${newTotal}/10 tickets** this week.\nCurrent pot: **${pot * 30} BB**\n\nDraw: Every Sunday at 8pm CT`)
+          .setFooter({ text: "Bully's World • May the odds be in your favor." }).setTimestamp()],
+        ephemeral: true
+      });
+      return;
+    }
     if (customId === 'menu.raid')    { await interaction.reply({ content: '⚔️ **Raids** coming soon!', ephemeral: true }); return; }
     if (customId === 'menu.boss')    { await interaction.reply({ content: '👹 **Boss Raids** coming soon!', ephemeral: true }); return; }
 
     // HEIST MENU
     if (customId === 'menu.heist') {
-      if (activeHeist) { await interaction.reply({ content: '🦹 A heist is already running!', ephemeral: true }); return; }
-      if (heistSelectionPending?.userId === userId) { await interaction.reply({ content: 'You already have a heist menu open!', ephemeral: true }); return; }
+      if (activeHeists.size >= 3) { await interaction.reply({ content: '🦹 3 heists are already running! Wait for one to finish.', ephemeral: true }); return; }
+      if (heistSelectionPending.has(userId)) { await interaction.reply({ content: 'You already have a heist menu open!', ephemeral: true }); return; }
       if (!isAdmin) {
         const cd = db.prepare('SELECT last_heist FROM heist_cooldown WHERE user_id = ?').get(userId);
         if (cd) {
@@ -2866,17 +2865,18 @@ client.on('interactionCreate', async interaction => {
         rows.push(new ActionRowBuilder().addComponents(chunk.map((h, ci) => new ButtonBuilder().setCustomId(`heist_sel.${ri * 3 + ci}`).setLabel(`${ri * 3 + ci + 1}. ${h.name}`).setStyle(ButtonStyle.Secondary))));
       });
       if (!availableHeists.length) { await interaction.reply({ content: '🔒 No heists available for you to lead yet. Complete lower-tier heists first or check your role level.', ephemeral: true }); return; }
-      heistSelectionPending = { userId, username, channel: interaction.channel, availableHeists };
-      setTimeout(() => { if (heistSelectionPending?.userId === userId) heistSelectionPending = null; }, 60000);
+      heistSelectionPending.set(userId, { username, channel: interaction.channel, availableHeists });
+      setTimeout(() => heistSelectionPending.delete(userId), 60000);
       await interaction.reply({ embeds: [embed], components: rows, ephemeral: false });
       return;
     }
 
     // HEIST SELECT
     if (customId.startsWith('heist_sel.')) {
-      if (!heistSelectionPending || heistSelectionPending.userId !== userId) { await interaction.reply({ content: '❌ This menu is not for you or has expired.', ephemeral: true }); return; }
+      if (!heistSelectionPending.has(userId)) { await interaction.reply({ content: '❌ This menu is not for you or has expired.', ephemeral: true }); return; }
       const idx = parseInt(customId.split('.')[1]);
-      const { availableHeists, channel: hCh } = heistSelectionPending;
+      const pend = heistSelectionPending.get(userId);
+      const { availableHeists, channel: hCh } = pend;
       if (idx >= availableHeists.length) { await interaction.reply({ content: '❌ Invalid selection.', ephemeral: true }); return; }
       const heist = availableHeists[idx];
       // Double-check progression (defence against stale menus)
@@ -2889,8 +2889,9 @@ client.on('interactionCreate', async interaction => {
       const u = getUser(userId, username);
       if (u.balance < heist.entry) { await interaction.reply({ content: `❌ Need **${heist.entry} BB**. You have **${u.balance} BB**.`, ephemeral: true }); return; }
       spendBB(userId, heist.entry);
-      heistSelectionPending = null;
-      activeHeist = { heist, crew: [{ id: userId, username, role: 'mastermind' }], expiresAt: Date.now() + 2 * 60 * 1000, channel: hCh };
+      heistSelectionPending.delete(userId);
+      const heistId = ++_heistIdCounter;
+      activeHeists.set(heistId, { id: heistId, heist, crew: [{ id: userId, username, role: 'mastermind' }], expiresAt: Date.now() + 2 * 60 * 1000, channel: hCh });
       db.prepare('INSERT OR REPLACE INTO heist_cooldown (user_id, last_heist) VALUES (?, ?)').run(userId, new Date().toISOString());
       db.prepare('INSERT INTO heist_log (user_id) VALUES (?)').run(userId);
       const endsAt = Math.floor((Date.now() + 2 * 60 * 1000) / 1000);
@@ -2906,70 +2907,87 @@ Roles: 🔧 Driller · 👀 Lookout · 🎭 Distraction · 🏃 Getaway
 Launches <t:${endsAt}:R> — click **Join** to pick your role!`)
         .setFooter({ text: "Bully's World • Click Join to pick your role." }).setTimestamp();
       const crewRow = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('heist_join').setLabel('🦹 Join Heist').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId('heist_start').setLabel('▶️ Start Now').setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId('heist_cancel').setLabel('❌ Cancel').setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId(`heist_join.${heistId}`).setLabel('🦹 Join Heist').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId(`heist_start.${heistId}`).setLabel('▶️ Start Now').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId(`heist_cancel.${heistId}`).setLabel('❌ Cancel').setStyle(ButtonStyle.Danger),
       );
-      const recruitMsg = await channel.send({ content: '@here', embeds: [recruitEmbed], components: [crewRow] });
-      heistMessages.push(recruitMsg);
-      heistTimer = setTimeout(() => executeHeist(channel), 2 * 60 * 1000);
+      const recruitMsg = await hCh.send({ content: '@here', embeds: [recruitEmbed], components: [crewRow] });
+      heistMessageMap.set(heistId, [recruitMsg]);
+      heistTimers.set(heistId, setTimeout(() => executeHeist(heistId, hCh), 2 * 60 * 1000));
       await interaction.reply({ content: `✅ **${heist.name}** started! **${heist.entry} BB** entry deducted.`, ephemeral: true });
       return;
     }
 
     // HEIST JOIN
-    if (customId === 'heist_join') {
-      if (!activeHeist) { await interaction.reply({ content: '❌ No active heist.', ephemeral: true }); return; }
-      if (activeHeist.crew.find(m => m.id === userId)) { await interaction.reply({ content: "You're already in the crew!", ephemeral: true }); return; }
+    if (customId.startsWith('heist_join.')) {
+      const heistId = parseInt(customId.split('.')[1]);
+      const activeHeist = activeHeists.get(heistId);
+      if (!activeHeist) { await interaction.reply({ content: '❌ This heist has ended or no longer exists.', ephemeral: true }); return; }
+      if (activeHeist.crew.find(m => m.id === userId)) { await interaction.reply({ content: "You're already in this crew!", ephemeral: true }); return; }
       if (activeHeist.crew.length >= 5) { await interaction.reply({ content: 'Crew is full (5/5)!', ephemeral: true }); return; }
       const u = getUser(userId, username);
       if (u.balance < activeHeist.heist.entry) { await interaction.reply({ content: `❌ Need **${activeHeist.heist.entry} BB** to join.`, ephemeral: true }); return; }
       const available = Object.entries(HEIST_ROLES).filter(([k]) => !activeHeist.crew.find(m => m.role === k));
       if (!available.length) { await interaction.reply({ content: 'All roles taken!', ephemeral: true }); return; }
-      const roleRow = new ActionRowBuilder().addComponents(available.map(([k, r]) => new ButtonBuilder().setCustomId(`heist_role.${k}`).setLabel(`${r.emoji} ${r.label}`).setStyle(ButtonStyle.Secondary)));
+      const roleRow = new ActionRowBuilder().addComponents(available.map(([k, r]) => new ButtonBuilder().setCustomId(`heist_role.${heistId}.${k}`).setLabel(`${r.emoji} ${r.label}`).setStyle(ButtonStyle.Secondary)));
       await interaction.reply({ content: '**Pick your role:**', components: [roleRow], ephemeral: true }); return;
     }
 
     // HEIST ROLE
     if (customId.startsWith('heist_role.')) {
-      const role = customId.split('.')[1];
-      if (!activeHeist) { await interaction.reply({ content: '❌ No active heist.', ephemeral: true }); return; }
-      if (activeHeist.crew.find(m => m.id === userId)) { await interaction.reply({ content: "You're already in the crew!", ephemeral: true }); return; }
+      const parts = customId.split('.');
+      const heistId = parseInt(parts[1]);
+      const role = parts[2];
+      const activeHeist = activeHeists.get(heistId);
+      if (!activeHeist) { await interaction.reply({ content: '❌ This heist has ended.', ephemeral: true }); return; }
+      if (activeHeist.crew.find(m => m.id === userId)) { await interaction.reply({ content: "You're already in this crew!", ephemeral: true }); return; }
       if (activeHeist.crew.find(m => m.role === role)) { await interaction.reply({ content: 'Role taken! Pick another.', ephemeral: true }); return; }
       const u = getUser(userId, username);
       if (u.balance < activeHeist.heist.entry) { await interaction.reply({ content: `❌ Need **${activeHeist.heist.entry} BB** to join.`, ephemeral: true }); return; }
       spendBB(userId, activeHeist.heist.entry);
       activeHeist.crew.push({ id: userId, username, role });
       const rd = HEIST_ROLES[role];
-      const joinMsg = await channel.send(`${rd.emoji} **${username}** joined as **${rd.label}**! (${activeHeist.crew.length}/5)`);
-      heistMessages.push(joinMsg);
+      const heistCh = activeHeist.channel || channel;
+      const joinMsg = await heistCh.send(`${rd.emoji} **${username}** joined as **${rd.label}**! (${activeHeist.crew.length}/5)`);
+      const msgs = heistMessageMap.get(heistId) || [];
+      msgs.push(joinMsg);
+      heistMessageMap.set(heistId, msgs);
       await interaction.reply({ content: `✅ Joined as **${rd.label}**! Entry fee deducted.`, ephemeral: true });
       if (activeHeist.crew.length === 5) {
-        const fullMsg = await channel.send({ embeds: [new EmbedBuilder().setColor('#c9a84c').setTitle('🦹 CREW IS FULL — 5/5').setDescription("Everyone's in. Leader can click **▶️ Start Now** or wait for the timer.").setTimestamp()] });
-        heistMessages.push(fullMsg);
+        const fullMsg = await heistCh.send({ embeds: [new EmbedBuilder().setColor('#c9a84c').setTitle('🦹 CREW IS FULL — 5/5').setDescription("Everyone's in. Leader can click **▶️ Start Now** or wait for the timer.").setTimestamp()] });
+        msgs.push(fullMsg);
       }
       return;
     }
 
     // HEIST START
-    if (customId === 'heist_start') {
-      if (!activeHeist) { await interaction.reply({ content: '❌ No active heist.', ephemeral: true }); return; }
+    if (customId.startsWith('heist_start.')) {
+      const heistId = parseInt(customId.split('.')[1]);
+      const activeHeist = activeHeists.get(heistId);
+      if (!activeHeist) { await interaction.reply({ content: '❌ This heist has ended.', ephemeral: true }); return; }
       if (activeHeist.crew[0]?.id !== userId && !isAdmin) { await interaction.reply({ content: '❌ Only the leader can start early.', ephemeral: true }); return; }
       if (activeHeist.crew.length < 2) { await interaction.reply({ content: '❌ Need at least 2 crew members.', ephemeral: true }); return; }
-      if (heistTimer) { clearTimeout(heistTimer); heistTimer = null; }
+      const t = heistTimers.get(heistId);
+      if (t) { clearTimeout(t); heistTimers.delete(heistId); }
       await interaction.reply({ content: '🚀 Launching the heist!', ephemeral: true });
-      await executeHeist(channel); return;
+      await executeHeist(heistId, activeHeist.channel || channel); return;
     }
 
     // HEIST CANCEL
-    if (customId === 'heist_cancel') {
-      if (!activeHeist) { await interaction.reply({ content: '❌ No active heist.', ephemeral: true }); return; }
+    if (customId.startsWith('heist_cancel.')) {
+      const heistId = parseInt(customId.split('.')[1]);
+      const activeHeist = activeHeists.get(heistId);
+      if (!activeHeist) { await interaction.reply({ content: '❌ This heist has ended.', ephemeral: true }); return; }
       if (activeHeist.crew[0]?.id !== userId && !isAdmin) { await interaction.reply({ content: '❌ Only the leader can cancel.', ephemeral: true }); return; }
       activeHeist.crew.forEach(m => addBB(m.id, m.username, activeHeist.heist.entry, 'heist cancelled — refund'));
-      if (heistTimer) { clearTimeout(heistTimer); heistTimer = null; }
-      const name = activeHeist.heist.name; activeHeist = null;
-      await cleanupHeistMessages();
-      await channel.send(`🚫 **${name}** cancelled. All entry fees refunded.`);
+      const t = heistTimers.get(heistId);
+      if (t) { clearTimeout(t); }
+      const name = activeHeist.heist.name;
+      activeHeists.delete(heistId);
+      heistTimers.delete(heistId);
+      const heistCh = activeHeist.channel || channel;
+      await cleanupHeistMessages(heistId);
+      await heistCh.send(`🚫 **${name}** cancelled. All entry fees refunded.`);
       await interaction.reply({ content: '✅ Cancelled and refunded.', ephemeral: true }); return;
     }
 
