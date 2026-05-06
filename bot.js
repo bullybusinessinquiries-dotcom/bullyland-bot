@@ -1665,36 +1665,6 @@ This challenge expires in 60 seconds.`)
     return;
   }
 
-  // ── Heist role name typing (kept for button-started heists where crew types role) ──
-  if (activeHeist && Object.keys(HEIST_ROLES).includes(content)) {
-    if (activeHeist.crew.find(m => m.id === userId)) { await message.reply("You're already in the crew."); return; }
-    if (activeHeist.crew.length >= 5) { await message.reply('The crew is full.'); return; }
-    if (activeHeist.crew.find(m => m.role === content)) {
-      const takenBy = activeHeist.crew.find(m => m.role === content)?.username;
-      await message.reply(`**${HEIST_ROLES[content].label}** is already taken by ${takenBy}. Pick another.`);
-      return;
-    }
-    const u = getUser(userId, username);
-    if (u.balance < activeHeist.heist.entry) { await message.reply(`Not enough BB. This heist costs **${activeHeist.heist.entry} BB** to join.`); return; }
-    spendBB(userId, activeHeist.heist.entry);
-    activeHeist.crew.push({ id: userId, username, role: content });
-    const roleData = HEIST_ROLES[content];
-    const joinMsg = await message.reply(`${roleData.emoji} **${username}** joined the crew as **${roleData.label}**! (${activeHeist.crew.length}/5 members)`);
-    heistMessages.push(joinMsg);
-
-    // If crew is now full — notify and prompt early start
-    if (activeHeist.crew.length === 5) {
-      const fullEmbed = new EmbedBuilder().setColor('#c9a84c').setTitle('🦹 CREW IS FULL!')
-        .setDescription(`The crew is at max capacity — 5 members ready to roll.
-
-**The heist leader can type \`!starthere\` to launch early**, or the heist will begin automatically when the timer runs out.`)
-        .setFooter({text:"Bully's World • The crew is assembled."}).setTimestamp();
-      const fullMsg = await message.channel.send({ embeds: [fullEmbed] });
-      heistMessages.push(fullMsg);
-    }
-    return;
-  }
-
   // ── !steal — handled by the dedicated steal handler below (DM-block system) ──
 
   // ── !gift / !give ──
@@ -1867,28 +1837,26 @@ Check your balance with !balance.`)
   if (content==='!testcasino')      await openCasino();
   if (content==='!testchest') { await spawnTreasureChest(); return; }
   if (content.startsWith('!testheist')) {
-    if (activeHeist) { await message.reply('A heist is already active. Cancel it first with !cancelheist.'); return; }
+    if (activeHeists.size >= 3) { await message.reply('3 heists are already running.'); return; }
     const heistNum = parseInt(content.split(' ')[1]);
     let testHeist;
     if (!isNaN(heistNum) && heistNum >= 1 && heistNum <= HEISTS.length) {
       testHeist = HEISTS[heistNum - 1];
     } else {
-      // Show list if no number given
       const list = HEISTS.map((h, i) => `**${i+1}.** ${h.name}`).join('\n');
-      await message.reply(`Choose a heist to test:
-${list}
-
-Usage: \`!testheist [number]\``);
+      await message.reply(`Choose a heist to test:\n${list}\n\nUsage: \`!testheist [number]\``);
       return;
     }
-    activeHeist = {
+    const testId = ++_heistIdCounter;
+    activeHeists.set(testId, {
+      id: testId,
       heist: testHeist,
       crew: [{ id: userId, username, role: 'mastermind' }, { id: '000000000000000001', username: 'TestCrewmate', role: 'driller' }],
       expiresAt: Date.now() + 5000,
       channel: message.channel,
-    };
+    });
     await message.reply(`🧪 Test heist starting: **${testHeist.name}** with dummy crew...`);
-    await executeHeist(message.channel);
+    await executeHeist(testId, message.channel);
     return;
   }
   if (content==='!testlottery')     await runLottery();
@@ -3710,15 +3678,18 @@ client.on('messageCreate', async msg => {
   if (lower === '!testshopview') { if (!activeShop.length) { await msg.reply('Shop empty — run `!testshop` first.'); return; } await msg.reply(activeShop.map((e, i) => `**${i + 1}.** ${e.roleName || e.item.label} — **${e.item.cost} BB** [${e.item.type}]`).join('\n')); return; }
 
   if (lower === '!testheiststart') {
-    if (!activeHeist) { await msg.reply('❌ No active heist. Start one via `!bullygames` → Heist.'); return; }
-    if (heistTimer) { clearTimeout(heistTimer); heistTimer = null; }
-    await msg.reply('🚀 Force-launching heist!'); await executeHeist(msg.channel); return;
+    if (!activeHeists.size) { await msg.reply('❌ No active heist. Start one via `!bullygames` → Heist.'); return; }
+    const firstId = activeHeists.keys().next().value;
+    const t = heistTimers.get(firstId); if (t) { clearTimeout(t); heistTimers.delete(firstId); }
+    await msg.reply('🚀 Force-launching heist!'); await executeHeist(firstId, msg.channel); return;
   }
   if (lower === '!testheistcancel') {
-    if (!activeHeist) { await msg.reply('❌ No active heist.'); return; }
-    activeHeist.crew.forEach(m => addBB(m.id, m.username, activeHeist.heist.entry, 'admin cancel — refund'));
-    if (heistTimer) { clearTimeout(heistTimer); heistTimer = null; }
-    const name = activeHeist.heist.name; activeHeist = null; await cleanupHeistMessages();
+    if (!activeHeists.size) { await msg.reply('❌ No active heist.'); return; }
+    const firstId = activeHeists.keys().next().value;
+    const hData = activeHeists.get(firstId);
+    hData.crew.forEach(m => addBB(m.id, m.username, hData.heist.entry, 'admin cancel — refund'));
+    const t = heistTimers.get(firstId); if (t) { clearTimeout(t); heistTimers.delete(firstId); }
+    const name = hData.heist.name; activeHeists.delete(firstId); await cleanupHeistMessages(firstId);
     await msg.reply(`✅ **${name}** cancelled and fees refunded.`); return;
   }
   if (lower === '!testingmode on' || lower === '!testingmodeon') { TESTING_MODE = true; await msg.reply('🔒 Testing mode **ON** — only admins and @tester can use the bot.'); return; }
@@ -3737,7 +3708,7 @@ client.on('messageCreate', async msg => {
         { name: '👥 Users', value: `${users}`, inline: true },
         { name: '💰 BB in Economy', value: `${totalBB.toLocaleString()} BB`, inline: true },
         { name: '🎰 Casino', value: activeCasino ? '🟢 Open' : '🔴 Closed', inline: true },
-        { name: '🦹 Heist', value: activeHeist ? `${activeHeist.heist.name} (${activeHeist.crew.length}/5)` : 'None', inline: true },
+        { name: '🦹 Heists', value: activeHeists.size ? `${activeHeists.size} running` : 'None', inline: true },
         { name: '🏇 Races', value: `${_races.size} running`, inline: true },
         { name: '🛍️ Shop', value: `${activeShop.length} items`, inline: true },
         { name: '🔒 Test Mode', value: TESTING_MODE ? '✅ ON' : '❌ OFF', inline: true },
