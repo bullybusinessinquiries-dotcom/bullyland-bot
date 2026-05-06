@@ -1,5 +1,5 @@
-require('dotenv').config();
 const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '.env') }); // always load from bot directory, not CWD
 let stripe = null;
 try { const Stripe = require('stripe'); stripe = Stripe(process.env.STRIPE_SECRET_KEY); } catch(e) { console.log('[Stripe] Not installed — auction payments disabled.'); }
 const Anthropic = require('@anthropic-ai/sdk');
@@ -24,7 +24,10 @@ const client = new Client({
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 // ─── DATABASE ──────────────────────────────────────────────────────────────
-const db = new Database(path.join(__dirname, 'bullyland.db'));
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'bullyland.db');
+const db = new Database(DB_PATH);
+console.log(`\n[DB] Using database: ${DB_PATH}`);
+{ const count = db.prepare('SELECT COUNT(*) as c FROM balances').get()?.c ?? '?'; console.log(`[DB] Users loaded: ${count}`); }
 db.exec(`
   CREATE TABLE IF NOT EXISTS balances (
     user_id TEXT PRIMARY KEY, username TEXT,
