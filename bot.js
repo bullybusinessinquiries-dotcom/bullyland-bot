@@ -24,7 +24,21 @@ const client = new Client({
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 // ─── DATABASE ──────────────────────────────────────────────────────────────
-const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'bullyland.db');
+// Auto-detect Railway persistent volume, fall back to DB_PATH env var, then __dirname
+const fs = require('fs');
+function resolveDBPath() {
+  if (process.env.DB_PATH) return process.env.DB_PATH;
+  // Railway mounts volumes at user-configured paths — try common ones
+  const railwayCandidates = ['/data', '/var/data', '/storage', '/app/data', '/mnt/data'];
+  for (const dir of railwayCandidates) {
+    try {
+      fs.accessSync(dir, fs.constants.W_OK);
+      return path.join(dir, 'bullyland.db'); // first writable non-app mount wins
+    } catch (_) {}
+  }
+  return path.join(__dirname, 'bullyland.db'); // local fallback
+}
+const DB_PATH = resolveDBPath();
 const db = new Database(DB_PATH);
 console.log(`\n[DB] Using database: ${DB_PATH}`);
 db.exec(`
