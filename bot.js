@@ -3279,10 +3279,9 @@ Click **BLOCK IT** within **${windowSecs} seconds**!`).setFooter({ text: "Bully'
 
   // ── 👑 KING'S TREASON EASTER EGG ──────────────────────────────────────────
   // Stealing from the owner has consequences. 95% chance of punishment.
-  if (target.id === CONFIG.OWNER_ID && Math.random() < 0.95) {
+  if (target.id === CONFIG.OWNER_ID && Math.random() < 0.85) {
     const delayMs = (3 * 60 + Math.floor(Math.random() * 121)) * 1000; // 3–5 min
     setTimeout(async () => {
-      if (Math.random() >= 0.85) return; // 85% chance the decree fires
       const punishment = Math.ceil(stealAmount * 1.25);
       // Deduct from stealer (let them go negative — this is punishment, not a game rule)
       db.prepare('UPDATE balances SET balance = balance - ? WHERE user_id = ?').run(punishment, userId);
