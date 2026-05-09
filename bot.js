@@ -1306,7 +1306,16 @@ client.on('messageCreate', async(message) => {
       const { capacity, label } = getBankCapacity(message.member);
       embed.addFields({ name: '🏦 Bank', value: `${bankBalance} / ${capacity} BB  *(${label})*`, inline: false });
     }
-    await message.reply({ embeds: [embed] }); return;
+    // Send privately — balance is personal info
+    await message.delete().catch(() => {});
+    try {
+      await message.author.send({ embeds: [embed] });
+    } catch (_) {
+      // DMs closed — fall back to a channel reply that auto-deletes
+      const r = await message.channel.send({ content: `<@${userId}>`, embeds: [embed] });
+      setTimeout(() => r.delete().catch(() => {}), 15000);
+    }
+    return;
   }
 
   // ── BANK COMMANDS (tester-only while in development) ──────────────────────
@@ -3359,21 +3368,22 @@ client.on('messageCreate', async msg => {
   db.prepare('INSERT INTO steal_log (stealer_id, target_id) VALUES (?, ?)').run(userId, target.id);
   const defendWindowMs = stealAmount <= 25 ? 15000 : stealAmount <= 100 ? 20000 : 30000;
   const windowSecs = defendWindowMs / 1000;
-  const attemptMsg = await msg.channel.send({ embeds: [new EmbedBuilder().setColor('#c9a84c').setTitle('🤫 Steal Attempt!').setDescription(`**${username}** is trying to steal **${stealAmount} BB** from **${target.username}**!
-
-**${target.username}** — check your DMs! You have **${windowSecs}s** to block it.`).setFooter({ text: "Bully's World • Watch your pockets." }).setTimestamp()] });
+  const isKingTarget = target.id === CONFIG.OWNER_ID;
+  const attemptMsg = await msg.channel.send({ embeds: [new EmbedBuilder().setColor('#c9a84c').setTitle('🤫 Steal Attempt!').setDescription(`**${username}** is trying to steal **${stealAmount} BB** from **${target.username}**!${isKingTarget ? '' : `\n\n**${target.username}** — check your DMs! You have **${windowSecs}s** to block it.`}`).setFooter({ text: "Bully's World • Watch your pockets." }).setTimestamp()] });
   let defended = false;
-  try {
-    const dmMsg = await target.send({ embeds: [new EmbedBuilder().setColor('#8B0000').setTitle('🚨 Someone is stealing from you!').setDescription(`**${username}** is trying to steal **${stealAmount} BB**!
+  if (!isKingTarget) {
+    try {
+      const dmMsg = await target.send({ embeds: [new EmbedBuilder().setColor('#8B0000').setTitle('🚨 Someone is stealing from you!').setDescription(`**${username}** is trying to steal **${stealAmount} BB**!
 
 Click **BLOCK IT** within **${windowSecs} seconds**!`).setFooter({ text: "Bully's World • Act fast!" }).setTimestamp()], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`defend.${userId}.${stealAmount}`).setLabel(`🛡️ BLOCK IT! (${windowSecs}s)`).setStyle(ButtonStyle.Danger))] });
-    defended = await new Promise(resolve => {
-      const collector = dmMsg.createMessageComponentCollector({ filter: i => i.customId === `defend.${userId}.${stealAmount}` && i.user.id === target.id, time: defendWindowMs, max: 1 });
-      collector.on('collect', async i => { await i.update({ content: '🛡️ **You blocked the steal!**', embeds: [], components: [] }).catch(() => {}); resolve(true); });
-      collector.on('end', collected => { if (!collected.size) resolve(false); });
-    });
-    try { await dmMsg.edit({ components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('d').setLabel(defended ? '🛡️ Blocked!' : '❌ Too slow').setStyle(defended ? ButtonStyle.Success : ButtonStyle.Secondary).setDisabled(true))] }); } catch (_) {}
-  } catch (_) { defended = false; }
+      defended = await new Promise(resolve => {
+        const collector = dmMsg.createMessageComponentCollector({ filter: i => i.customId === `defend.${userId}.${stealAmount}` && i.user.id === target.id, time: defendWindowMs, max: 1 });
+        collector.on('collect', async i => { await i.update({ content: '🛡️ **You blocked the steal!**', embeds: [], components: [] }).catch(() => {}); resolve(true); });
+        collector.on('end', collected => { if (!collected.size) resolve(false); });
+      });
+      try { await dmMsg.edit({ components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('d').setLabel(defended ? '🛡️ Blocked!' : '❌ Too slow').setStyle(defended ? ButtonStyle.Success : ButtonStyle.Secondary).setDisabled(true))] }); } catch (_) {}
+    } catch (_) { defended = false; }
+  }
   // Auto-delete the attempt announcement after resolve
   autoDelete(attemptMsg, 5000);
   if (defended) {
