@@ -162,6 +162,9 @@ db.exec(`
   );
 `);
 
+// Migrate existing DB — add bank_balance column if it doesn't exist yet
+try { db.exec('ALTER TABLE balances ADD COLUMN bank_balance INTEGER DEFAULT 0'); } catch (_) {}
+
 // Integrity check — runs after tables are guaranteed to exist
 { const count = db.prepare('SELECT COUNT(*) as c FROM balances').get()?.c ?? 0; console.log(`[DB] Users in database: ${count}${count === 0 ? ' ⚠️  (empty — check DB_PATH if this is unexpected)' : ''}`); }
 
@@ -296,6 +299,35 @@ function spendBB(userId, amount) {
   db.prepare('UPDATE balances SET balance = balance - ? WHERE user_id = ?').run(amount, userId);
   db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(userId, -amount, 'shop purchase');
 }
+// ─── BANK SYSTEM ──────────────────────────────────────────────────────────
+// Capacity tiers — based on total_earned as a level proxy (Lurkr levels aren't
+// queryable directly, so total BB earned serves as the stand-in until that changes).
+// Each tier unlocks more protected storage.
+const BANK_TIERS = [
+  { minEarned: 0,     capacity: 250,   label: 'Tier 1' },
+  { minEarned: 500,   capacity: 750,   label: 'Tier 2' },
+  { minEarned: 1500,  capacity: 1500,  label: 'Tier 3' },
+  { minEarned: 3000,  capacity: 3000,  label: 'Tier 4' },
+  { minEarned: 6000,  capacity: 6000,  label: 'Tier 5' },
+  { minEarned: 12000, capacity: 12000, label: 'Tier 6' },
+];
+
+function getBankCapacity(totalEarned) {
+  let tier = BANK_TIERS[0];
+  for (const t of BANK_TIERS) { if (totalEarned >= t.minEarned) tier = t; }
+  return tier;
+}
+
+function depositBB(userId, amount) {
+  db.prepare('UPDATE balances SET balance = balance - ?, bank_balance = bank_balance + ? WHERE user_id = ?').run(amount, amount, userId);
+  db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(userId, -amount, `bank deposit`);
+}
+
+function withdrawBB(userId, amount) {
+  db.prepare('UPDATE balances SET balance = balance + ?, bank_balance = bank_balance - ? WHERE user_id = ?').run(amount, amount, userId);
+  db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(userId, amount, `bank withdrawal`);
+}
+
 // ─── ROLE INVENTORY HELPERS ───────────────────────────────────────────────
 function getRoleInventory(userId) {
   return db.prepare('SELECT * FROM role_inventory WHERE user_id = ? ORDER BY created_at DESC').all(userId);
@@ -1253,10 +1285,74 @@ client.on('messageCreate', async(message) => {
   // ── !balance ──
   if (content === '!balance') {
     const u = getUser(userId, username);
+    const isTester = hasAccess(message.member);
     const embed = new EmbedBuilder().setColor('#1a1a1a').setTitle('Your Bully Bucks Balance')
-      .addFields({name:'Balance',value:`${u.balance} BB`,inline:true},{name:'Total Earned',value:`${u.total_earned} BB`,inline:true},{name:'Streak',value:`${u.streak||0} days`,inline:true})
+      .addFields(
+        { name: '👛 Wallet',       value: `${u.balance} BB`,       inline: true },
+        { name: '📈 Total Earned', value: `${u.total_earned} BB`,  inline: true },
+        { name: '🔥 Streak',       value: `${u.streak||0} days`,   inline: true }
+      )
       .setFooter({text:"Bully's World • Keep earning."}).setTimestamp();
+    // Show bank balance only if bank system is accessible to this user
+    if (isTester) {
+      const { capacity, label } = getBankCapacity(u.total_earned);
+      embed.addFields({ name: '🏦 Bank', value: `${u.bank_balance ?? 0} / ${capacity} BB  *(${label})*`, inline: false });
+    }
     await message.reply({ embeds: [embed] }); return;
+  }
+
+  // ── BANK COMMANDS (tester-only while in development) ──────────────────────
+  if (content === '!bank' || content.startsWith('!deposit') || content.startsWith('!withdraw')) {
+    if (!hasAccess(message.member)) {
+      const r = await message.reply('🔒 The bank system is coming soon.');
+      setTimeout(() => r.delete().catch(() => {}), 5000);
+      await message.delete().catch(() => {});
+      return;
+    }
+    const u = getUser(userId, username);
+    const { capacity, label } = getBankCapacity(u.total_earned);
+    const bankBalance = u.bank_balance ?? 0;
+
+    // !bank — show bank status
+    if (content === '!bank') {
+      const embed = new EmbedBuilder().setColor('#c9a84c').setTitle('🏦 Your Bank Account')
+        .setDescription(`Your bank protects BB from being stolen. Wallet BB is always at risk — bank BB is safe.\n\nUse **!deposit [amount]** or **!withdraw [amount]** to move funds.`)
+        .addFields(
+          { name: '👛 Wallet',      value: `${u.balance} BB`,                  inline: true },
+          { name: '🏦 Bank',        value: `${bankBalance} BB`,                 inline: true },
+          { name: '📦 Capacity',    value: `${bankBalance} / ${capacity} BB`,   inline: true },
+          { name: '🔐 Tier',        value: label,                               inline: true },
+        )
+        .setFooter({ text: "Bully's World • Safe money is smart money." }).setTimestamp();
+      await message.reply({ embeds: [embed] }); return;
+    }
+
+    // !deposit [amount]
+    if (content.startsWith('!deposit')) {
+      const parts = content.split(' ');
+      const amt = parts[1] === 'all' ? u.balance : parseInt(parts[1]);
+      if (isNaN(amt) || amt < 1) { await message.reply('Usage: `!deposit [amount]` or `!deposit all`'); return; }
+      if (u.balance < amt) { await message.reply(`You only have **${u.balance} BB** in your wallet.`); return; }
+      const room = capacity - bankBalance;
+      if (room <= 0) { await message.reply(`Your bank is full (**${bankBalance}/${capacity} BB**). Withdraw some funds or earn more BB to unlock a higher tier.`); return; }
+      const actual = Math.min(amt, room);
+      depositBB(userId, actual);
+      const skipped = amt - actual;
+      let msg = `✅ Deposited **${actual} BB** into your bank.`;
+      if (skipped > 0) msg += ` *(${skipped} BB couldn't fit — bank capacity reached)*`;
+      msg += `\n\n🏦 Bank: **${bankBalance + actual}/${capacity} BB** · 👛 Wallet: **${u.balance - actual} BB**`;
+      await message.reply(msg); return;
+    }
+
+    // !withdraw [amount]
+    if (content.startsWith('!withdraw')) {
+      const parts = content.split(' ');
+      const amt = parts[1] === 'all' ? bankBalance : parseInt(parts[1]);
+      if (isNaN(amt) || amt < 1) { await message.reply('Usage: `!withdraw [amount]` or `!withdraw all`'); return; }
+      if (bankBalance < amt) { await message.reply(`You only have **${bankBalance} BB** in your bank.`); return; }
+      withdrawBB(userId, amt);
+      await message.reply(`✅ Withdrew **${amt} BB** from your bank.\n\n🏦 Bank: **${bankBalance - amt}/${capacity} BB** · 👛 Wallet: **${u.balance + amt} BB**`); return;
+    }
   }
 
   // ── !history ──
