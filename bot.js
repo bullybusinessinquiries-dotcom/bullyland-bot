@@ -160,6 +160,21 @@ db.exec(`
     user_id TEXT, username TEXT, tickets INTEGER DEFAULT 0, cycle TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
   );
+
+  CREATE TABLE IF NOT EXISTS user_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    uses_remaining INTEGER NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS item_cooldowns (
+    user_id TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    last_used TEXT NOT NULL,
+    PRIMARY KEY (user_id, item_id)
+  );
 `);
 
 // Migrate existing DB — add bank_balance column if it doesn't exist yet
@@ -268,6 +283,7 @@ let activeCasino = false;
 let dropsEnabled = true;
 let lastShopMessageId = null;
 let lastLeaderboardMessageId = null;
+const _pendingItemUse = new Map(); // userId → { itemId, channelId }
 
 // ─── DB HELPERS ────────────────────────────────────────────────────────────
 function getUser(userId, username) {
@@ -335,6 +351,82 @@ function depositBB(userId, amount) {
 function withdrawBB(userId, amount) {
   db.prepare('UPDATE balances SET balance = balance + ?, bank_balance = bank_balance - ? WHERE user_id = ?').run(amount, amount, userId);
   db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(userId, amount, `bank withdrawal`);
+}
+
+// ─── ITEM SHOP ────────────────────────────────────────────────────────────
+const ITEMS = {
+  account_pull: {
+    id:          'account_pull',
+    name:        'Account Pull',
+    emoji:       '📄',
+    description: "Estimate another user's bank balance. Output is approximate (±15–20%).",
+    price:       1200,
+    maxUses:     3,
+    stackLimit:  3,
+    cooldownMs:  20 * 60 * 1000,
+  },
+  pocket_scan: {
+    id:          'pocket_scan',
+    name:        'Pocket Scan',
+    emoji:       '👀',
+    description: "Reveal another user's exact wallet balance.",
+    price:       500,
+    maxUses:     5,
+    stackLimit:  5,
+    cooldownMs:  10 * 60 * 1000,
+  },
+  vault_key: {
+    id:          'vault_key',
+    name:        'Vault Key',
+    emoji:       '🔑',
+    description: "Steal 20–25% of another user's bank (min 3,000 BB banked, max 5,000 BB stolen). They have a window to block it.",
+    price:       2000,
+    maxUses:     1,
+    stackLimit:  2,
+    cooldownMs:  2 * 60 * 60 * 1000,
+  },
+};
+
+// Resolve item ID from user input (handles spaces, underscores, case)
+function resolveItemId(input) {
+  const normalized = input.toLowerCase().replace(/[\s_-]+/g, '_');
+  if (ITEMS[normalized]) return normalized;
+  // Fuzzy match by name
+  return Object.keys(ITEMS).find(k => ITEMS[k].name.toLowerCase().replace(/\s+/g,'_') === normalized) || null;
+}
+
+// Total uses across all stacks
+function getItemUses(userId, itemId) {
+  const rows = db.prepare('SELECT SUM(uses_remaining) as t FROM user_items WHERE user_id = ? AND item_id = ?').get(userId, itemId);
+  return rows?.t ?? 0;
+}
+
+// Number of distinct stacks (for stack limit)
+function getItemStacks(userId, itemId) {
+  return db.prepare('SELECT COUNT(*) as c FROM user_items WHERE user_id = ? AND item_id = ?').get(userId, itemId)?.c ?? 0;
+}
+
+// Consume one use from oldest stack; apply cooldown
+function consumeItemUse(userId, itemId) {
+  const stack = db.prepare('SELECT * FROM user_items WHERE user_id = ? AND item_id = ? ORDER BY created_at ASC LIMIT 1').get(userId, itemId);
+  if (!stack) return false;
+  if (stack.uses_remaining <= 1) db.prepare('DELETE FROM user_items WHERE id = ?').run(stack.id);
+  else db.prepare('UPDATE user_items SET uses_remaining = uses_remaining - 1 WHERE id = ?').run(stack.id);
+  db.prepare('INSERT OR REPLACE INTO item_cooldowns (user_id, item_id, last_used) VALUES (?, ?, ?)').run(userId, itemId, new Date().toISOString());
+  return true;
+}
+
+// Milliseconds remaining on cooldown (0 = ready)
+function itemCooldownRemaining(userId, itemId) {
+  const item = ITEMS[itemId];
+  const cd = db.prepare('SELECT last_used FROM item_cooldowns WHERE user_id = ? AND item_id = ?').get(userId, itemId);
+  if (!cd) return 0;
+  return Math.max(0, item.cooldownMs - (Date.now() - new Date(cd.last_used).getTime()));
+}
+
+function fmtCooldown(ms) {
+  const m = Math.floor(ms / 60000), s = Math.ceil((ms % 60000) / 1000);
+  return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
 
 // ─── ROLE INVENTORY HELPERS ───────────────────────────────────────────────
@@ -646,26 +738,31 @@ function pickShopRoles(allRoles) {
   return picked;
 }
 
+async function purgeShopChannel(channel) {
+  try {
+    const messages = await channel.messages.fetch({ limit: 100 });
+    if (messages.size > 0) {
+      await channel.bulkDelete(messages).catch(async () => {
+        for (const [, m] of messages) await m.delete().catch(() => {});
+      });
+    }
+  } catch (_) {}
+}
+
 async function refreshShop() {
   SHOP_ROLES = await loadRolesFromSheet();
   activeShopRoles = pickShopRoles(SHOP_ROLES);
   const channel = await client.channels.fetch(CONFIG.CHANNELS.SHOP).catch(() => null);
   if (!channel) return;
-  if (lastShopMessageId) {
-    const old = await channel.messages.fetch(lastShopMessageId).catch(() => null);
-    if (old) await old.delete().catch(() => {});
-    lastShopMessageId = null;
-  }
+  await purgeShopChannel(channel);
+  lastShopMessageId = null;
   if (!activeShopRoles.length) {
     const msg = await channel.send({ embeds: [new EmbedBuilder().setColor('#1a1a1a').setTitle("🛍️ BULLY'S STORE").setDescription('The shop is loading. Check back shortly.').setFooter({ text: "Bully's World" }).setTimestamp()] });
     lastShopMessageId = msg.id;
     return;
   }
   const msg = await postShopEmbed(channel);
-  if (msg) {
-    lastShopMessageId = msg.id;
-    setTimeout(() => msg.delete().catch(() => {}), 12 * 60 * 60 * 1000);
-  }
+  if (msg) lastShopMessageId = msg.id;
 }
 
 async function postShopEmbed(channel) {
@@ -1356,6 +1453,46 @@ client.on('messageCreate', async(message) => {
       withdrawBB(userId, amt);
       await message.reply(`✅ Withdrew **${amt} BB** from your bank.\n\n🏦 Bank: **${bankBalance - amt}/${capacity} BB** · 👛 Wallet: **${u.balance + amt} BB**`); return;
     }
+  }
+
+  // ── !blackmarket ──
+  if (content === '!blackmarket') {
+    if (!hasAccess(message.member)) {
+      const r = await message.reply('🔒 The black market is coming soon.');
+      setTimeout(() => r.delete().catch(() => {}), 5000);
+      await message.delete().catch(() => {});
+      return;
+    }
+    const u = getUser(userId, username);
+    const embed = new EmbedBuilder().setColor('#1a1a1a').setTitle('🖤 Black Market')
+      .setDescription(Object.values(ITEMS).map(item => {
+        const uses = getItemUses(userId, item.id);
+        const stacks = getItemStacks(userId, item.id);
+        const cdMs = itemCooldownRemaining(userId, item.id);
+        const cdStr = cdMs > 0 ? ` · ⏳ ${fmtCooldown(cdMs)}` : '';
+        const ownedStr = uses > 0 ? ` · 🎒 ${uses} use${uses!==1?'s':''}${cdStr}` : '';
+        return `${item.emoji} **${item.name}** — ${item.price.toLocaleString()} BB\n*${item.description}*\n${item.maxUses} use${item.maxUses>1?'s':''} · Stack: ${stacks}/${item.stackLimit}${ownedStr}`;
+      }).join('\n\n'))
+      .addFields({ name: '👛 Your Wallet', value: `${u.balance.toLocaleString()} BB`, inline: true })
+      .setFooter({ text: "Bully's World • No refunds." }).setTimestamp();
+    const rows = [];
+    // Row 1: Buy buttons
+    const buyRow = new ActionRowBuilder().addComponents(
+      Object.values(ITEMS).map(item => {
+        const stacks = getItemStacks(userId, item.id);
+        const canBuy = u.balance >= item.price && stacks < item.stackLimit;
+        return new ButtonBuilder().setCustomId(`bm_buy.${item.id}`).setLabel(`Buy ${item.name}`).setEmoji(item.emoji).setStyle(ButtonStyle.Primary).setDisabled(!canBuy);
+      })
+    );
+    // Row 2: Use buttons
+    const useRow = new ActionRowBuilder().addComponents(
+      Object.values(ITEMS).map(item => {
+        const uses = getItemUses(userId, item.id);
+        return new ButtonBuilder().setCustomId(`bm_use.${item.id}`).setLabel(`Use ${item.name}`).setEmoji(item.emoji).setStyle(ButtonStyle.Secondary).setDisabled(uses < 1);
+      })
+    );
+    await message.reply({ embeds: [embed], components: [buyRow, useRow] });
+    return;
   }
 
   // ── !history ──
@@ -2850,6 +2987,36 @@ client.on('interactionCreate', async interaction => {
   }
 
   try {
+    // ── BLACK MARKET: buy button ──────────────────────────────────────────────
+    if (customId.startsWith('bm_buy.')) {
+      if (!hasAccess(interaction.member)) { await interaction.reply({ content: '🔒 Black market is not yet public.', ephemeral: true }); return; }
+      const itemId = customId.slice('bm_buy.'.length);
+      const item = ITEMS[itemId];
+      if (!item) { await interaction.reply({ content: '❌ Unknown item.', ephemeral: true }); return; }
+      const u = getUser(userId, username);
+      if (u.balance < item.price) { await interaction.reply({ content: `❌ Need **${item.price.toLocaleString()} BB**. You have **${u.balance.toLocaleString()} BB**.`, ephemeral: true }); return; }
+      if (getItemStacks(userId, itemId) >= item.stackLimit) { await interaction.reply({ content: `❌ Stack limit reached (${item.stackLimit}/${item.stackLimit}). Use your existing **${item.name}** first.`, ephemeral: true }); return; }
+      spendBB(userId, item.price);
+      db.prepare('INSERT INTO user_items (user_id, item_id, uses_remaining) VALUES (?, ?, ?)').run(userId, itemId, item.maxUses);
+      await interaction.reply({ content: `✅ Purchased **${item.emoji} ${item.name}** — ${item.maxUses} use${item.maxUses>1?'s':''}. Press **Use ${item.name}** to deploy it.`, ephemeral: true });
+      return;
+    }
+
+    // ── BLACK MARKET: use button — prompts for target ─────────────────────────
+    if (customId.startsWith('bm_use.')) {
+      if (!hasAccess(interaction.member)) { await interaction.reply({ content: '🔒 Black market is not yet public.', ephemeral: true }); return; }
+      const itemId = customId.slice('bm_use.'.length);
+      const item = ITEMS[itemId];
+      if (!item) { await interaction.reply({ content: '❌ Unknown item.', ephemeral: true }); return; }
+      if (getItemUses(userId, itemId) < 1) { await interaction.reply({ content: `❌ No uses of **${item.name}** remaining.`, ephemeral: true }); return; }
+      const cdMs = itemCooldownRemaining(userId, itemId);
+      if (cdMs > 0) { await interaction.reply({ content: `⏳ **${item.name}** is on cooldown — **${fmtCooldown(cdMs)}** remaining.`, ephemeral: true }); return; }
+      // Set pending item use — next message from this user with a mention triggers it
+      _pendingItemUse.set(userId, { itemId, channelId: interaction.channelId });
+      await interaction.reply({ content: `${item.emoji} **${item.name}** ready.\n\nMention the target user in this channel to deploy it. Example: \`@username\`\n\nType **cancel** to abort.`, ephemeral: true });
+      return;
+    }
+
     // ── SHOP: role buy button ─────────────────────────────────────────────────
     if (customId.startsWith('shopbuy_role.')) {
       const idx = parseInt(customId.split('.')[1]);
@@ -3292,6 +3459,130 @@ Balance: **${bal.toLocaleString()} BB**`).setFooter({ text: "Bully's Casino • 
 });
 
 // ============================================================================
+// ============================================================================
+// BLACK MARKET — pending item use target capture
+// ============================================================================
+client.on('messageCreate', async msg => {
+  if (msg.author?.bot || !msg.guild) return;
+  if (!_pendingItemUse.has(msg.author.id)) return;
+  const { itemId, channelId } = _pendingItemUse.get(msg.author.id);
+  if (msg.channelId !== channelId) return;
+
+  const userId = msg.author.id, username = msg.author.username;
+
+  if (msg.content.trim().toLowerCase() === 'cancel') {
+    _pendingItemUse.delete(userId);
+    const r = await msg.reply('❌ Cancelled.'); setTimeout(() => r.delete().catch(() => {}), 4000);
+    await msg.delete().catch(() => {});
+    return;
+  }
+
+  const target = msg.mentions.users.first();
+  if (!target) return; // not a mention — ignore and keep waiting
+
+  _pendingItemUse.delete(userId);
+  await msg.delete().catch(() => {});
+
+  const item = ITEMS[itemId];
+
+  // Re-validate (cooldown/uses could have changed)
+  if (getItemUses(userId, itemId) < 1) { await msg.channel.send({ content: `<@${userId}> ❌ No uses of **${item.name}** remaining.` }).then(m => setTimeout(() => m.delete().catch(()=>{}), 6000)); return; }
+  const cdMs = itemCooldownRemaining(userId, itemId);
+  if (cdMs > 0) { await msg.channel.send({ content: `<@${userId}> ⏳ Still on cooldown — **${fmtCooldown(cdMs)}**.` }).then(m => setTimeout(() => m.delete().catch(()=>{}), 6000)); return; }
+  if (target.id === userId) { await msg.channel.send({ content: `<@${userId}> ❌ You can't use items on yourself.` }).then(m => setTimeout(() => m.delete().catch(()=>{}), 5000)); return; }
+  if (target.bot) { await msg.channel.send({ content: `<@${userId}> ❌ Bots aren't valid targets.` }).then(m => setTimeout(() => m.delete().catch(()=>{}), 5000)); return; }
+
+  const targetUser = getUser(target.id, target.username);
+
+  // ── Account Pull ──
+  if (itemId === 'account_pull') {
+    const actual = targetUser.bank_balance ?? 0;
+    const variance = 0.15 + Math.random() * 0.05;
+    const low  = Math.max(0, Math.round(actual * (1 - variance - 0.05) / 50) * 50);
+    const high = Math.round(actual * (1 + variance + 0.05) / 50) * 50;
+    consumeItemUse(userId, 'account_pull');
+    const embed = new EmbedBuilder().setColor('#c9a84c').setTitle('📄 Account Pull Complete')
+      .setDescription(`**${target.username}** appears to have between **${low.toLocaleString()} – ${high.toLocaleString()} BB** stored in their bank.\n\n*Result is approximate (±15–20%).*`)
+      .setFooter({ text: "Bully's World • Intel gathered." }).setTimestamp();
+    await msg.author.send({ embeds: [embed] }).catch(async () => {
+      const r = await msg.channel.send({ content: `<@${userId}>`, embeds: [embed] });
+      setTimeout(() => r.delete().catch(() => {}), 15000);
+    });
+    return;
+  }
+
+  // ── Pocket Scan ──
+  if (itemId === 'pocket_scan') {
+    consumeItemUse(userId, 'pocket_scan');
+    const embed = new EmbedBuilder().setColor('#c9a84c').setTitle('👀 Pocket Scan Complete')
+      .setDescription(`**${target.username}** is currently carrying **${targetUser.balance.toLocaleString()} BB**.`)
+      .setFooter({ text: "Bully's World • Knowledge is power." }).setTimestamp();
+    await msg.author.send({ embeds: [embed] }).catch(async () => {
+      const r = await msg.channel.send({ content: `<@${userId}>`, embeds: [embed] });
+      setTimeout(() => r.delete().catch(() => {}), 15000);
+    });
+    return;
+  }
+
+  // ── Vault Key ──
+  if (itemId === 'vault_key') {
+    if (target.id === CONFIG.OWNER_ID) {
+      await msg.channel.send({ content: `<@${userId}> ❌ You can't vault key the King. That's treason.` }).then(m => setTimeout(() => m.delete().catch(()=>{}), 6000));
+      return;
+    }
+    const targetBank = targetUser.bank_balance ?? 0;
+    if (targetBank < 3000) {
+      await msg.channel.send({ content: `<@${userId}> ❌ **${target.username}** doesn't have enough banked (minimum 3,000 BB required).` }).then(m => setTimeout(() => m.delete().catch(()=>{}), 6000));
+      return;
+    }
+    const pct = 0.20 + Math.random() * 0.05;
+    const stealAmt = Math.min(5000, Math.floor(targetBank * pct));
+    const blockMs = stealAmt <= 1000 ? 20000 : stealAmt <= 2500 ? 45000 : 90000;
+    const blockSecs = blockMs / 1000;
+    consumeItemUse(userId, 'vault_key');
+
+    await msg.author.send(`🔑 **Vault breach initiated** against **${target.username}**.\nAttempting to steal **${stealAmt.toLocaleString()} BB** from their bank.\nThey have **${blockSecs}s** to block it.`).catch(() => {});
+
+    let blocked = false;
+    try {
+      const blockBtn = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`vaultblock.${userId}.${stealAmt}`).setLabel(`🛑 BLOCK IT! (${blockSecs}s)`).setStyle(ButtonStyle.Danger)
+      );
+      const dmEmbed = new EmbedBuilder().setColor('#8B0000').setTitle('🚨 Bank Breach Detected!')
+        .setDescription(`Someone is attempting to steal **${stealAmt.toLocaleString()} BB** from your bank!\n\nPress **BLOCK IT** within **${blockSecs} seconds** to stop them.`)
+        .setFooter({ text: "Bully's World • Your bank is under attack." }).setTimestamp();
+      const dmMsg = await target.send({ embeds: [dmEmbed], components: [blockBtn] });
+      blocked = await new Promise(resolve => {
+        const collector = dmMsg.createMessageComponentCollector({ filter: i => i.customId.startsWith(`vaultblock.${userId}.`) && i.user.id === target.id, time: blockMs, max: 1 });
+        collector.on('collect', async i => { await i.update({ content: '🛑 **Breach blocked!**', embeds: [], components: [] }).catch(() => {}); resolve(true); });
+        collector.on('end', collected => { if (!collected.size) resolve(false); });
+      });
+      try { await dmMsg.edit({ components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('vb_done').setLabel(blocked ? '🛑 Blocked!' : '🔓 Too slow').setStyle(blocked ? ButtonStyle.Success : ButtonStyle.Secondary).setDisabled(true))] }); } catch (_) {}
+    } catch (_) { blocked = false; }
+
+    if (blocked) {
+      const penaltyPct = 0.15 + Math.random() * 0.05;
+      const thiefUser = getUser(userId, username);
+      const penalty = Math.min(Math.floor(targetBank * penaltyPct), thiefUser.bank_balance ?? 0);
+      if (penalty > 0) {
+        db.prepare('UPDATE balances SET bank_balance = bank_balance - ? WHERE user_id = ?').run(penalty, userId);
+        db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(userId, -penalty, `vault key penalty — ${target.username} blocked`);
+      }
+      await msg.author.send(`🛑 **Vault breach blocked!**\n**${target.username}** stopped you in time.\nPenalty: **${penalty.toLocaleString()} BB** removed from your bank.`).catch(() => {});
+      await target.send(`✅ **You blocked a bank breach!**\nThe attacker was penalized **${penalty.toLocaleString()} BB** from their own bank.`).catch(() => {});
+    } else {
+      const actual = Math.min(stealAmt, targetUser.bank_balance ?? 0);
+      db.prepare('UPDATE balances SET bank_balance = bank_balance - ? WHERE user_id = ?').run(actual, target.id);
+      db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(target.id, -actual, `vault key theft by ${username}`);
+      db.prepare('UPDATE balances SET bank_balance = bank_balance + ? WHERE user_id = ?').run(actual, userId);
+      db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(userId, actual, `vault key theft from ${target.username}`);
+      await msg.author.send(`🔓 **Vault Key Successful!**\nYou stole **${actual.toLocaleString()} BB** from **${target.username}**'s bank. Added to your bank.`).catch(() => {});
+      await target.send(`🔓 **Your bank was breached!**\nSomeone stole **${actual.toLocaleString()} BB** from your bank while you weren't watching.`).catch(() => {});
+    }
+    return;
+  }
+});
+
 // STEAL — DM defend buttons
 // ============================================================================
 client.on('messageCreate', async msg => {
