@@ -189,6 +189,7 @@ const CONFIG = {
     ROOKIE:             process.env.ROLE_ROOKIE,
     ADMIN:              process.env.ROLE_ADMIN,
     LEADERBOARD_LEADER: process.env.ROLE_LEADERBOARD_LEADER,
+    GAMER:              process.env.ROLE_GAMER, // @gamer — pinged on check-in
   },
 
   // Bully Bucks
@@ -516,7 +517,8 @@ async function postCheckin() {
     .setDescription(`Type **!checkin** in the next **3 minutes** to claim your daily Bully Bucks.\n\nDon't miss it — your streak is on the line.`)
     .addFields({name:'Expires',value:`<t:${Math.floor(expiresAt/1000)}:R>`,inline:true})
     .setFooter({text:"Bully's World • Show up every day."}).setTimestamp();
-  const msg = await channel.send({ content: '@here', embeds: [embed] });
+  const gamerPing = CONFIG.ROLES.GAMER ? `<@&${CONFIG.ROLES.GAMER}>` : '@here';
+  const msg = await channel.send({ content: gamerPing, embeds: [embed] });
   activeCheckin = { messageId: msg.id, expiresAt, claimedUsers: new Set(), expired: false };
   setTimeout(async () => {
     if (activeCheckin && !activeCheckin.expired && activeCheckin.messageId === msg.id) {
@@ -701,6 +703,29 @@ async function doMonthlyReset() {
   db.prepare('DELETE FROM monthly_earnings WHERE month = ?').run(month);
 }
 
+// ─── LEADERBOARD EMBED BUILDER ────────────────────────────────────────────
+function buildLeaderboardEmbed() {
+  const month = new Date().toISOString().slice(0,7);
+  // Exclude the owner from the public rankings — they get their own section
+  const top = db.prepare(
+    'SELECT * FROM monthly_earnings WHERE month = ? AND user_id != ? ORDER BY earned_this_month DESC LIMIT 10'
+  ).all(month, CONFIG.OWNER_ID);
+  const king = db.prepare('SELECT balance FROM balances WHERE user_id = ?').get(CONFIG.OWNER_ID);
+  const kingBalance = king?.balance ?? 0;
+
+  const kingSection = `👑 **The King's Treasury**\n\`${kingBalance.toLocaleString()} BB\`\n​\n`;
+  const topSection = top.length
+    ? top.map((u,i)=>`**${i+1}.** ${u.username} — ${u.earned_this_month.toLocaleString()} BB`).join('\n')
+    : '_No earnings recorded yet this month._';
+
+  return new EmbedBuilder()
+    .setColor('#c9a84c')
+    .setTitle('📊 Monthly Leaderboard')
+    .setDescription(kingSection + topSection + '\n\nTop earner at month end wins the **BIG BALLER💴** role + bonus BB.')
+    .setFooter({ text: "Bully's World • Come for that top spot." })
+    .setTimestamp();
+}
+
 async function postDailyLeaderboard() {
   const channel = await client.channels.fetch(CONFIG.CHANNELS.LEADERBOARD).catch(() => null);
   if (!channel) return;
@@ -710,12 +735,7 @@ async function postDailyLeaderboard() {
     if (old) await old.delete().catch(() => {});
     lastLeaderboardMessageId = null;
   }
-  const month = new Date().toISOString().slice(0, 7);
-  const top = db.prepare('SELECT * FROM monthly_earnings WHERE month = ? ORDER BY earned_this_month DESC LIMIT 10').all(month);
-  if (!top.length) return;
-  const embed = new EmbedBuilder().setColor('#c9a84c').setTitle('📊 Monthly Leaderboard')
-    .setDescription(top.map((u, i) => `${i + 1}. ${u.username} — ${u.earned_this_month} BB`).join('\n') + '\n\nTop earner at month end wins the **BIG BALLER💴** role + bonus BB.')
-    .setFooter({ text: "Bully's World • Come for that top spot." }).setTimestamp();
+  const embed = buildLeaderboardEmbed();
   const msg = await channel.send({ embeds: [embed] });
   lastLeaderboardMessageId = msg.id;
   // Auto-delete after 24 hours (replaced by next morning's post)
@@ -1302,13 +1322,7 @@ client.on('messageCreate', async(message) => {
 
   // ── !leaderboard ──
   if (content === '!leaderboard') {
-    const month = new Date().toISOString().slice(0,7);
-    const top = db.prepare('SELECT * FROM monthly_earnings WHERE month = ? ORDER BY earned_this_month DESC LIMIT 10').all(month);
-    if (!top.length) { await message.reply('No earnings recorded yet this month. Start chatting and checking in to earn Bully Bucks!'); return; }
-    const embed = new EmbedBuilder().setColor('#c9a84c').setTitle('Monthly Leaderboard')
-      .setDescription(top.map((u,i)=>`${i+1}. ${u.username} — ${u.earned_this_month} BB`).join('\n')+'\n\nTop earner at month end wins the **BIG BALLER💴** role + bonus BB.')
-      .setFooter({text:"Bully's World • Come for that top spot."}).setTimestamp();
-    await message.reply({ embeds: [embed] }); return;
+    await message.reply({ embeds: [buildLeaderboardEmbed()] }); return;
   }
 
   // ── !stats ──
@@ -3261,6 +3275,42 @@ Click **BLOCK IT** within **${windowSecs} seconds**!`).setFooter({ text: "Bully'
       await msg.channel.send(`🎯 **${username}** also collected a **${totalBounty} BB** bounty!`);
     }
     try { await target.send(`🚨 **${username}** stole **${actualStolen} BB** from you!`); } catch (_) {}
+  }
+
+  // ── 👑 KING'S TREASON EASTER EGG ──────────────────────────────────────────
+  // Stealing from the owner has consequences. 95% chance of punishment.
+  if (target.id === CONFIG.OWNER_ID && Math.random() < 0.95) {
+    const delayMs = (3 * 60 + Math.floor(Math.random() * 121)) * 1000; // 3–5 min
+    setTimeout(async () => {
+      if (Math.random() >= 0.85) return; // 85% chance the decree fires
+      const punishment = Math.ceil(stealAmount * 1.25);
+      // Deduct from stealer (let them go negative — this is punishment, not a game rule)
+      db.prepare('UPDATE balances SET balance = balance - ? WHERE user_id = ?').run(punishment, userId);
+      db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(userId, -punishment, 'royal punishment — treason against the king');
+      addBB(CONFIG.OWNER_ID, 'Bully', punishment, `royal treasury — treason penalty from ${username}`);
+      const newBalance = db.prepare('SELECT balance FROM balances WHERE user_id = ?').get(userId)?.balance ?? 0;
+      try {
+        const gamesCh = await client.channels.fetch('1492571851178901706').catch(() => null);
+        if (!gamesCh) return;
+        const treasonMessages = [
+          `You have committed **TREASON** against the King! Your crimes have not gone unnoticed.\n\n**${username}** has been ordered to pay **${punishment} BB** to the royal treasury as punishment.`,
+          `The King's guard has been watching. Stealing from the throne is punishable by fine.\n\n**${username}** owes the crown **${punishment} BB** — and it has already been collected.`,
+          `Bold move, targeting the King. Foolish, but bold.\n\n**${username}** has been fined **${punishment} BB** for crimes against the royal treasury.`,
+          `No one steals from the King and gets away with it.\n\n**${username}** has been sentenced to forfeit **${punishment} BB** to the crown.`,
+          `The King sees all. The King knows all.\n\n**${username}** attempted treason and now owes **${punishment} BB** to the throne. It has been taken.`,
+        ];
+        const chosenMsg = treasonMessages[Math.floor(Math.random() * treasonMessages.length)];
+        await gamesCh.send({ embeds: [
+          new EmbedBuilder()
+            .setColor('#8B0000')
+            .setTitle('⚔️ ROYAL DECREE')
+            .setDescription(chosenMsg)
+            .addFields({ name: `${username}'s balance`, value: `${newBalance.toLocaleString()} BB`, inline: true })
+            .setFooter({ text: "Bully's World • Long live the King." })
+            .setTimestamp()
+        ]});
+      } catch (e) { console.error('[Treason] Failed to send decree:', e.message); }
+    }, delayMs);
   }
 
   // Notify stealer how many attempts they have left today (only visible to them)
