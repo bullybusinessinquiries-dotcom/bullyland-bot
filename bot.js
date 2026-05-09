@@ -3964,4 +3964,17 @@ client.once('ready', async () => {
   }
 });
 
+// ─── GLOBAL ERROR GUARDS ───────────────────────────────────────────────────
+// Without these, Discord gateway errors (rate limits, reconnects) throw an
+// unhandled 'error' event that kills the entire Node process.
+client.on('error', err => {
+  console.error(`[Discord] Client error (handled — bot stays up): ${err.message}`);
+});
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[Process] Unhandled promise rejection (handled — bot stays up):', reason?.message ?? reason);
+});
+process.on('uncaughtException', err => {
+  console.error('[Process] Uncaught exception (handled — bot stays up):', err.message);
+});
+
 client.login(process.env.DISCORD_TOKEN);
