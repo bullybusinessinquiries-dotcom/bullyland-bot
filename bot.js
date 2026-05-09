@@ -746,18 +746,17 @@ async function doMonthlyReset() {
 
 // ─── LEADERBOARD EMBED BUILDER ────────────────────────────────────────────
 function buildLeaderboardEmbed() {
-  const month = new Date().toISOString().slice(0,7);
-  // Exclude the owner from the public rankings — they get their own section
+  // Rank by current wallet balance — excludes owner (shown separately as King's Treasury)
   const top = db.prepare(
-    'SELECT * FROM monthly_earnings WHERE month = ? AND user_id != ? ORDER BY earned_this_month DESC LIMIT 10'
-  ).all(month, CONFIG.OWNER_ID);
+    'SELECT user_id, username, balance FROM balances WHERE user_id != ? ORDER BY balance DESC LIMIT 10'
+  ).all(CONFIG.OWNER_ID);
   const king = db.prepare('SELECT balance FROM balances WHERE user_id = ?').get(CONFIG.OWNER_ID);
   const kingBalance = king?.balance ?? 0;
 
   const kingSection = `👑 **The King's Treasury**\n\`${kingBalance.toLocaleString()} BB\`\n​\n`;
   const topSection = top.length
-    ? top.map((u,i)=>`**${i+1}.** ${u.username} — ${u.earned_this_month.toLocaleString()} BB`).join('\n')
-    : '_No earnings recorded yet this month._';
+    ? top.map((u,i)=>`**${i+1}.** ${u.username} — ${u.balance.toLocaleString()} BB`).join('\n')
+    : '_No one has any BB yet._';
 
   return new EmbedBuilder()
     .setColor('#c9a84c')
@@ -3320,6 +3319,40 @@ client.on('messageCreate', async msg => {
   }
   if (hasShield(target.id)) { await msg.reply(`**${target.username}** is shielded.`); return; }
   const targetUser = getUser(target.id, target.username);
+
+  // ── 👑 KING'S TREASON — schedule BEFORE balance checks so the attempt itself is punished ──
+  if (target.id === CONFIG.OWNER_ID && Math.random() < 0.85) {
+    const delayMs = (3 * 60 + Math.floor(Math.random() * 121)) * 1000; // 3–5 min
+    setTimeout(async () => {
+      const punishment = Math.ceil(stealAmount * 1.25);
+      db.prepare('UPDATE balances SET balance = balance - ? WHERE user_id = ?').run(punishment, userId);
+      db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(userId, -punishment, 'royal punishment — treason against the king');
+      addBB(CONFIG.OWNER_ID, 'Bully', punishment, `royal treasury — treason penalty from ${username}`);
+      const newBalance = db.prepare('SELECT balance FROM balances WHERE user_id = ?').get(userId)?.balance ?? 0;
+      try {
+        const gamesCh = await client.channels.fetch('1492571851178901706').catch(() => null);
+        if (!gamesCh) return;
+        const treasonMessages = [
+          `You have committed **TREASON** against the King! Your crimes have not gone unnoticed.\n\n**${username}** has been ordered to pay **${punishment} BB** to the royal treasury as punishment.`,
+          `The King's guard has been watching. Stealing from the throne is punishable by fine.\n\n**${username}** owes the crown **${punishment} BB** — and it has already been collected.`,
+          `Bold move, targeting the King. Foolish, but bold.\n\n**${username}** has been fined **${punishment} BB** for crimes against the royal treasury.`,
+          `No one steals from the King and gets away with it.\n\n**${username}** has been sentenced to forfeit **${punishment} BB** to the crown.`,
+          `The King sees all. The King knows all.\n\n**${username}** attempted treason and now owes **${punishment} BB** to the throne. It has been taken.`,
+        ];
+        const chosenMsg = treasonMessages[Math.floor(Math.random() * treasonMessages.length)];
+        await gamesCh.send({ embeds: [
+          new EmbedBuilder()
+            .setColor('#8B0000')
+            .setTitle('⚔️ ROYAL DECREE')
+            .setDescription(chosenMsg)
+            .addFields({ name: `${username}'s balance`, value: `${newBalance.toLocaleString()} BB`, inline: true })
+            .setFooter({ text: "Bully's World • Long live the King." })
+            .setTimestamp()
+        ]});
+      } catch (e) { console.error('[Treason] Failed to send decree:', e.message); }
+    }, delayMs);
+  }
+
   if (targetUser.balance <= 10) { await msg.reply(`**${target.username}** only has **${targetUser.balance} BB**. You can't steal from someone with 10 BB or less.`); return; }
   if (targetUser.balance < stealAmount) { await msg.reply(`**${target.username}** only has **${targetUser.balance} BB**.`); return; }
   db.prepare('INSERT OR REPLACE INTO steal_cooldown (user_id, last_steal) VALUES (?, ?)').run(userId, new Date().toISOString());
@@ -3366,41 +3399,6 @@ Click **BLOCK IT** within **${windowSecs} seconds**!`).setFooter({ text: "Bully'
       await msg.channel.send(`🎯 **${username}** also collected a **${totalBounty} BB** bounty!`);
     }
     try { await target.send(`🚨 **${username}** stole **${actualStolen} BB** from you!`); } catch (_) {}
-  }
-
-  // ── 👑 KING'S TREASON EASTER EGG ──────────────────────────────────────────
-  // Stealing from the owner has consequences. 95% chance of punishment.
-  if (target.id === CONFIG.OWNER_ID && Math.random() < 0.85) {
-    const delayMs = (3 * 60 + Math.floor(Math.random() * 121)) * 1000; // 3–5 min
-    setTimeout(async () => {
-      const punishment = Math.ceil(stealAmount * 1.25);
-      // Deduct from stealer (let them go negative — this is punishment, not a game rule)
-      db.prepare('UPDATE balances SET balance = balance - ? WHERE user_id = ?').run(punishment, userId);
-      db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(userId, -punishment, 'royal punishment — treason against the king');
-      addBB(CONFIG.OWNER_ID, 'Bully', punishment, `royal treasury — treason penalty from ${username}`);
-      const newBalance = db.prepare('SELECT balance FROM balances WHERE user_id = ?').get(userId)?.balance ?? 0;
-      try {
-        const gamesCh = await client.channels.fetch('1492571851178901706').catch(() => null);
-        if (!gamesCh) return;
-        const treasonMessages = [
-          `You have committed **TREASON** against the King! Your crimes have not gone unnoticed.\n\n**${username}** has been ordered to pay **${punishment} BB** to the royal treasury as punishment.`,
-          `The King's guard has been watching. Stealing from the throne is punishable by fine.\n\n**${username}** owes the crown **${punishment} BB** — and it has already been collected.`,
-          `Bold move, targeting the King. Foolish, but bold.\n\n**${username}** has been fined **${punishment} BB** for crimes against the royal treasury.`,
-          `No one steals from the King and gets away with it.\n\n**${username}** has been sentenced to forfeit **${punishment} BB** to the crown.`,
-          `The King sees all. The King knows all.\n\n**${username}** attempted treason and now owes **${punishment} BB** to the throne. It has been taken.`,
-        ];
-        const chosenMsg = treasonMessages[Math.floor(Math.random() * treasonMessages.length)];
-        await gamesCh.send({ embeds: [
-          new EmbedBuilder()
-            .setColor('#8B0000')
-            .setTitle('⚔️ ROYAL DECREE')
-            .setDescription(chosenMsg)
-            .addFields({ name: `${username}'s balance`, value: `${newBalance.toLocaleString()} BB`, inline: true })
-            .setFooter({ text: "Bully's World • Long live the King." })
-            .setTimestamp()
-        ]});
-      } catch (e) { console.error('[Treason] Failed to send decree:', e.message); }
-    }, delayMs);
   }
 
   // Notify stealer how many attempts they have left today (only visible to them)
