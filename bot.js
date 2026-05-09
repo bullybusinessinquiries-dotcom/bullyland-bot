@@ -304,12 +304,16 @@ function spendBB(userId, amount) {
 // Add each level role ID + its bank capacity below.
 // Higher roles override lower ones — the highest matching role wins.
 const BANK_LEVEL_ROLES = [
-  // { roleId: 'ROLE_ID', capacity: 500,  label: 'Level 1'  },
-  // { roleId: 'ROLE_ID', capacity: 1000, label: 'Level 5'  },
-  // { roleId: 'ROLE_ID', capacity: 2500, label: 'Level 10' },
-  // ... fill in with actual Lurkr level role IDs
+  { roleId: '1490053545116827934', capacity: 500,   label: 'Rookie'         },
+  { roleId: '1490051621521195099', capacity: 1000,  label: 'Newbie'         },
+  { roleId: '1490051740349894867', capacity: 2000,  label: 'BB Member'      },
+  { roleId: '1490051785048588449', capacity: 3500,  label: 'Veteran'        },
+  { roleId: '1490051823384662187', capacity: 5000,  label: 'OG'             },
+  { roleId: '1490051918976913558', capacity: 7500,  label: 'VIP'            },
+  { roleId: '1490052510868574341', capacity: 10000, label: 'BOSS'           },
+  { roleId: '1490051416449093652', capacity: 15000, label: 'BULLY Approved' },
 ];
-const BANK_BASE_CAPACITY = 250; // everyone gets this floor before earning any level roles
+const BANK_BASE_CAPACITY = 250; // no level role yet
 
 function getBankCapacity(member) {
   let best = { capacity: BANK_BASE_CAPACITY, label: 'Base' };
