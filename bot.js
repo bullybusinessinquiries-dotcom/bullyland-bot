@@ -3710,7 +3710,8 @@ client.on('messageCreate', async msg => {
         '`!set @user [amount]` — Set a user balance to exact amount\n' +
         '`!resetall` — Set EVERYONE balance to 0 (requires confirm)\n' +
         '`!giftall [amount]` — Gift every server member BB (requires confirm)\n' +
-        '`!giveall [amount]` — Give every DB user BB (requires confirm)\n\n' +
+        '`!giveall [amount]` — Give every DB user BB (requires confirm)\n' +
+        '`!giverole @role [amount]` — Give BB to all members with a specific role\n\n' +
         '**CASINO** *(admins bypass hours)*\n' +
         '`!testcasino` — Open casino now\n\n' +
         '**SHOP**\n' +
@@ -3798,6 +3799,29 @@ client.on('messageCreate', async msg => {
     const amount = parseInt(content.split(' ')[1]);
     if (isNaN(amount) || amount < 1) { await msg.reply('Usage: `!giveall [amount]`'); return; }
     await msg.reply(`⚠️ Give **${amount} BB** to every user in the DB? Type **!giveall ${amount} confirm** to proceed.`);
+    return;
+  }
+
+  // ── !giverole @role [amount] ──
+  if (lower.startsWith('!giverole ')) {
+    const role = msg.mentions.roles.first();
+    const parts = content.trim().split(/\s+/);
+    const amount = parseInt(parts[parts.length - 1]);
+    if (!role) { await msg.reply('Usage: `!giverole @role [amount]`'); return; }
+    if (isNaN(amount) || amount < 1) { await msg.reply('Usage: `!giverole @role [amount]`'); return; }
+
+    await msg.reply(`⏳ Fetching members with **${role.name}**...`);
+    const guild = await client.guilds.fetch(CONFIG.GUILD_ID);
+    await guild.members.fetch(); // pull full member list
+    const members = guild.members.cache.filter(m => m.roles.cache.has(role.id) && !m.user.bot);
+    if (!members.size) { await msg.reply(`No members found with the **${role.name}** role.`); return; }
+
+    let count = 0;
+    for (const [, member] of members) {
+      addBB(member.user.id, member.user.username, amount, `admin gift to ${role.name}`);
+      count++;
+    }
+    await msg.reply(`✅ Gave **${amount} BB** to **${count}** member${count !== 1 ? 's' : ''} with the **${role.name}** role.`);
     return;
   }
 
