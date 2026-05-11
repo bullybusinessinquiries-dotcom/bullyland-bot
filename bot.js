@@ -1112,7 +1112,7 @@ client.on('guildMemberAdd', async(member) => {
         `Every now and then a mystery drop appears in the server. Nobody knows what it is until they claim it — it could be a discount code or even a free item. The first person to type **!claim** gets it. Keep your notifications on so you never miss one!\n\n` +
         `─────────────────────\n\n` +
         `**🏆 Leveling Up**\n` +
-        `The more you chat and participate the more you level up. Each new level unlocks new channels and perks inside the server. Your level is tracked automatically — you don't have to do anything special.\n\n` +
+        `The more you chat and participate the more you level up. Each new level raises your bank limit and unlocks more perks. When you hit a new level I'll DM you automatically with everything you've just unlocked — no commands needed.\n\n` +
         `─────────────────────\n\n` +
         `**📋 Useful Commands**\n` +
         `Think of these like text shortcuts. Just type them in any channel:\n\n` +
@@ -1126,6 +1126,69 @@ client.on('guildMemberAdd', async(member) => {
       .setFooter({text:"Bully's Apparel • Wear the art."}).setTimestamp();
     await member.send({ embeds: [embed] });
   } catch { console.log(`[Welcome DM] Could not DM ${member.user.username}`); }
+});
+
+// ─── LEVEL-UP REWARDS — auto-DM when Lurkr assigns a new level role ──────────
+const LEVEL_REWARD_INFO = {
+  '1490053545116827934': { // Rookie
+    title: '🏁 You hit Level 1 — Welcome to the game.',
+    body: `Your **bank is now unlocked**. You can deposit up to **150 BB** to keep it safe from steals and heists.\n\n` +
+          `**What's open to you now:**\n` +
+          `• **!shop** — browse roles, perks & collectibles that rotate every 12 hours\n` +
+          `• **!bank** — deposit and withdraw your Bully Bucks\n` +
+          `• **!lottery** — buy tickets for the weekly jackpot\n` +
+          `• **!balance** — check your BB at any time\n\n` +
+          `Keep chatting to level up — each new level raises your bank cap and unlocks more.`,
+  },
+  '1490051621521195099': { // Newbie
+    title: '📈 Level Up — Bank cap raised to 350 BB',
+    body: `Your bank can now hold up to **350 BB**. Deposit more to protect it.\n\nType **!bank** to manage your balance.`,
+  },
+  '1490051740349894867': { // BB Member
+    title: '📈 Level Up — Bank cap raised to 700 BB',
+    body: `Your bank limit is now **700 BB**. The more you store, the more you have to protect — and the more you can flex.\n\nType **!bank** to deposit.`,
+  },
+  '1490051785048588449': { // Veteran
+    title: '📈 Level Up — Bank cap raised to 1,250 BB',
+    body: `Veteran status. Your bank now holds up to **1,250 BB**.\n\nYou're building real weight in BULLYLAND. Keep going.`,
+  },
+  '1490051823384662187': { // OG
+    title: '🔥 Level Up — OG. Bank cap raised to 2,500 BB',
+    body: `OG status unlocked. Your bank can now hold **2,500 BB**.\n\nYou've been here long enough to know how this works. Protect your bag.`,
+  },
+  '1490051918976913558': { // VIP
+    title: '💎 Level Up — VIP. Bank cap raised to 4,000 BB',
+    body: `You're VIP now. Bank cap at **4,000 BB**.\n\nNot many people get here. You've put in the work — BULLYLAND sees it.`,
+  },
+  '1490052510868574341': { // BOSS
+    title: '👑 Level Up — BOSS. Bank cap raised to 6,000 BB',
+    body: `BOSS tier. Your bank holds up to **6,000 BB** now.\n\nYou're one of the most active members in BULLYLAND. Respect.`,
+  },
+  '1490051416449093652': { // BULLY Approved
+    title: '🌟 Max Level — BULLY Approved. Bank cap raised to 9,000 BB',
+    body: `You've reached the top. **BULLY Approved** — bank cap maxed at **9,000 BB**.\n\nThis is as high as it goes. You are BULLYLAND.`,
+  },
+};
+
+client.on('guildMemberUpdate', async (oldMember, newMember) => {
+  try {
+    const addedRoleIds = [...newMember.roles.cache.keys()].filter(id => !oldMember.roles.cache.has(id));
+    for (const roleId of addedRoleIds) {
+      const info = LEVEL_REWARD_INFO[roleId];
+      if (!info) continue;
+      const tier = BANK_LEVEL_ROLES.find(t => t.roleId === roleId);
+      const embed = new EmbedBuilder()
+        .setColor('#c9a84c')
+        .setTitle(info.title)
+        .setDescription(info.body)
+        .setFooter({ text: "Bully's World • Keep leveling up." })
+        .setTimestamp();
+      await newMember.send({ embeds: [embed] }).catch(() => {});
+      console.log(`[LevelUp] Sent reward DM to ${newMember.user.username} for role ${tier?.label || roleId}`);
+    }
+  } catch (e) {
+    console.error('[LevelUp] guildMemberUpdate error:', e.message);
+  }
 });
 
 async function cleanupHeistMessages(heistId) {
