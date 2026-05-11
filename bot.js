@@ -3184,9 +3184,9 @@ client.on('interactionCreate', async interaction => {
           const rem = 5 * 60 * 1000 - (Date.now() - new Date(cd.last_heist).getTime());
           if (rem > 0) { const m = Math.floor(rem / 60000), s = Math.ceil((rem % 60000) / 1000); await interaction.reply({ content: `⏳ Wait **${m > 0 ? m + 'm ' : ''}${s}s** before leading another heist.`, ephemeral: true }); return; }
         }
-        const twelveHoursAgo = new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString();
-        const heistCount = db.prepare("SELECT COUNT(*) as c FROM heist_log WHERE user_id = ? AND created_at > ?").get(userId, twelveHoursAgo);
-        if (heistCount.c >= 3) { await interaction.reply({ content: "You've led **3 heists** in the last 12 hours.", ephemeral: true }); return; }
+        const sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
+        const heistCount = db.prepare("SELECT COUNT(*) as c FROM heist_log WHERE user_id = ? AND created_at > ?").get(userId, sixHoursAgo);
+        if (heistCount.c >= 5) { await interaction.reply({ content: "You've led **5 heists** in the last 6 hours.", ephemeral: true }); return; }
       }
       const memberRoles = interaction.member?.roles.cache;
       const heistMinRoles = [null, null, process.env.ROLE_ROOKIE, process.env.ROLE_VETERAN, process.env.ROLE_OG, process.env.ROLE_VIP];
