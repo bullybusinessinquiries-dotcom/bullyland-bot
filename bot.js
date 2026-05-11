@@ -3684,9 +3684,9 @@ client.on('messageCreate', async msg => {
       const rem = 3 * 60 * 1000 - (Date.now() - new Date(cd.last_steal).getTime());
       if (rem > 0) { const m = Math.floor(rem / 60000), s = Math.ceil((rem % 60000) / 1000); await msg.reply(`⏳ Wait **${m > 0 ? m + 'm ' : ''}${s}s** before stealing again.`); return; }
     }
-    const today = new Date().toISOString().slice(0, 10);
-    const ts = db.prepare("SELECT COUNT(*) as c FROM steal_log WHERE stealer_id = ? AND DATE(created_at) = ?").get(userId, today);
-    if (ts.c >= 10) { await msg.reply("You've hit your 10 steal limit for today."); return; }
+    const eightHoursAgo = new Date(Date.now() - 8 * 60 * 60 * 1000).toISOString();
+    const ts = db.prepare("SELECT COUNT(*) as c FROM steal_log WHERE stealer_id = ? AND created_at > ?").get(userId, eightHoursAgo);
+    if (ts.c >= 8) { await msg.reply("You've hit your **8 steal limit** for the last 8 hours."); return; }
     const stealerUser = getUser(userId, username);
     if (stealerUser.balance <= -50) { await msg.reply("You're too broke to steal. You need to get back above **-50 BB** first."); return; }
   }
@@ -3777,10 +3777,10 @@ Click **BLOCK IT** within **${windowSecs} seconds**!`).setFooter({ text: "Bully'
 
   // Notify stealer how many attempts they have left today (only visible to them)
   if (!isAdminSteal) {
-    const today2 = new Date().toISOString().slice(0, 10);
-    const used = db.prepare("SELECT COUNT(*) as c FROM steal_log WHERE stealer_id = ? AND DATE(created_at) = ?").get(userId, today2).c;
-    const left = Math.max(0, 10 - used);
-    try { await msg.author.send(`🕵️ You have **${left} steal attempt${left !== 1 ? 's' : ''}** left today.`); } catch (_) {}
+    const eightHoursAgo2 = new Date(Date.now() - 8 * 60 * 60 * 1000).toISOString();
+    const used = db.prepare("SELECT COUNT(*) as c FROM steal_log WHERE stealer_id = ? AND created_at > ?").get(userId, eightHoursAgo2).c;
+    const left = Math.max(0, 8 - used);
+    try { await msg.author.send(`🕵️ You have **${left} steal attempt${left !== 1 ? 's' : ''}** left this 8-hour window.`); } catch (_) {}
   }
 });
 
