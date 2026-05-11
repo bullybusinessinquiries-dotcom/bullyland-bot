@@ -283,7 +283,7 @@ let activeCasino = false;
 let dropsEnabled = true;
 let lastShopMessageId = null;
 let lastLeaderboardMessageId = null;
-const _pendingItemUse = new Map(); // userId → { itemId, channelId }
+const _pendingDMUse = new Map(); // userId → { itemId, guildId }
 
 // ─── DB HELPERS ────────────────────────────────────────────────────────────
 function getUser(userId, username) {
@@ -2526,7 +2526,8 @@ That's ${pool.length} tickets worth of Bully Bucks going to one lucky winner.
 
 New lottery starts now — type **!lottery** to buy tickets.`)
       .setFooter({ text: "Bully's World • You could be next." }).setTimestamp();
-    await channel.send({ content: '@everyone', embeds: [embed] });
+    const gamerPing = CONFIG.ROLES.GAMER ? `<@&${CONFIG.ROLES.GAMER}>` : '@here';
+    await channel.send({ content: gamerPing, embeds: [embed] });
   }
   db.prepare('DELETE FROM lottery_tickets WHERE week = ?').run(week);
 }
@@ -2998,7 +2999,8 @@ client.on('interactionCreate', async interaction => {
       if (getItemStacks(userId, itemId) >= item.stackLimit) { await interaction.reply({ content: `❌ Stack limit reached (${item.stackLimit}/${item.stackLimit}). Use your existing **${item.name}** first.`, ephemeral: true }); return; }
       spendBB(userId, item.price);
       db.prepare('INSERT INTO user_items (user_id, item_id, uses_remaining) VALUES (?, ?, ?)').run(userId, itemId, item.maxUses);
-      await interaction.reply({ content: `✅ Purchased **${item.emoji} ${item.name}** — ${item.maxUses} use${item.maxUses>1?'s':''}. Press **Use ${item.name}** to deploy it.`, ephemeral: true });
+      await interaction.reply({ content: `✅ Purchased **${item.emoji} ${item.name}** — ${item.maxUses} use${item.maxUses>1?'s':''}. Check your DMs for instructions.`, ephemeral: true });
+      await interaction.user.send(`${item.emoji} **${item.name}** — purchased!\n\n${item.description}\n\n**Uses remaining:** ${item.maxUses}\n\n**How to deploy:** Go to \`!blackmarket\`, press **Use ${item.name}**, and I'll DM you to select your target. Results are delivered here, privately.`).catch(() => {});
       return;
     }
 
@@ -3011,9 +3013,14 @@ client.on('interactionCreate', async interaction => {
       if (getItemUses(userId, itemId) < 1) { await interaction.reply({ content: `❌ No uses of **${item.name}** remaining.`, ephemeral: true }); return; }
       const cdMs = itemCooldownRemaining(userId, itemId);
       if (cdMs > 0) { await interaction.reply({ content: `⏳ **${item.name}** is on cooldown — **${fmtCooldown(cdMs)}** remaining.`, ephemeral: true }); return; }
-      // Set pending item use — next message from this user with a mention triggers it
-      _pendingItemUse.set(userId, { itemId, channelId: interaction.channelId });
-      await interaction.reply({ content: `${item.emoji} **${item.name}** ready.\n\nMention the target user in this channel to deploy it. Example: \`@username\`\n\nType **cancel** to abort.`, ephemeral: true });
+      // Initiate DM-based targeting flow
+      try {
+        await interaction.user.send(`${item.emoji} **${item.name}** ready to deploy.\n\nMention or type the username of your target below. Example: \`@username\`\n\nType **cancel** to abort.`);
+        _pendingDMUse.set(userId, { itemId, guildId: interaction.guildId });
+        await interaction.reply({ content: `${item.emoji} Check your DMs — I'll take your target there.`, ephemeral: true });
+      } catch (_) {
+        await interaction.reply({ content: `❌ I couldn't DM you. Please enable DMs from server members and try again.`, ephemeral: true });
+      }
       return;
     }
 
@@ -3460,37 +3467,46 @@ Balance: **${bal.toLocaleString()} BB**`).setFooter({ text: "Bully's Casino • 
 
 // ============================================================================
 // ============================================================================
-// BLACK MARKET — pending item use target capture
+// BLACK MARKET — DM-based item use target capture
 // ============================================================================
 client.on('messageCreate', async msg => {
-  if (msg.author?.bot || !msg.guild) return;
-  if (!_pendingItemUse.has(msg.author.id)) return;
-  const { itemId, channelId } = _pendingItemUse.get(msg.author.id);
-  if (msg.channelId !== channelId) return;
-
+  if (msg.author?.bot || msg.guild) return; // DMs only
+  if (!_pendingDMUse.has(msg.author.id)) return;
+  const { itemId, guildId } = _pendingDMUse.get(msg.author.id);
   const userId = msg.author.id, username = msg.author.username;
 
   if (msg.content.trim().toLowerCase() === 'cancel') {
-    _pendingItemUse.delete(userId);
-    const r = await msg.reply('❌ Cancelled.'); setTimeout(() => r.delete().catch(() => {}), 4000);
-    await msg.delete().catch(() => {});
+    _pendingDMUse.delete(userId);
+    await msg.reply('❌ Cancelled.').catch(() => {});
     return;
   }
 
-  const target = msg.mentions.users.first();
-  if (!target) return; // not a mention — ignore and keep waiting
+  // Resolve target — mention preferred, then username string search
+  let target = msg.mentions.users.first();
+  if (!target) {
+    const query = msg.content.trim().replace(/^@/, '').toLowerCase();
+    try {
+      const guild = await client.guilds.fetch(guildId);
+      const members = await guild.members.fetch({ query, limit: 5 });
+      const mem = members.find(m => m.user.username.toLowerCase() === query || m.displayName.toLowerCase() === query) || members.first();
+      if (mem) target = mem.user;
+    } catch (_) {}
+  }
 
-  _pendingItemUse.delete(userId);
-  await msg.delete().catch(() => {});
+  if (!target) {
+    await msg.reply("❌ Couldn't find that user. Try mentioning them (`@username`) or check the spelling. Type **cancel** to abort.").catch(() => {});
+    return;
+  }
 
+  _pendingDMUse.delete(userId);
   const item = ITEMS[itemId];
 
-  // Re-validate (cooldown/uses could have changed)
-  if (getItemUses(userId, itemId) < 1) { await msg.channel.send({ content: `<@${userId}> ❌ No uses of **${item.name}** remaining.` }).then(m => setTimeout(() => m.delete().catch(()=>{}), 6000)); return; }
+  // Re-validate (cooldown/uses could have changed since button press)
+  if (getItemUses(userId, itemId) < 1) { await msg.reply(`❌ No uses of **${item.name}** remaining.`).catch(() => {}); return; }
   const cdMs = itemCooldownRemaining(userId, itemId);
-  if (cdMs > 0) { await msg.channel.send({ content: `<@${userId}> ⏳ Still on cooldown — **${fmtCooldown(cdMs)}**.` }).then(m => setTimeout(() => m.delete().catch(()=>{}), 6000)); return; }
-  if (target.id === userId) { await msg.channel.send({ content: `<@${userId}> ❌ You can't use items on yourself.` }).then(m => setTimeout(() => m.delete().catch(()=>{}), 5000)); return; }
-  if (target.bot) { await msg.channel.send({ content: `<@${userId}> ❌ Bots aren't valid targets.` }).then(m => setTimeout(() => m.delete().catch(()=>{}), 5000)); return; }
+  if (cdMs > 0) { await msg.reply(`⏳ Still on cooldown — **${fmtCooldown(cdMs)}**.`).catch(() => {}); return; }
+  if (target.id === userId) { await msg.reply("❌ You can't use items on yourself.").catch(() => {}); return; }
+  if (target.bot) { await msg.reply("❌ Bots aren't valid targets.").catch(() => {}); return; }
 
   const targetUser = getUser(target.id, target.username);
 
@@ -3504,10 +3520,7 @@ client.on('messageCreate', async msg => {
     const embed = new EmbedBuilder().setColor('#c9a84c').setTitle('📄 Account Pull Complete')
       .setDescription(`**${target.username}** appears to have between **${low.toLocaleString()} – ${high.toLocaleString()} BB** stored in their bank.\n\n*Result is approximate (±15–20%).*`)
       .setFooter({ text: "Bully's World • Intel gathered." }).setTimestamp();
-    await msg.author.send({ embeds: [embed] }).catch(async () => {
-      const r = await msg.channel.send({ content: `<@${userId}>`, embeds: [embed] });
-      setTimeout(() => r.delete().catch(() => {}), 15000);
-    });
+    await msg.reply({ embeds: [embed] }).catch(() => {});
     return;
   }
 
@@ -3517,22 +3530,19 @@ client.on('messageCreate', async msg => {
     const embed = new EmbedBuilder().setColor('#c9a84c').setTitle('👀 Pocket Scan Complete')
       .setDescription(`**${target.username}** is currently carrying **${targetUser.balance.toLocaleString()} BB**.`)
       .setFooter({ text: "Bully's World • Knowledge is power." }).setTimestamp();
-    await msg.author.send({ embeds: [embed] }).catch(async () => {
-      const r = await msg.channel.send({ content: `<@${userId}>`, embeds: [embed] });
-      setTimeout(() => r.delete().catch(() => {}), 15000);
-    });
+    await msg.reply({ embeds: [embed] }).catch(() => {});
     return;
   }
 
   // ── Vault Key ──
   if (itemId === 'vault_key') {
     if (target.id === CONFIG.OWNER_ID) {
-      await msg.channel.send({ content: `<@${userId}> ❌ You can't vault key the King. That's treason.` }).then(m => setTimeout(() => m.delete().catch(()=>{}), 6000));
+      await msg.reply("❌ You can't vault key the King. That's treason.").catch(() => {});
       return;
     }
     const targetBank = targetUser.bank_balance ?? 0;
     if (targetBank < 3000) {
-      await msg.channel.send({ content: `<@${userId}> ❌ **${target.username}** doesn't have enough banked (minimum 3,000 BB required).` }).then(m => setTimeout(() => m.delete().catch(()=>{}), 6000));
+      await msg.reply(`❌ **${target.username}** doesn't have enough banked (minimum 3,000 BB required).`).catch(() => {});
       return;
     }
     const pct = 0.20 + Math.random() * 0.05;
@@ -3541,7 +3551,7 @@ client.on('messageCreate', async msg => {
     const blockSecs = blockMs / 1000;
     consumeItemUse(userId, 'vault_key');
 
-    await msg.author.send(`🔑 **Vault breach initiated** against **${target.username}**.\nAttempting to steal **${stealAmt.toLocaleString()} BB** from their bank.\nThey have **${blockSecs}s** to block it.`).catch(() => {});
+    await msg.reply(`🔑 **Vault breach initiated** against **${target.username}**.\nAttempting to steal **${stealAmt.toLocaleString()} BB** from their bank.\nThey have **${blockSecs}s** to block it.`).catch(() => {});
 
     let blocked = false;
     try {
@@ -3568,7 +3578,7 @@ client.on('messageCreate', async msg => {
         db.prepare('UPDATE balances SET bank_balance = bank_balance - ? WHERE user_id = ?').run(penalty, userId);
         db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(userId, -penalty, `vault key penalty — ${target.username} blocked`);
       }
-      await msg.author.send(`🛑 **Vault breach blocked!**\n**${target.username}** stopped you in time.\nPenalty: **${penalty.toLocaleString()} BB** removed from your bank.`).catch(() => {});
+      await msg.reply(`🛑 **Vault breach blocked!**\n**${target.username}** stopped you in time.\nPenalty: **${penalty.toLocaleString()} BB** removed from your bank.`).catch(() => {});
       await target.send(`✅ **You blocked a bank breach!**\nThe attacker was penalized **${penalty.toLocaleString()} BB** from their own bank.`).catch(() => {});
     } else {
       const actual = Math.min(stealAmt, targetUser.bank_balance ?? 0);
@@ -3576,7 +3586,7 @@ client.on('messageCreate', async msg => {
       db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(target.id, -actual, `vault key theft by ${username}`);
       db.prepare('UPDATE balances SET bank_balance = bank_balance + ? WHERE user_id = ?').run(actual, userId);
       db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(userId, actual, `vault key theft from ${target.username}`);
-      await msg.author.send(`🔓 **Vault Key Successful!**\nYou stole **${actual.toLocaleString()} BB** from **${target.username}**'s bank. Added to your bank.`).catch(() => {});
+      await msg.reply(`🔓 **Vault Key Successful!**\nYou stole **${actual.toLocaleString()} BB** from **${target.username}**'s bank. Added to your bank.`).catch(() => {});
       await target.send(`🔓 **Your bank was breached!**\nSomeone stole **${actual.toLocaleString()} BB** from your bank while you weren't watching.`).catch(() => {});
     }
     return;
