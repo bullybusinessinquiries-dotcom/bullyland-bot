@@ -1251,36 +1251,38 @@ client.on('messageReactionAdd', async (reaction, user) => {
 // ─── WELCOME DM ────────────────────────────────────────────────────────────
 client.on('guildMemberAdd', async(member) => {
   try {
-    const embed = new EmbedBuilder().setColor('#1a1a1a').setTitle("🎉 Welcome to BULLYLAND!")
+    const embed = new EmbedBuilder()
+      .setColor('#c9a84c')
+      .setTitle(`🎨 Welcome to BULLYLAND, ${member.displayName}!`)
       .setDescription(
-        `Hey ${member.displayName}! So glad you're here. This is Bully's private community — a place for his biggest supporters to connect, collect exclusive perks and get rewarded just for showing up.\n\n` +
-        `─────────────────────\n\n` +
-        `**💰 What are Bully Bucks?**\n` +
-        `Bully Bucks are our server's currency. You earn them automatically just by chatting in the server. The more you participate the more you earn. You can spend them on discounts for Bully's Apparel, giveaway tickets and exclusive collectible badges.\n\n` +
-        `─────────────────────\n\n` +
-        `**📅 Daily Check-in**\n` +
-        `Every morning between 10am and 12pm CT, the server posts a check-in. When you see it just type **!checkin** and you'll earn Bully Bucks for that day. You have 3 minutes to claim it so keep your notifications on!\n\n` +
-        `The longer you check in without missing a day the bigger your daily reward gets.\n\n` +
-        `─────────────────────\n\n` +
+        `You just joined Bully's private community — the only place where showing up actually pays.\n\n` +
+
+        `**💰 Bully Bucks**\n` +
+        `Every message you send earns you **5 BB**. Check in daily for up to **400 BB** per day. Stack your streak and that number keeps climbing.\n\n` +
+
+        `**📅 Daily Check-In**\n` +
+        `A check-in drops in the server every morning. Type **!checkin** when you see it — you have **3 minutes** to grab it. Don't miss it. Turn on notifications.\n\n` +
+
+        `**🏦 The Bank**\n` +
+        `Your BB can be stolen. Keep it safe by depositing into your bank with **!deposit**. Your bank limit grows as you level up. Type **!bank** for details.\n\n` +
+
         `**🛍️ The Shop**\n` +
-        `Once you reach Level 1 you'll unlock the shop. It refreshes with new items every 12 hours — things like discount codes for Bully's Apparel, giveaway tickets and exclusive badges only available for a limited time. Type **!shop** to see what's available.\n\n` +
-        `─────────────────────\n\n` +
-        `**🎰 Mystery Drops**\n` +
-        `Every now and then a mystery drop appears in the server. Nobody knows what it is until they claim it — it could be a discount code or even a free item. The first person to type **!claim** gets it. Keep your notifications on so you never miss one!\n\n` +
-        `─────────────────────\n\n` +
-        `**🏆 Leveling Up**\n` +
-        `The more you chat and participate the more you level up. Each new level raises your bank limit and unlocks more perks. When you hit a new level I'll DM you automatically with everything you've just unlocked — no commands needed.\n\n` +
-        `─────────────────────\n\n` +
-        `**📋 Useful Commands**\n` +
-        `Think of these like text shortcuts. Just type them in any channel:\n\n` +
-        `• **!balance** — see how many Bully Bucks you have\n` +
-        `• **!checkin** — claim your daily Bully Bucks\n` +
-        `• **!shop** — browse what's available to buy\n` +
-        `• **!help** — see this guide again anytime\n\n` +
-        `─────────────────────\n\n` +
-        `If you ever feel lost just type **!help** and this guide will come back to you. Welcome to the family! 🎨`
+        `Once you hit **Level 1 (Rookie)**, the shop opens up. Spend your BB on discount codes for Bully's Apparel, collectible badges, and more. Type **!shop** to browse.\n\n` +
+
+        `**🎮 Games**\n` +
+        `Casino, Heists, Trivia, Lottery, Hangman — all of it lives in the games channel. Type **!bullygames** to open the menu.\n\n` +
+
+        `**⚡ Quick Commands**\n` +
+        `\`!balance\` — see your BB\n` +
+        `\`!bank\` — banking guide & tiers\n` +
+        `\`!bullygames\` — game menu\n` +
+        `\`!shop\` — what's for sale\n` +
+        `\`!help\` — full guide with topic buttons\n\n` +
+
+        `See you in the server. 🤝`
       )
-      .setFooter({text:"Bully's Apparel • Wear the art."}).setTimestamp();
+      .setFooter({ text: "Bully's World • Show up. Stack up." })
+      .setTimestamp();
     await member.send({ embeds: [embed] });
   } catch { console.log(`[Welcome DM] Could not DM ${member.user.username}`); }
 });

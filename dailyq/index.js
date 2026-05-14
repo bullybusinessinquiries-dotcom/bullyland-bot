@@ -542,6 +542,72 @@ const dailyQ = {
       return true;
     }
 
+    // ── !dailyq test — fire a live preview in THIS channel, no DB side effects ──
+    // Posts a real question here (not in CHANNEL_DAILYQ), opens for 2 minutes,
+    // then auto-closes with a summary. Does NOT set this.activePost or award BB.
+    if (content === '!dailyq test') {
+      await message.delete().catch(() => {});
+
+      const q = selectQuestion(this.db) || generateFromTemplate();
+      const toneEmoji = TONE_EMOJI[q.tone] || '❓';
+
+      const embed = new EmbedBuilder()
+        .setColor('#e67e22') // orange = test mode
+        .setDescription(
+          `🧪 **TEST MODE** — *this is a preview, no BB will be awarded*\n\n` +
+          `${CFG.display.greeting}\n` +
+          `**${q.question}**\n\n` +
+          `${CFG.display.cta}`
+        )
+        .setFooter({ text: `Test closes in 2 minutes • Category: ${q.category} • Tone: ${toneEmoji} ${q.tone}` })
+        .setTimestamp();
+
+      const testMsg = await message.channel.send({ embeds: [embed] });
+
+      // Collect responses in memory for the test summary (no DB writes, no BB)
+      const testResponses = new Map(); // userId → { username, text, ts }
+      const collector = message.channel.createMessageCollector({
+        filter: m => !m.author.bot && !m.content.startsWith('!') && m.content.trim().length >= CFG.rewards.minResponseLength,
+        time: 2 * 60 * 1000, // 2 minutes
+      });
+
+      collector.on('collect', m => {
+        if (!testResponses.has(m.author.id)) {
+          testResponses.set(m.author.id, { username: m.author.username, text: m.content.trim(), ts: Date.now() });
+          m.react(CFG.display.confirmReaction).catch(() => {});
+        }
+      });
+
+      collector.on('end', async () => {
+        const respList = [...testResponses.values()];
+        const summaryEmbed = new EmbedBuilder()
+          .setColor('#e67e22')
+          .setTitle('🧪 Test Complete — Daily Q Preview')
+          .setDescription(
+            `**Question used:**\n*${q.question}*\n\n` +
+            `**Category:** ${q.category} · **Tone:** ${q.tone}\n\n` +
+            (respList.length
+              ? `**Responses received (${respList.length}):**\n` +
+                respList.map(r => `• **${r.username}:** ${r.text.slice(0, 120)}${r.text.length > 120 ? '…' : ''}`).join('\n')
+              : '*No responses during the test window.*')
+          )
+          .addFields(
+            { name: '⚡ What this tests', value: 'Question selection, embed layout, reaction confirm, and summary flow.\nIn production: BB is awarded, streaks are tracked, data logs to the DB.', inline: false }
+          )
+          .setFooter({ text: "Test mode — no BB awarded, no data saved." })
+          .setTimestamp();
+
+        // Edit the original test post to show it's closed
+        await testMsg.edit({ embeds: [
+          new EmbedBuilder().setColor('#555555').setDescription(`~~${q.question}~~\n\n*Test closed.*`).setFooter({ text: 'Test mode' }),
+        ]}).catch(() => {});
+
+        await message.channel.send({ embeds: [summaryEmbed] });
+      });
+
+      return true;
+    }
+
     if (content === '!dailyq stats') {
       const post = this.db.prepare('SELECT * FROM dq_posts ORDER BY id DESC LIMIT 1').get();
       if (!post) { await message.reply('No questions posted yet.'); return true; }
