@@ -1593,6 +1593,19 @@ client.on('messageCreate', async(message) => {
     return;
   }
 
+  // ── !cancelbet — lets a user escape any stuck casino state ──
+  if (content === '!cancelbet') {
+    const hadBJ = _bj.has(userId), hadRL = _rl.has(userId);
+    if (hadBJ) { clearTimeout(_bj.get(userId)?.autoForfeit); _bj.delete(userId); }
+    if (hadRL) _rl.delete(userId);
+    if (hadBJ || hadRL) {
+      await message.reply(`✅ Your stuck casino session has been cleared. Note: **any BB already deducted for a blackjack bet is forfeited** — use the 🚪 Forfeit button inside the game next time to avoid this.`);
+    } else {
+      await message.reply(`ℹ️ You don't have any active casino session to cancel.`);
+    }
+    return;
+  }
+
   // ── !balance ──
   if (content === '!balance') {
     const u = getUser(userId, username);
@@ -3828,15 +3841,19 @@ Balance: **${getBal().toLocaleString()} BB**`).setFooter({ text: won ? "Bully's 
     // BLACKJACK
     if (customId === 'cas.blackjack') {
       if (!casinoOpen(isAdmin)) { await interaction.reply({ content: "🎰 Casino is closed!", ephemeral: true }); return; }
-      if (_bj.has(userId)) { await interaction.reply({ content: '🃏 Finish your current game first!', ephemeral: true }); return; }
-      await interaction.reply({ embeds: [new EmbedBuilder().setColor('#c9a84c').setTitle('🃏 Blackjack — Choose Bet').setDescription(`Balance: **${getBal().toLocaleString()} BB**
-
-Blackjack pays **2.5x**. Dealer hits on 16, stands on 17+.`).setFooter({ text: "Bully's Casino • Hit or Stand?" })], components: [makeBetRow('cas_bj', getBal())], ephemeral: true }); return;
+      // If user has a stuck game, RESUME it instead of blocking them forever
+      if (_bj.has(userId)) {
+        const g = _bj.get(userId);
+        const pv = g.hV(g.player), canDbl = getBal() >= g.bet;
+        await interaction.reply({ embeds: [new EmbedBuilder().setColor('#c9a84c').setTitle('🃏 Blackjack — Resuming your game').setDescription(`**Your hand:** ${g.hS(g.player)} **(${pv})**\n**Dealer:** ${g.cS(g.dealer[0])} 🂠\n\nBet: **${g.bet} BB**`).setFooter({ text: "Bully's Casino • Hit or Stand?" })], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('bj.hit').setLabel('👊 Hit').setStyle(ButtonStyle.Primary), new ButtonBuilder().setCustomId('bj.stand').setLabel('✋ Stand').setStyle(ButtonStyle.Secondary), new ButtonBuilder().setCustomId('bj.double').setLabel('⚡ Double').setStyle(ButtonStyle.Danger).setDisabled(!canDbl), new ButtonBuilder().setCustomId('bj.forfeit').setLabel('🚪 Forfeit').setStyle(ButtonStyle.Secondary))], ephemeral: true });
+        return;
+      }
+      await interaction.reply({ embeds: [new EmbedBuilder().setColor('#c9a84c').setTitle('🃏 Blackjack — Choose Bet').setDescription(`Balance: **${getBal().toLocaleString()} BB**\n\nBlackjack pays **2.5x**. Dealer hits on 16, stands on 17+.`).setFooter({ text: "Bully's Casino • Hit or Stand?" })], components: [makeBetRow('cas_bj', getBal())], ephemeral: true }); return;
     }
     if (customId.startsWith('cas_bj.')) {
       const bet = parseInt(customId.split('.')[1]), bal = getBal();
       if (bal < bet) { await interaction.reply({ content: `❌ Need **${bet} BB**.`, ephemeral: true }); return; }
-      if (_bj.has(userId)) { await interaction.reply({ content: '🃏 Finish your current game!', ephemeral: true }); return; }
+      if (_bj.has(userId)) { await interaction.reply({ content: '🃏 You have an unfinished game. Click **Blackjack** again to resume it, or use the 🚪 Forfeit button.', ephemeral: true }); return; }
       db.prepare('UPDATE balances SET balance = balance - ? WHERE user_id = ?').run(bet, userId);
       const suits = ['♠','♥','♦','♣'], ranks = ['2','3','4','5','6','7','8','9','10','J','Q','K','A'];
       const deck = []; for (const s of suits) for (const r of ranks) deck.push({ r, s });
@@ -3845,55 +3862,36 @@ Blackjack pays **2.5x**. Dealer hits on 16, stands on 17+.`).setFooter({ text: "
       const hV = h => { let v = h.reduce((s, c) => s + cV(c), 0), a = h.filter(c => c.r === 'A').length; while (v > 21 && a > 0) { v -= 10; a--; } return v; };
       const cS = c => `${c.r}${c.s}`, hS = h => h.map(cS).join(' ');
       const player = [deck.pop(), deck.pop()], dealer = [deck.pop(), deck.pop()];
-      _bj.set(userId, { bet, player, dealer, deck, hV, cS, hS });
+      // Auto-forfeit after 10 minutes if user abandons the game
+      const autoForfeit = setTimeout(() => { if (_bj.has(userId)) { _bj.delete(userId); console.log(`[bj] auto-forfeited stuck game for ${userId}`); } }, 10 * 60 * 1000);
+      _bj.set(userId, { bet, player, dealer, deck, hV, cS, hS, autoForfeit });
       const pv = hV(player);
       if (pv === 21) {
-        _bj.delete(userId); const payout = Math.round(bet * 2.5);
+        clearTimeout(_bj.get(userId)?.autoForfeit); _bj.delete(userId); const payout = Math.round(bet * 2.5);
         db.prepare('UPDATE balances SET balance = balance + ?, total_earned = total_earned + ? WHERE user_id = ?').run(payout, payout, userId);
-        await interaction.reply({ embeds: [new EmbedBuilder().setColor('#c9a84c').setTitle('🃏 BLACKJACK! Natural 21!').setDescription(`**Your hand:** ${hS(player)} (21)
-**Dealer:** ${cS(dealer[0])} 🂠
-
-🎉 **+${payout} BB** (2.5x)
-Balance: **${getBal().toLocaleString()} BB**`).setFooter({ text: "Bully's Casino • Natural winner!" })], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('cas.blackjack').setLabel('🃏 Play Again').setStyle(ButtonStyle.Primary), new ButtonBuilder().setCustomId('menu.casino').setLabel('↩️ Menu').setStyle(ButtonStyle.Secondary))], ephemeral: true }); return;
+        await interaction.reply({ embeds: [new EmbedBuilder().setColor('#c9a84c').setTitle('🃏 BLACKJACK! Natural 21!').setDescription(`**Your hand:** ${hS(player)} (21)\n**Dealer:** ${cS(dealer[0])} 🂠\n\n🎉 **+${payout} BB** (2.5x)\nBalance: **${getBal().toLocaleString()} BB**`).setFooter({ text: "Bully's Casino • Natural winner!" })], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('cas.blackjack').setLabel('🃏 Play Again').setStyle(ButtonStyle.Primary), new ButtonBuilder().setCustomId('menu.casino').setLabel('↩️ Menu').setStyle(ButtonStyle.Secondary))], ephemeral: true }); return;
       }
       const canDbl = getBal() >= bet;
-      await interaction.reply({ embeds: [new EmbedBuilder().setColor('#c9a84c').setTitle('🃏 Blackjack').setDescription(`**Your hand:** ${hS(player)} **(${pv})**
-**Dealer:** ${cS(dealer[0])} 🂠
-
-Bet: **${bet} BB**`).setFooter({ text: "Bully's Casino • Hit or Stand?" })], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('bj.hit').setLabel('👊 Hit').setStyle(ButtonStyle.Primary), new ButtonBuilder().setCustomId('bj.stand').setLabel('✋ Stand').setStyle(ButtonStyle.Secondary), new ButtonBuilder().setCustomId('bj.double').setLabel('⚡ Double').setStyle(ButtonStyle.Danger).setDisabled(!canDbl))], ephemeral: true }); return;
+      await interaction.reply({ embeds: [new EmbedBuilder().setColor('#c9a84c').setTitle('🃏 Blackjack').setDescription(`**Your hand:** ${hS(player)} **(${pv})**\n**Dealer:** ${cS(dealer[0])} 🂠\n\nBet: **${bet} BB**`).setFooter({ text: "Bully's Casino • Hit or Stand?" })], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('bj.hit').setLabel('👊 Hit').setStyle(ButtonStyle.Primary), new ButtonBuilder().setCustomId('bj.stand').setLabel('✋ Stand').setStyle(ButtonStyle.Secondary), new ButtonBuilder().setCustomId('bj.double').setLabel('⚡ Double').setStyle(ButtonStyle.Danger).setDisabled(!canDbl), new ButtonBuilder().setCustomId('bj.forfeit').setLabel('🚪 Forfeit').setStyle(ButtonStyle.Secondary))], ephemeral: true }); return;
     }
-    if (['bj.hit', 'bj.stand', 'bj.double'].includes(customId)) {
+    if (['bj.hit', 'bj.stand', 'bj.double', 'bj.forfeit'].includes(customId)) {
       const game = _bj.get(userId);
       if (!game) { await interaction.reply({ content: '🃏 No active game.', ephemeral: true }); return; }
       const { bet, player, dealer, deck, hV, cS, hS } = game;
       const dp = () => { while (hV(dealer) < 17) dealer.push(deck.pop()); };
       const end = async result => {
-        _bj.delete(userId);
+        clearTimeout(game.autoForfeit); _bj.delete(userId);
         const pv = hV(player), dv = hV(dealer); let title, desc;
-        if (result === 'bust') { title = '🃏 Bust!'; desc = `**Your:** ${hS(player)} (${pv})
-**Dealer:** ${hS(dealer)} (${dv})
-
-💸 Lost **${bet} BB**`; }
-        else if (result === 'win') { const p = bet * 2; db.prepare('UPDATE balances SET balance = balance + ?, total_earned = total_earned + ? WHERE user_id = ?').run(p, p, userId); title = '🃏 You win!'; desc = `**Your:** ${hS(player)} (${pv})
-**Dealer:** ${hS(dealer)} (${dv})
-
-🎉 **+${p} BB**`; }
-        else if (result === 'push') { db.prepare('UPDATE balances SET balance = balance + ? WHERE user_id = ?').run(bet, userId); title = '🃏 Push.'; desc = `**Your:** ${hS(player)} (${pv})
-**Dealer:** ${hS(dealer)} (${dv})
-
-Bet returned: **${bet} BB**`; }
-        else { title = '🃏 Dealer wins.'; desc = `**Your:** ${hS(player)} (${pv})
-**Dealer:** ${hS(dealer)} (${dv})
-
-💸 Lost **${bet} BB**`; }
-        desc += `
-Balance: **${getBal().toLocaleString()} BB**`;
+        if (result === 'bust') { title = '🃏 Bust!'; desc = `**Your:** ${hS(player)} (${pv})\n**Dealer:** ${hS(dealer)} (${dv})\n\n💸 Lost **${bet} BB**`; }
+        else if (result === 'win') { const p = bet * 2; db.prepare('UPDATE balances SET balance = balance + ?, total_earned = total_earned + ? WHERE user_id = ?').run(p, p, userId); title = '🃏 You win!'; desc = `**Your:** ${hS(player)} (${pv})\n**Dealer:** ${hS(dealer)} (${dv})\n\n🎉 **+${p} BB**`; }
+        else if (result === 'push') { db.prepare('UPDATE balances SET balance = balance + ? WHERE user_id = ?').run(bet, userId); title = '🃏 Push.'; desc = `**Your:** ${hS(player)} (${pv})\n**Dealer:** ${hS(dealer)} (${dv})\n\nBet returned: **${bet} BB**`; }
+        else if (result === 'forfeit') { title = '🃏 Forfeited.'; desc = `You walked away.\n\n💸 Lost **${bet} BB**`; }
+        else { title = '🃏 Dealer wins.'; desc = `**Your:** ${hS(player)} (${pv})\n**Dealer:** ${hS(dealer)} (${dv})\n\n💸 Lost **${bet} BB**`; }
+        desc += `\nBalance: **${getBal().toLocaleString()} BB**`;
         await interaction.reply({ embeds: [new EmbedBuilder().setColor(result === 'win' ? '#3B6D11' : result === 'push' ? '#c9a84c' : '#8B0000').setTitle(title).setDescription(desc).setFooter({ text: result === 'win' ? "Bully's Casino • You beat the house!" : "Bully's Casino • The house thanks you" })], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('cas.blackjack').setLabel('🃏 Play Again').setStyle(ButtonStyle.Primary), new ButtonBuilder().setCustomId('menu.casino').setLabel('↩️ Menu').setStyle(ButtonStyle.Secondary))], ephemeral: true });
       };
-      if (customId === 'bj.hit') { player.push(deck.pop()); const pv = hV(player); if (pv > 21) { await end('bust'); return; } await interaction.reply({ embeds: [new EmbedBuilder().setColor('#c9a84c').setTitle('🃏 Blackjack').setDescription(`**Your hand:** ${hS(player)} **(${pv})**
-**Dealer:** ${cS(dealer[0])} 🂠
-
-Bet: **${bet} BB**`).setFooter({ text: "Bully's Casino • Hit or Stand?" })], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('bj.hit').setLabel('👊 Hit').setStyle(ButtonStyle.Primary), new ButtonBuilder().setCustomId('bj.stand').setLabel('✋ Stand').setStyle(ButtonStyle.Secondary), new ButtonBuilder().setCustomId('bj.double').setLabel('⚡ Double').setStyle(ButtonStyle.Danger).setDisabled(true))], ephemeral: true }); return; }
+      if (customId === 'bj.forfeit') { await end('forfeit'); return; }
+      if (customId === 'bj.hit') { player.push(deck.pop()); const pv = hV(player); if (pv > 21) { await end('bust'); return; } await interaction.reply({ embeds: [new EmbedBuilder().setColor('#c9a84c').setTitle('🃏 Blackjack').setDescription(`**Your hand:** ${hS(player)} **(${pv})**\n**Dealer:** ${cS(dealer[0])} 🂠\n\nBet: **${bet} BB**`).setFooter({ text: "Bully's Casino • Hit or Stand?" })], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('bj.hit').setLabel('👊 Hit').setStyle(ButtonStyle.Primary), new ButtonBuilder().setCustomId('bj.stand').setLabel('✋ Stand').setStyle(ButtonStyle.Secondary), new ButtonBuilder().setCustomId('bj.double').setLabel('⚡ Double').setStyle(ButtonStyle.Danger).setDisabled(true), new ButtonBuilder().setCustomId('bj.forfeit').setLabel('🚪 Forfeit').setStyle(ButtonStyle.Secondary))], ephemeral: true }); return; }
       if (customId === 'bj.stand') { dp(); const pv = hV(player), dv = hV(dealer); await end(dv > 21 || pv > dv ? 'win' : pv === dv ? 'push' : 'lose'); return; }
       if (customId === 'bj.double') { if (getBal() < bet) { await interaction.reply({ content: '❌ Not enough BB to double.', ephemeral: true }); return; } db.prepare('UPDATE balances SET balance = balance - ? WHERE user_id = ?').run(bet, userId); game.bet = bet * 2; player.push(deck.pop()); const pv = hV(player); if (pv > 21) { await end('bust'); return; } dp(); const dv = hV(dealer); await end(dv > 21 || pv > dv ? 'win' : pv === dv ? 'push' : 'lose'); return; }
     }
