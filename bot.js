@@ -1462,15 +1462,15 @@ client.on('messageCreate', async(message) => {
   // ── Channel gate — restrict commands to designated channels ──
   if (content.startsWith('!')) {
     const cid = message.channelId;
-    const inGameChannel = ['1492571851178901706', '1492228049272438834'].includes(cid);
-    const inLobby = cid === '1352881884769550336';
-    const inMysteryDrops = cid === process.env.CHANNEL_MYSTERY_DROPS;
+    const inGameChannel = cid === CONFIG.CHANNELS.GAMES;
+    const inLobby = cid === CONFIG.CHANNELS.GENERAL;
+    const inMysteryDrops = cid === CONFIG.CHANNELS.MYSTERY_DROPS;
     if (inGameChannel) {
       // all commands allowed
     } else if (inLobby) {
       const cmd = content.split(' ')[0];
       if (!['!help', '!feedback', '!checkin'].includes(cmd)) {
-        const r = await message.reply(`🎮 Head to <#1492571851178901706> to use bot commands.`);
+        const r = await message.reply(`🎮 Head to <#${CONFIG.CHANNELS.GAMES}> to use bot commands.`);
         setTimeout(() => r.delete().catch(() => {}), 5000);
         await message.delete().catch(() => {});
         return;
@@ -1478,7 +1478,7 @@ client.on('messageCreate', async(message) => {
     } else if (inMysteryDrops) {
       // pass through — !claim handles its own channel check
     } else {
-      const r = await message.reply(`🎮 Head to <#1492571851178901706> to use bot commands.`);
+      const r = await message.reply(`🎮 Head to <#${CONFIG.CHANNELS.GAMES}> to use bot commands.`);
       setTimeout(() => r.delete().catch(() => {}), 5000);
       await message.delete().catch(() => {});
       return;
@@ -3095,9 +3095,9 @@ client.on('messageCreate', async msg => {
   if (msg.author?.bot || !msg.guild) return;
   if (TESTING_MODE && !hasAccess(msg.member)) return;
   if (msg.content.trim().toLowerCase() !== '!bullygames') return;
-  const GAME_CHANNELS = ['1492571851178901706', '1492228049272438834'];
+  const GAME_CHANNELS = [CONFIG.CHANNELS.GAMES];
   if (!GAME_CHANNELS.includes(msg.channelId)) {
-    const r = await msg.reply(`🎮 Games only run in <#1492571851178901706>. Head over there!`);
+    const r = await msg.reply(`🎮 Games only run in <#${CONFIG.CHANNELS.GAMES}>. Head over there!`);
     setTimeout(() => r.delete().catch(() => {}), 6000);
     await msg.delete().catch(() => {});
     return;
@@ -3140,9 +3140,9 @@ client.on('interactionCreate', async interaction => {
     customId.startsWith('lottery.') || customId.startsWith('slots.') ||
     customId.startsWith('bj.') || customId.startsWith('roulette.') || customId.startsWith('race.') ||
     customId.startsWith('trivia.') || customId.startsWith('hangman.');
-  const ALLOWED_GAME_CHANNELS = ['1492571851178901706', '1492228049272438834'];
+  const ALLOWED_GAME_CHANNELS = [CONFIG.CHANNELS.GAMES];
   if (isGameInteraction && !ALLOWED_GAME_CHANNELS.includes(interaction.channelId)) {
-    await interaction.reply({ content: `🎮 Games only run in <#1492571851178901706>.`, ephemeral: true }); return;
+    await interaction.reply({ content: `🎮 Games only run in <#${CONFIG.CHANNELS.GAMES}>.`, ephemeral: true }); return;
   }
 
   try {
@@ -4030,9 +4030,9 @@ client.on('messageCreate', async msg => {
   if (msg.author?.bot || !msg.guild) return;
   if (TESTING_MODE && !hasAccess(msg.member)) return;
   if (!msg.content.trim().toLowerCase().startsWith('!steal ')) return;
-  const STEAL_ALLOWED = ['1492571851178901706', '1492228049272438834'];
+  const STEAL_ALLOWED = [CONFIG.CHANNELS.GAMES];
   if (!STEAL_ALLOWED.includes(msg.channelId)) {
-    const r = await msg.reply(`🎮 Head to <#1492571851178901706> to use bot commands.`);
+    const r = await msg.reply(`🎮 Head to <#${CONFIG.CHANNELS.GAMES}> to use bot commands.`);
     setTimeout(() => r.delete().catch(() => {}), 5000);
     await msg.delete().catch(() => {});
     return;
@@ -4071,7 +4071,7 @@ client.on('messageCreate', async msg => {
       addBB(CONFIG.OWNER_ID, 'Bully', punishment, `royal treasury — treason penalty from ${username}`);
       const newBalance = db.prepare('SELECT balance FROM balances WHERE user_id = ?').get(userId)?.balance ?? 0;
       try {
-        const gamesCh = await client.channels.fetch('1492571851178901706').catch(() => null);
+        const gamesCh = await client.channels.fetch(CONFIG.CHANNELS.GAMES).catch(() => null);
         if (!gamesCh) return;
         const treasonMessages = [
           `You have committed **TREASON** against the King! Your crimes have not gone unnoticed.\n\n**${username}** has been ordered to pay **${punishment} BB** to the royal treasury as punishment.`,
