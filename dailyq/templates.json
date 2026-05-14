@@ -1,0 +1,179 @@
+{
+  "_note": "Templates generate backup questions when the handcrafted pool runs low. Slots are filled randomly at runtime.",
+  "patterns": [
+    {
+      "id": "what_kind_person",
+      "template": "What kind of person {action} you {emotion}?",
+      "category": "personality_preference",
+      "tone": "observational",
+      "slots": {
+        "action": ["instantly makes", "always makes", "naturally makes", "low-key makes"],
+        "emotion": [
+          "feel completely at ease",
+          "want to open up",
+          "feel like yourself",
+          "want to pay attention",
+          "feel genuinely heard",
+          "feel energized just being around them"
+        ]
+      }
+    },
+    {
+      "id": "what_instantly",
+      "template": "What instantly {verb} you about somebody?",
+      "category": "attention_triggers",
+      "tone": "playful",
+      "slots": {
+        "verb": [
+          "catches your attention",
+          "makes you curious about",
+          "draws you in",
+          "makes you trust",
+          "makes you want to know more about"
+        ]
+      }
+    },
+    {
+      "id": "what_makes_someone",
+      "template": "What makes someone {adjective} to you?",
+      "category": "interpersonal_values",
+      "tone": "reflective",
+      "slots": {
+        "adjective": [
+          "impossible to forget",
+          "genuinely worth your time",
+          "someone you actually trust",
+          "emotionally exhausting",
+          "feel like home to be around",
+          "feel effortless to talk to",
+          "feel safe without saying anything"
+        ]
+      }
+    },
+    {
+      "id": "would_you_rather",
+      "template": "Would you rather {optionA} or {optionB}?",
+      "category": "personality_preference",
+      "tone": "hypothetical",
+      "slots": {
+        "optionA": [
+          "feel deeply understood by one person",
+          "always know how someone really feels about you",
+          "be effortlessly funny",
+          "have a small circle who truly knows you",
+          "be someone's comfort person"
+        ],
+        "optionB": [
+          "be liked by everyone you meet",
+          "never have to wonder",
+          "be effortlessly confident",
+          "be widely known but not deeply known",
+          "be the person everyone admires"
+        ]
+      }
+    },
+    {
+      "id": "what_small_thing",
+      "template": "What's a small thing that {effect}?",
+      "category": "emotional_comfort",
+      "tone": "comforting",
+      "slots": {
+        "effect": [
+          "completely changes your mood",
+          "always makes your day better",
+          "makes a normal day feel special",
+          "gives you a second wind when you need it",
+          "makes you feel like everything is going to be okay",
+          "makes you feel genuinely taken care of"
+        ]
+      }
+    },
+    {
+      "id": "what_sign",
+      "template": "What's a sign that someone {quality}?",
+      "category": "emotional_intelligence",
+      "tone": "observational",
+      "slots": {
+        "quality": [
+          "actually has high emotional intelligence",
+          "is genuinely confident vs just performing it",
+          "is actually trustworthy",
+          "is someone you should keep around",
+          "processes emotions healthily",
+          "is good at reading people"
+        ]
+      }
+    },
+    {
+      "id": "honest_take",
+      "template": "What's your honest take on {topic}?",
+      "category": "social_dynamics",
+      "tone": "gossip_style",
+      "slots": {
+        "topic": [
+          "people who are always the last to respond",
+          "people who never initiate plans but always show up",
+          "people who make everything a competition",
+          "people who only reach out when they need something",
+          "people who are always vague about their availability",
+          "people who only talk about themselves"
+        ]
+      }
+    },
+    {
+      "id": "habit_observation",
+      "template": "What's a habit you have that {observation}?",
+      "category": "habits",
+      "tone": "funny",
+      "slots": {
+        "observation": [
+          "you can't explain but refuse to stop",
+          "would be hard to explain to someone else",
+          "sounds weird out loud but makes total sense to you",
+          "you've had for years and never examined",
+          "secretly makes your life better"
+        ]
+      }
+    },
+    {
+      "id": "type_ab",
+      "template": "Are you more of a {typeA} or a {typeB}?",
+      "category": "chaos_vs_stability",
+      "tone": "playful",
+      "slots": {
+        "typeA": [
+          "\"I need a plan\" person",
+          "\"let me overthink this first\" person",
+          "\"I need advance notice\" person",
+          "\"morning routine is sacred\" person"
+        ],
+        "typeB": [
+          "\"we'll figure it out\" person",
+          "\"let's just see what happens\" person",
+          "\"last-minute chaos\" person",
+          "\"structure is just a suggestion\" person"
+        ]
+      }
+    },
+    {
+      "id": "nostalgia_frame",
+      "template": "What's something about {timeRef} that you {feeling}?",
+      "category": "memory_nostalgia",
+      "tone": "reflective",
+      "slots": {
+        "timeRef": [
+          "a past version of yourself",
+          "a specific era of your life",
+          "something from your childhood",
+          "a moment you didn't know mattered until it was over"
+        ],
+        "feeling": [
+          "think about more than you probably should",
+          "still feel exactly like you did then",
+          "miss more than you expected to",
+          "would go back to just for one day"
+        ]
+      }
+    }
+  ]
+}

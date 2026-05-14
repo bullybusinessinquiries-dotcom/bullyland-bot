@@ -26,6 +26,7 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 // ─── DATABASE ──────────────────────────────────────────────────────────────
 // Auto-detect Railway persistent volume, fall back to DB_PATH env var, then __dirname
 const fs = require('fs');
+const dailyQ = require('./dailyq/index');
 function resolveDBPath() {
   if (process.env.DB_PATH) return process.env.DB_PATH;
   // Railway mounts volumes at user-configured paths — try common ones
@@ -1054,6 +1055,7 @@ client.on('messageCreate', async(message) => {
 // ─── TREASURE CHEST REACTION HANDLER ─────────────────────────────────────
 client.on('messageReactionAdd', async (reaction, user) => {
   if (user.bot) return;
+  await dailyQ.handleReaction(reaction, user).catch(() => {});
   if (!activeChest) return;
   if (reaction.message.id !== activeChest.messageId) return;
   if (reaction.emoji.name !== '🧡') return;
@@ -1363,6 +1365,12 @@ async function executeHeist(heistId, channelArg) {
 // ─── MESSAGE HANDLER ───────────────────────────────────────────────────────
 client.on('messageCreate', async(message) => {
   if (message.author.bot || !message.guild) return;
+
+  // ── Daily Questionnaire ──────────────────────────────────────────────────
+  await dailyQ.handleMessage(message).catch(() => {});
+  const _dqHandled = await dailyQ.handleAdminCommand(message).catch(() => false);
+  if (_dqHandled) return;
+  // ────────────────────────────────────────────────────────────────────────
 
   // ── Testing mode gate ──
   if (TESTING_MODE && !hasAccess(message.member)) return;
@@ -2832,6 +2840,7 @@ client.once('ready', async()=>{
   await setGiveawayChannelVisible(false);
   await refreshShop();
   startScheduler();
+  dailyQ.init(client, db, addBB);
 });
 
 

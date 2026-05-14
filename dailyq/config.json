@@ -1,0 +1,32 @@
+{
+  "postTime": {
+    "hour": 9,
+    "minute": 0,
+    "timezone": "America/Chicago"
+  },
+  "closeTime": {
+    "hour": 21,
+    "minute": 0,
+    "timezone": "America/Chicago"
+  },
+  "rewards": {
+    "base": 25,
+    "thoughtfulBonus": 10,
+    "thoughtfulMinChars": 80,
+    "minResponseLength": 20,
+    "streakBonusPerDay": 0.05,
+    "maxStreakMultiplier": 2.0,
+    "popularWinnerBonus": 50
+  },
+  "antiSpam": {
+    "maxSimilarityScore": 0.8
+  },
+  "display": {
+    "greeting": "Good morning Bullyland ☀️",
+    "cta": "💬 Reply below to earn BB.",
+    "confirmReaction": "💬",
+    "summaryPing": "@here",
+    "footerText": "Bully's World • Thoughtful replies earn bonus BB.",
+    "closeSummaryFooter": "Bully's World • New question drops tomorrow morning."
+  }
+}
