@@ -682,14 +682,22 @@ function generateHangmanWord(filter) {
 }
 
 // ─── HANGMAN ASCII ────────────────────────────────────────────────────────
+// 7 stages: 0 wrong = empty gallows → 6 wrong = full figure (game over)
 const HANGMAN_STAGES = [
-  '```\n  -----\n  |   |\n  |    \n  |    \n  |\n=====```',
-  '```\n  -----\n  |   |\n  |   O\n  |    \n  |\n=====```',
-  '```\n  -----\n  |   |\n  |   O\n  |   |\n  |\n=====```',
-  '```\n  -----\n  |   |\n  |   O\n  |  /|\n  |\n=====```',
-  '```\n  -----\n  |   |\n  |   O\n  |  /|\\\n  |\n=====```',
-  '```\n  -----\n  |   |\n  |   O\n  |  /|\\\n  |  /\n=====```',
-  '```\n  -----\n  |   |\n  |   O\n  |  /|\\\n  |  / \\\n=====```',
+  // 0 — empty gallows
+  '```\n  +--------+\n  |        |\n  |         \n  |         \n  |         \n  |         \n  |         \n  +----------\n```',
+  // 1 — head
+  '```\n  +--------+\n  |        |\n  |        O\n  |         \n  |         \n  |         \n  |         \n  +----------\n```',
+  // 2 — head + body
+  '```\n  +--------+\n  |        |\n  |        O\n  |        |\n  |        |\n  |         \n  |         \n  +----------\n```',
+  // 3 — head + body + left arm
+  '```\n  +--------+\n  |        |\n  |        O\n  |       /|\n  |        |\n  |         \n  |         \n  +----------\n```',
+  // 4 — head + body + both arms
+  '```\n  +--------+\n  |        |\n  |        O\n  |       /|\\\n  |        |\n  |         \n  |         \n  +----------\n```',
+  // 5 — head + body + both arms + left leg
+  '```\n  +--------+\n  |        |\n  |        O\n  |       /|\\\n  |        |\n  |       /  \n  |         \n  +----------\n```',
+  // 6 — full figure (both legs) — game over
+  '```\n  +--------+\n  |        |\n  |        O\n  |       /|\\\n  |        |\n  |       / \\\n  |         \n  +----------\n```',
 ];
 
 function buildHangmanDisplay(word, guessed) {
@@ -699,8 +707,9 @@ function buildHangmanDisplay(word, guessed) {
 function buildHangmanEmbed(state) {
   const { word, category, hint, guessed, wrong, display } = state;
   const wrongArr = [...wrong];
+  const dangerColor = ['#2ecc71','#2ecc71','#f1c40f','#e67e22','#e67e22','#e74c3c','#8B0000'][wrong.size] || '#8B0000';
   return new EmbedBuilder()
-    .setColor(wrong.size >= 6 ? '#8B0000' : '#c9a84c')
+    .setColor(dangerColor)
     .setTitle(`🔤 Hangman — ${category}`)
     .setDescription(
       `${HANGMAN_STAGES[wrong.size]}\n\n` +
