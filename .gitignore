@@ -1,4 +1,6 @@
 .env
+.env.local
 node_modules/
 bullyland.db
+bullyland_test.db
 .claude/worktrees/interesting-feynman-f3126f/

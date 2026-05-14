@@ -1,5 +1,9 @@
 const path = require('path');
-require('dotenv').config({ path: path.join(__dirname, '.env') }); // always load from bot directory, not CWD
+// Load .env.local first (local dev/test), fall back to .env (production)
+const _envLocal = path.join(__dirname, '.env.local');
+const _envFile  = require('fs').existsSync(_envLocal) ? _envLocal : path.join(__dirname, '.env');
+require('dotenv').config({ path: _envFile });
+console.log(`[ENV] Loaded: ${_envFile}`);
 let stripe = null;
 try { const Stripe = require('stripe'); stripe = Stripe(process.env.STRIPE_SECRET_KEY); } catch(e) { console.log('[Stripe] Not installed — auction payments disabled.'); }
 const Anthropic = require('@anthropic-ai/sdk');
