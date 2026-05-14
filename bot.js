@@ -413,22 +413,13 @@ const SUPERFAN_WEEKLY_BB  = 500;
 async function sendBoosterPaycheck(member, isFirstTime = false) {
   const embed = new EmbedBuilder()
     .setColor('#f47fff')
-    .setTitle(isFirstTime ? '💜 You\'re in the Club.' : '💜 The Club takes care of its own.')
+    .setTitle(isFirstTime ? '🧡 Welcome to The Boosters Club.' : '🧡 Your Booster Club deposit has arrived.')
     .setDescription(
       isFirstTime
-        ? `${member.displayName}, you just boosted BULLYLAND — and that put you somewhere most people never get to go.\n\n` +
-          `**Welcome to the Booster Club.**\n\n` +
-          `This isn't a perk list. This is a circle. A small group of people who chose to invest in this community when they didn't have to — and because of that, this community invests right back.\n\n` +
-          `Here's how it works:\n` +
-          `Every week, for as long as you're boosting, **${BOOSTER_WEEKLY_BB} Bully Bucks** hit your balance automatically. No commands. No catching a window. It just shows up — because you showed up first.\n\n` +
-          `Your first deposit just landed. Type \`!balance\` to see it.\n\n` +
-          `Not many people are in this room. You are. That means something. 🎨`
-        : `${member.displayName}, another week in the Booster Club — another **+${BOOSTER_WEEKLY_BB} BB** in your balance.\n\n` +
-          `While everyone else is grinding check-ins and games, yours came in automatically. That's what the Club is.\n\n` +
-          `You keep the server powered. We keep the bag moving.\n\n` +
-          `\`!balance\` to see your stack. 💜`
+        ? `Welcome to The Boosters Club. 🧡\n\nYour weekly BB deposits are now active.\nEnjoy the perks ✨`
+        : `Your weekly Booster Club deposit has arrived. 🧡\n\n**+${BOOSTER_WEEKLY_BB} BB** has been added to your balance.`
     )
-    .setFooter({ text: "Bully's World • Booster Club • You're one of the few." })
+    .setFooter({ text: "Bully's World • Booster Club" })
     .setTimestamp();
   await member.send({ embeds: [embed] }).catch(() => {});
 }
