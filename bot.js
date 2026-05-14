@@ -3174,6 +3174,121 @@ client.on('messageCreate', async msg => {
 });
 
 // ============================================================================
+// TRIVIA — multi-round helpers
+// ============================================================================
+async function startTriviaRound(channel, state) {
+  let trivia;
+  try { trivia = await generateTriviaQuestion(state.catId); } catch {
+    channel.send('❌ Couldn\'t fetch a trivia question. Ending game early.').catch(() => {});
+    activeTrivia.delete(channel.id);
+    gameCooldowns.set(state.cdKey, Date.now() + 5 * 60 * 1000);
+    return;
+  }
+  state.question = trivia.question;
+  state.options  = trivia.options;
+  state.answer   = trivia.answer.toUpperCase();
+  state.answered = new Map(); // reset each round
+
+  const embed = new EmbedBuilder().setColor('#c9a84c')
+    .setTitle(`🧠 ${state.catLabel} Trivia — Round ${state.roundNum} of ${state.totalRounds}`)
+    .setDescription(
+      `**${obfuscate(state.question)}**\n\n` +
+      `🅰️  ${obfuscate(state.options.A)}\n` +
+      `🅱️  ${obfuscate(state.options.B)}\n` +
+      `🇨  ${obfuscate(state.options.C)}\n` +
+      `🇩  ${obfuscate(state.options.D)}`
+    )
+    .setFooter({ text: `Lock in your answer — 15 seconds • Bully's World` }).setTimestamp();
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('trivia.a').setLabel('A').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('trivia.b').setLabel('B').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('trivia.c').setLabel('C').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('trivia.d').setLabel('D').setStyle(ButtonStyle.Secondary),
+  );
+  const triviaMsg = await channel.send({ embeds: [embed], components: [row] });
+  state.messageId = triviaMsg.id;
+  state.timeout = setTimeout(() => endTriviaRound(channel, state, triviaMsg), 15 * 1000);
+}
+
+async function endTriviaRound(channel, state, triviaMsg) {
+  const { question, options, answer: correct, catLabel, roundNum, totalRounds, scores } = state;
+
+  // Sort correct answers by timestamp — earliest = first correct
+  const roundCorrect = [...state.answered.entries()]
+    .filter(([, v]) => v.choice === correct)
+    .sort(([, a], [, b]) => a.ts - b.ts);
+
+  // Accumulate into game-wide score tracker
+  roundCorrect.forEach(([uid, v], i) => {
+    if (!scores.has(uid)) scores.set(uid, { username: v.username, corrects: 0, firsts: 0 });
+    const s = scores.get(uid);
+    s.corrects++;
+    if (i === 0) s.firsts++;
+  });
+
+  const disabledRow = new ActionRowBuilder().addComponents(
+    ['A', 'B', 'C', 'D'].map(l =>
+      new ButtonBuilder()
+        .setCustomId(`trivia_r${roundNum}_${l.toLowerCase()}`)
+        .setLabel(l)
+        .setStyle(l === correct ? ButtonStyle.Success : ButtonStyle.Secondary)
+        .setDisabled(true)
+    )
+  );
+  const roundLines = roundCorrect.length
+    ? roundCorrect.map(([uid], i) => `${i === 0 ? '⚡ ' : ''}<@${uid}>${i === 0 ? ' — first!' : ''}`)
+    : ['Nobody got it right.'];
+  const moreRounds = roundNum < totalRounds;
+  const roundEmbed = new EmbedBuilder()
+    .setColor(roundCorrect.length ? '#2ecc71' : '#8B0000')
+    .setTitle(`🧠 ${catLabel} — Round ${roundNum}/${totalRounds} Results`)
+    .setDescription(`**${question}**\n\n🅰️  ${options.A}\n🅱️  ${options.B}\n🇨  ${options.C}\n🇩  ${options.D}`)
+    .addFields({ name: `✅ Answer: ${correct} — ${options[correct]}`, value: roundLines.join('\n') })
+    .setFooter({ text: moreRounds ? 'Next round in 5 seconds...' : 'Final round — tallying scores!' }).setTimestamp();
+  await triviaMsg.edit({ embeds: [roundEmbed], components: [disabledRow] }).catch(() => {});
+
+  if (moreRounds) {
+    state.roundNum++;
+    state.timeout = setTimeout(() => startTriviaRound(channel, state), 5000);
+  } else {
+    state.timeout = setTimeout(() => endTriviaGame(channel, state), 5000);
+  }
+}
+
+async function endTriviaGame(channel, state) {
+  activeTrivia.delete(channel.id);
+  gameCooldowns.set(state.cdKey, Date.now() + 5 * 60 * 1000);
+
+  const allScores = [...state.scores.entries()];
+  if (!allScores.length) {
+    await channel.send({ embeds: [new EmbedBuilder().setColor('#8B0000')
+      .setTitle(`🧠 ${state.catLabel} Trivia — Game Over`)
+      .setDescription('Nobody scored across all 5 rounds. Better luck next time!')
+      .setFooter({ text: "Bully's World" }).setTimestamp()] }).catch(() => {});
+    return;
+  }
+
+  const maxFirsts = Math.max(...allScores.map(([, s]) => s.firsts));
+  const payoutLines = [];
+  for (const [uid, s] of allScores) {
+    const isMvp = maxFirsts > 0 && s.firsts === maxFirsts;
+    const bbEarned = isMvp ? 100 + s.corrects * 5 : s.corrects * 10;
+    if (bbEarned > 0) {
+      addBB(uid, s.username, bbEarned, `trivia — ${state.catLabel} (${s.corrects} correct, ${s.firsts} firsts)`);
+      payoutLines.push(isMvp
+        ? `🏆 <@${uid}> **+${bbEarned} BB** — ${s.corrects} correct, ${s.firsts} first${s.firsts !== 1 ? 's' : ''} *(100 BB bonus + ${s.corrects}×5 BB)*`
+        : `<@${uid}> **+${bbEarned} BB** — ${s.corrects} correct *(${s.corrects}×10 BB)*`
+      );
+    }
+  }
+  const finalEmbed = new EmbedBuilder().setColor('#FFD700')
+    .setTitle(`🧠 ${state.catLabel} Trivia — 5 Rounds Complete!`)
+    .setDescription(payoutLines.join('\n') || 'Nobody scored.')
+    .setFooter({ text: "Bully's World" }).setTimestamp();
+  await channel.send({ embeds: [finalEmbed] }).catch(() => {});
+}
+
+// ============================================================================
 // INTERACTION HANDLER
 // ============================================================================
 client.on('interactionCreate', async interaction => {
@@ -3249,7 +3364,7 @@ client.on('interactionCreate', async interaction => {
         await interaction.reply({ content: `⏳ Trivia on cooldown — **${mins > 0 ? mins + 'm ' : ''}${secs}s** left.`, ephemeral: true }); return;
       }
       const catEmbed = new EmbedBuilder().setColor('#c9a84c').setTitle('🧠 BULLYLAND Trivia')
-        .setDescription('Pick a category to start the round.\n\nYou have **30 seconds** to answer once the question drops.\nFirst correct answer: **75 BB** • All others correct: **30 BB**')
+        .setDescription('Pick a category for your **5-round trivia game!**\n\n⏱️ **15 seconds** per question\n🏆 Most first-correct answers: **100 BB bonus + 5 BB** per correct\n👥 Everyone else: **10 BB** per correct answer')
         .setFooter({ text: "Bully's World" }).setTimestamp();
       const catRow1 = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId('trivia.cat.26').setLabel('🌟 Celebrities').setStyle(ButtonStyle.Primary),
@@ -3289,58 +3404,23 @@ client.on('interactionCreate', async interaction => {
       const catKey = customId.slice('trivia.cat.'.length);
       const catInfo = TRIVIA_CATS[catKey] || TRIVIA_CATS['0'];
 
-      await interaction.update({ content: `🧠 Loading **${catInfo.label}** question...`, embeds: [], components: [] });
+      await interaction.update({ content: `🧠 Starting **${catInfo.label}** trivia — 5 rounds!`, embeds: [], components: [] });
 
-      let trivia;
-      try { trivia = await generateTriviaQuestion(catInfo.id); } catch {
-        await interaction.editReply({ content: '❌ Couldn\'t fetch a question. Try again.', embeds: [], components: [] }); return;
-      }
-
-      const { question, options, answer } = trivia;
-      // Obfuscate question + answers so copy-pasting to Google/AI returns garbage
-      const triviaEmbed = new EmbedBuilder().setColor('#c9a84c')
-        .setTitle(`🧠 ${catInfo.label} Trivia`)
-        .setDescription(`**${obfuscate(question)}**\n\n🅰️  ${obfuscate(options.A)}\n🅱️  ${obfuscate(options.B)}\n🇨  ${obfuscate(options.C)}\n🇩  ${obfuscate(options.D)}`)
-        .setFooter({ text: "Lock in your answer — results revealed when time's up! • 30 seconds" }).setTimestamp();
-      const triviaRow = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('trivia.a').setLabel('A').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('trivia.b').setLabel('B').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('trivia.c').setLabel('C').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('trivia.d').setLabel('D').setStyle(ButtonStyle.Secondary),
-      );
-      const triviaMsg = await interaction.channel.send({ embeds: [triviaEmbed], components: [triviaRow] });
-      await interaction.editReply({ content: `${catInfo.label} trivia started!`, embeds: [], components: [] }).catch(() => {});
-
-      const state = { question, options, answer: answer.toUpperCase(), catLabel: catInfo.label, messageId: triviaMsg.id, answered: new Map() };
+      const state = {
+        catId:       catInfo.id,
+        catLabel:    catInfo.label,
+        cdKey,
+        roundNum:    1,
+        totalRounds: 5,
+        messageId:   null,
+        question:    null, options: null, answer: null,
+        answered:    new Map(),
+        scores:      new Map(), // userId → { username, corrects, firsts }
+        timeout:     null,
+      };
       activeTrivia.set(cid, state);
-
-      state.timeout = setTimeout(async () => {
-        activeTrivia.delete(cid);
-        gameCooldowns.set(cdKey, Date.now() + 5 * 60 * 1000);
-
-        const correct = answer.toUpperCase();
-        const winners = [...state.answered.entries()].filter(([, v]) => v.choice === correct);
-        const bbLines = [];
-        winners.forEach(([uid, v], i) => {
-          const bb = i === 0 ? 75 : 30;
-          addBB(uid, v.username, bb, `trivia — ${catInfo.label} correct answer`);
-          bbLines.push(`<@${uid}> +${bb} BB`);
-        });
-        const disabledRow = new ActionRowBuilder().addComponents(
-          ['A','B','C','D'].map(l => new ButtonBuilder()
-            .setCustomId(`trivia.${l.toLowerCase()}_done`)
-            .setLabel(l)
-            .setStyle(l === correct ? ButtonStyle.Success : ButtonStyle.Secondary)
-            .setDisabled(true)
-          )
-        );
-        const resultEmbed = new EmbedBuilder().setColor(winners.length ? '#2ecc71' : '#8B0000')
-          .setTitle(`🧠 ${catInfo.label} Trivia — Results`)
-          .setDescription(`**${question}**\n\n🅰️  ${options.A}\n🅱️  ${options.B}\n🇨  ${options.C}\n🇩  ${options.D}`)
-          .addFields({ name: `✅ Answer: ${correct} — ${options[correct]}`, value: winners.length ? bbLines.join('\n') : 'Nobody got it right.' })
-          .setFooter({ text: "Bully's World" }).setTimestamp();
-        await triviaMsg.edit({ embeds: [resultEmbed], components: [disabledRow] }).catch(() => {});
-      }, 30000);
+      await interaction.editReply({ content: `🧠 **${catInfo.label}** trivia is on! 5 rounds, 15 seconds each. Good luck!`, embeds: [], components: [] }).catch(() => {});
+      await startTriviaRound(interaction.channel, state);
       return;
     }
 
@@ -3351,7 +3431,7 @@ client.on('interactionCreate', async interaction => {
       if (!state) { await interaction.reply({ content: '⏰ No active trivia game.', ephemeral: true }); return; }
       if (state.answered.has(userId)) { await interaction.reply({ content: '🔒 You already locked in an answer.', ephemeral: true }); return; }
       const chosen = customId.slice(-1).toUpperCase();
-      state.answered.set(userId, { choice: chosen, username });
+      state.answered.set(userId, { choice: chosen, username, ts: Date.now() });
       await interaction.reply({ content: `🤫 Answer locked in. Results drop when the timer ends.`, ephemeral: true });
       return;
     }
