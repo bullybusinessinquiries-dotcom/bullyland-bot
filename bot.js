@@ -685,7 +685,7 @@ function buildHangmanEmbed(state) {
       { name: '❌ Wrong guesses', value: wrongArr.length ? wrongArr.join('  ') : '—', inline: true },
       { name: '💀 Lives left',    value: `${6 - wrong.size}`,                           inline: true },
     )
-    .setFooter({ text: "Type a letter to guess • Bully's World" })
+    .setFooter({ text: "Press a button, then type your guess • 30s cooldown per letter • Bully's World" })
     .setTimestamp();
 }
 
@@ -3333,7 +3333,7 @@ client.on('interactionCreate', async interaction => {
         participants: new Map(),  // userId → Set of correct letters they guessed
         pendingGuess: new Map(),  // userId → 'letter' | 'solve'
         letterCooldowns: new Map(), // userId → timestamp (30s between letters)
-        solveAttempts: new Set(), // userIds who already used their solve
+        solveAttempts: new Map(), // userId → number of solve attempts used (max 2)
       };
       const hmRow = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId('hangman.guess').setLabel('🔤 Guess Letter').setStyle(ButtonStyle.Primary),
@@ -3365,9 +3365,9 @@ client.on('interactionCreate', async interaction => {
       const state = activeHangman.get(cid);
       if (!state) { await interaction.reply({ content: '❌ No active hangman game.', ephemeral: true }); return; }
       const cdLeft = (state.letterCooldowns.get(userId) || 0) - Date.now();
-      if (cdLeft > 0) { await interaction.reply({ content: `⏳ Wait **${Math.ceil(cdLeft/1000)}s** before guessing again.`, ephemeral: true }); return; }
+      if (cdLeft > 0) { await interaction.reply({ content: `⏳ You have **${Math.ceil(cdLeft/1000)}s** left on your cooldown. Wait before guessing again.`, ephemeral: true }); return; }
       state.pendingGuess.set(userId, 'letter');
-      await interaction.reply({ content: `↩️ Reply to the hangman message with a **single letter** to make your guess.`, ephemeral: true });
+      await interaction.reply({ content: `🔤 Your **next message** in this channel will be your letter guess. Type a single letter now.\n> ⏰ You'll have a **30-second cooldown** after each guess.`, ephemeral: true });
       return;
     }
 
@@ -3376,9 +3376,11 @@ client.on('interactionCreate', async interaction => {
       const cid = interaction.channelId;
       const state = activeHangman.get(cid);
       if (!state) { await interaction.reply({ content: '❌ No active hangman game.', ephemeral: true }); return; }
-      if (state.solveAttempts.has(userId)) { await interaction.reply({ content: `❌ You already used your solve attempt this game.`, ephemeral: true }); return; }
+      const usedSolves = state.solveAttempts.get(userId) || 0;
+      if (usedSolves >= 2) { await interaction.reply({ content: `❌ You've used both of your solve attempts this game.`, ephemeral: true }); return; }
       state.pendingGuess.set(userId, 'solve');
-      await interaction.reply({ content: `↩️ Reply to the hangman message with the **full word or phrase** to solve it.`, ephemeral: true });
+      const remaining = 2 - usedSolves;
+      await interaction.reply({ content: `🔍 Your **next message** in this channel will be your solve attempt. Type the full word or phrase now.\n> 🎯 You have **${remaining} solve attempt${remaining !== 1 ? 's' : ''}** remaining.`, ephemeral: true });
       return;
     }
 
@@ -3825,40 +3827,41 @@ Balance: **${bal.toLocaleString()} BB**`).setFooter({ text: "Bully's Casino • 
 
 // ============================================================================
 // ============================================================================
-// HANGMAN — reply-based guess capture
+// HANGMAN — next-message guess capture (button must be pressed first)
 // ============================================================================
 client.on('messageCreate', async msg => {
   if (msg.author?.bot || !msg.guild) return;
-  // Must be a reply to a message
-  if (!msg.reference?.messageId) return;
 
   const userId = msg.author.id, username = msg.author.username;
 
-  // ── Hangman reply ──────────────────────────────────────────────────────────
+  // ── Hangman guess capture ──────────────────────────────────────────────────
+  // Only process if there's an active game AND this user pressed a button first
   const hmState = activeHangman.get(msg.channelId);
-  if (hmState && msg.reference.messageId === hmState.messageId) {
+  if (hmState) {
     const pendingType = hmState.pendingGuess.get(userId);
-    if (!pendingType) {
-      // Not prompted — delete silently
-      await msg.delete().catch(() => {});
-      return;
-    }
+    if (!pendingType) return; // User didn't press a button — ignore their message entirely
+
     hmState.pendingGuess.delete(userId);
     const text = msg.content.trim().toUpperCase().replace(/[^A-Z ]/g, '');
     const cid = msg.channelId;
     const cdKey = `hangman.${cid}`;
+    await msg.delete().catch(() => {});
+
+    const sendTemp = (content, delay = 6000) =>
+      msg.channel.send({ content }).then(r => setTimeout(() => r.delete().catch(() => {}), delay)).catch(() => {});
 
     // ── Solve attempt ──
     if (pendingType === 'solve') {
-      hmState.solveAttempts.add(userId);
-      await msg.delete().catch(() => {});
+      const usedSolves = (hmState.solveAttempts.get(userId) || 0) + 1;
+      hmState.solveAttempts.set(userId, usedSolves);
+      const attemptsLeft = 2 - usedSolves;
+
       if (text === hmState.word) {
-        // Correct solve
+        // ✅ Correct solve
         clearTimeout(hmState.timeout);
         activeHangman.delete(cid);
         gameCooldowns.set(cdKey, Date.now() + 5 * 60 * 1000);
         addBB(userId, username, 100, 'hangman — solved the word');
-        // Pay per-letter contributors
         const rewards = [];
         for (const [uid, letters] of hmState.participants) {
           if (uid === userId) continue;
@@ -3873,10 +3876,12 @@ client.on('messageCreate', async msg => {
         const hmMsg = await msg.channel.messages.fetch(hmState.messageId).catch(() => null);
         if (hmMsg) await hmMsg.edit({ embeds: [winEmbed], components: [] }).catch(() => {});
         await msg.channel.send(`🎉 <@${userId}> solved it — **${hmState.word}**! **+100 BB**${rewards.length ? '\n' + rewards.join(' • ') : ''}`);
+      } else if (attemptsLeft > 0) {
+        // ❌ Wrong solve — still has attempts left
+        await sendTemp(`<@${userId}> ❌ That's not it! You have **${attemptsLeft} solve attempt${attemptsLeft !== 1 ? 's' : ''}** left.`);
       } else {
-        // Wrong solve — private notice only
-        await msg.channel.send({ content: `<@${userId}> ❌ That's not it. You've used your solve attempt.` })
-          .then(r => setTimeout(() => r.delete().catch(() => {}), 5000)).catch(() => {});
+        // ❌ Wrong solve — out of attempts
+        await sendTemp(`<@${userId}> ❌ That's not it! You've used both of your solve attempts for this game.`);
       }
       return;
     }
@@ -3884,18 +3889,16 @@ client.on('messageCreate', async msg => {
     // ── Letter guess ──
     const letter = text.length === 1 ? text : null;
     if (!letter) {
-      await msg.channel.send({ content: `<@${userId}> ❌ Send a **single letter** to guess.` })
-        .then(r => setTimeout(() => r.delete().catch(() => {}), 4000)).catch(() => {});
+      await sendTemp(`<@${userId}> ❌ That's not a single letter — press **Guess Letter** again and type one character only.`, 5000);
       return;
     }
 
     if (hmState.guessed.has(letter) || hmState.wrong.has(letter)) {
-      await msg.channel.send({ content: `<@${userId}> **${letter}** was already guessed.` })
-        .then(r => setTimeout(() => r.delete().catch(() => {}), 4000)).catch(() => {});
+      await sendTemp(`<@${userId}> **${letter}** was already guessed — press **Guess Letter** and try a different one.`, 5000);
       return;
     }
 
-    // Set 30s cooldown for this user's next letter
+    // Apply 30s cooldown immediately
     hmState.letterCooldowns.set(userId, Date.now() + 30 * 1000);
 
     if (hmState.word.includes(letter)) {
@@ -3904,7 +3907,6 @@ client.on('messageCreate', async msg => {
       hmState.participants.get(userId).add(letter);
       hmState.display = buildHangmanDisplay(hmState.word, hmState.guessed);
 
-      // Check if all letters revealed
       const solved = hmState.word.replace(/ /g, '').split('').every(c => hmState.guessed.has(c));
       if (solved) {
         clearTimeout(hmState.timeout);
@@ -3924,10 +3926,13 @@ client.on('messageCreate', async msg => {
         if (hmMsg) await hmMsg.edit({ embeds: [winEmbed], components: [] }).catch(() => {});
         await msg.channel.send(`🎉 <@${userId}> filled in the last letter — **${hmState.word}**! **+100 BB**${rewards.length ? '\n' + rewards.join(' • ') : ''}`);
       } else {
+        // ✅ Correct letter — update embed + notify
         const hmMsg = await msg.channel.messages.fetch(hmState.messageId).catch(() => null);
         if (hmMsg) await hmMsg.edit({ embeds: [buildHangmanEmbed(hmState)] }).catch(() => {});
+        await sendTemp(`<@${userId}> ✅ **${letter}** is in the word! ⏳ Come back in **30 seconds** to guess again.`);
       }
     } else {
+      // ❌ Wrong letter — update embed + notify
       hmState.wrong.add(letter);
       if (hmState.wrong.size >= 6) {
         clearTimeout(hmState.timeout);
@@ -3940,9 +3945,9 @@ client.on('messageCreate', async msg => {
       } else {
         const hmMsg = await msg.channel.messages.fetch(hmState.messageId).catch(() => null);
         if (hmMsg) await hmMsg.edit({ embeds: [buildHangmanEmbed(hmState)] }).catch(() => {});
+        await sendTemp(`<@${userId}> ❌ **${letter}** is not in the word. ⏳ Come back in **30 seconds** to guess again.`);
       }
     }
-    await msg.delete().catch(() => {});
     return;
   }
 });
