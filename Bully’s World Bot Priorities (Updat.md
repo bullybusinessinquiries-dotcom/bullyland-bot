@@ -9,7 +9,7 @@ Bully’s World Bot Priorities (Update Schedule)
    * Deactivate - Test mode
    * Construction Zone Commands \[prio. restore]
    * Add - Block Steals
-   * Min. BB Steal Block 
+   * Min. BB Steal Block
    * Improved "Help" Command
 2. **Bank and Arms Update**(5/7-5/9)
 
@@ -22,9 +22,10 @@ Bully’s World Bot Priorities (Update Schedule)
    * Hangman Game
    * Steal/Heist Tracker
    * Daily Questionnaire
+   * Neighborhood Watch
 4. **Auction-House Update (5/21-5/23)**
 
-   * Auction House 
+   * Auction House
 5. **Get-Hired Update (6/4-6/6)**
 
    * Daily Tasks
@@ -42,6 +43,4 @@ Bully’s World Bot Priorities (Update Schedule)
    * Activate Mystery Drops
    * Unlock Mystery Drops Channel
    * Activate - Show discount codes in bully-store
-
-
 

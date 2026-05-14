@@ -284,7 +284,10 @@ let activeCasino = false;
 let dropsEnabled = true;
 let lastShopMessageId = null;
 let lastLeaderboardMessageId = null;
-const _pendingDMUse = new Map(); // userId → { itemId, guildId }
+const _pendingDMUse  = new Map(); // userId   → { itemId, guildId }
+const activeTrivia   = new Map(); // channelId → trivia game state
+const activeHangman  = new Map(); // channelId → hangman game state
+const gameCooldowns  = new Map(); // `${type}.${channelId}` → timestamp
 
 // ─── DB HELPERS ────────────────────────────────────────────────────────────
 function getUser(userId, username) {
@@ -598,6 +601,80 @@ async function generateContent(prompt) {
 }
 
 
+
+// ─── TRIVIA GENERATOR ─────────────────────────────────────────────────────
+async function generateTriviaQuestion() {
+  const categories = [
+    'pop culture', 'music & artists', 'celebrity gossip & drama', 'reality TV',
+    'fashion & style', 'social media & internet culture', 'sports', 'movies & TV shows',
+    'Black culture & history', 'TikTok trends',
+  ];
+  const cat = categories[Math.floor(Math.random() * categories.length)];
+  const msg = await anthropic.messages.create({
+    model: 'claude-haiku-4-20250514', max_tokens: 300,
+    messages: [{ role: 'user', content:
+      `Generate a fun trivia question about "${cat}" for a lively Discord community called BULLYLAND (Bully's World — urban, confident, pop-culture-savvy). ` +
+      `Return ONLY valid JSON, no markdown, no explanation:\n` +
+      `{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A"}` +
+      `\nRules: one clearly correct answer, three plausible wrong answers, fun but fair difficulty. Keep question under 120 chars.`
+    }],
+  });
+  return JSON.parse(msg.content[0].text.trim());
+}
+
+// ─── HANGMAN GENERATOR ────────────────────────────────────────────────────
+async function generateHangmanWord() {
+  const categories = [
+    'a celebrity name', 'a hit song title', 'a popular TV show', 'a viral slang term',
+    'a famous movie', 'a popular brand or sneaker', 'a rapper or singer name',
+    'a TikTok trend or phrase', 'a sports star name', 'a reality TV show',
+  ];
+  const cat = categories[Math.floor(Math.random() * categories.length)];
+  const msg = await anthropic.messages.create({
+    model: 'claude-haiku-4-20250514', max_tokens: 150,
+    messages: [{ role: 'user', content:
+      `Generate a hangman word or short phrase (2–4 words max) that is ${cat}, well-known to a young urban pop-culture audience. ` +
+      `Return ONLY valid JSON, no markdown:\n` +
+      `{"word":"...","category":"...","hint":"..."}` +
+      `\nRules: word/phrase in ALL CAPS, no punctuation except spaces, category is short (e.g. "Celebrity", "Song Title"), hint is one short clue sentence.`
+    }],
+  });
+  return JSON.parse(msg.content[0].text.trim());
+}
+
+// ─── HANGMAN ASCII ────────────────────────────────────────────────────────
+const HANGMAN_STAGES = [
+  '```\n  -----\n  |   |\n  |    \n  |    \n  |\n=====```',
+  '```\n  -----\n  |   |\n  |   O\n  |    \n  |\n=====```',
+  '```\n  -----\n  |   |\n  |   O\n  |   |\n  |\n=====```',
+  '```\n  -----\n  |   |\n  |   O\n  |  /|\n  |\n=====```',
+  '```\n  -----\n  |   |\n  |   O\n  |  /|\\\n  |\n=====```',
+  '```\n  -----\n  |   |\n  |   O\n  |  /|\\\n  |  /\n=====```',
+  '```\n  -----\n  |   |\n  |   O\n  |  /|\\\n  |  / \\\n=====```',
+];
+
+function buildHangmanDisplay(word, guessed) {
+  return word.split('').map(c => c === ' ' ? '  ' : (guessed.has(c) ? c : '_')).join(' ');
+}
+
+function buildHangmanEmbed(state) {
+  const { word, category, hint, guessed, wrong, display } = state;
+  const wrongArr = [...wrong];
+  return new EmbedBuilder()
+    .setColor(wrong.size >= 6 ? '#8B0000' : '#c9a84c')
+    .setTitle(`🔤 Hangman — ${category}`)
+    .setDescription(
+      `${HANGMAN_STAGES[wrong.size]}\n\n` +
+      `**${display}**\n\n` +
+      `💡 *${hint}*`
+    )
+    .addFields(
+      { name: '❌ Wrong guesses', value: wrongArr.length ? wrongArr.join('  ') : '—', inline: true },
+      { name: '💀 Lives left',    value: `${6 - wrong.size}`,                           inline: true },
+    )
+    .setFooter({ text: "Type a letter to guess • Bully's World" })
+    .setTimestamp();
+}
 
 // ─── MEMBER SPOTLIGHT ──────────────────────────────────────────────────────
 async function postMemberSpotlight() {
@@ -3022,16 +3099,20 @@ client.on('messageCreate', async msg => {
     return;
   }
   const embed = new EmbedBuilder().setColor('#c9a84c').setTitle('🎮 BULLYLAND Games')
-    .setDescription('**Welcome to the game room.** Pick a game below.\n\n⚔️ **Raid** — Team battles\n👹 **Boss Raid** — Legendary bosses\n🦹 **Heist** — Crew heists for BB\n🎰 **Casino** — Slots, Blackjack, Roulette, Horse Racing\n🎟️ **Lottery** — Weekly jackpot draw')
+    .setDescription('**Welcome to the game room.** Pick a game below.\n\n⚔️ **Raid** — Team battles\n👹 **Boss Raid** — Legendary bosses\n🦹 **Heist** — Crew heists for BB\n🎰 **Casino** — Slots, Blackjack, Roulette, Horse Racing\n🎟️ **Lottery** — Weekly jackpot draw\n🧠 **Trivia** — Answer fast, earn BB\n🔤 **Hangman** — Guess the word together')
     .setFooter({ text: "Bully's World" }).setTimestamp();
-  const row = new ActionRowBuilder().addComponents(
+  const row1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('menu.raid').setLabel('⚔️ Raid').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId('menu.boss').setLabel('👹 Boss Raid').setStyle(ButtonStyle.Danger),
     new ButtonBuilder().setCustomId('menu.heist').setLabel('🦹 Heist').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('menu.casino').setLabel('🎰 Casino').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId('menu.lottery').setLabel('🎟️ Lottery').setStyle(ButtonStyle.Primary),
   );
-  await msg.reply({ embeds: [embed], components: [row] });
+  const row2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('menu.trivia').setLabel('🧠 Trivia').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('menu.hangman').setLabel('🔤 Hangman').setStyle(ButtonStyle.Success),
+  );
+  await msg.reply({ embeds: [embed], components: [row1, row2] });
 });
 
 // ============================================================================
@@ -3048,12 +3129,13 @@ client.on('interactionCreate', async interaction => {
   const getBal = () => db.prepare('SELECT balance FROM balances WHERE user_id = ?').get(userId)?.balance || 0;
 
   // Game interactions must happen in the games channel
-  const GAME_CUSTOMS = ['menu.raid','menu.boss','menu.heist','menu.casino','menu.lottery'];
+  const GAME_CUSTOMS = ['menu.raid','menu.boss','menu.heist','menu.casino','menu.lottery','menu.trivia','menu.hangman'];
   const isGameInteraction = GAME_CUSTOMS.some(k => customId.startsWith(k)) ||
     customId.startsWith('raid.') || customId.startsWith('boss.') ||
     customId.startsWith('heist.') || customId.startsWith('casino.') ||
     customId.startsWith('lottery.') || customId.startsWith('slots.') ||
-    customId.startsWith('bj.') || customId.startsWith('roulette.') || customId.startsWith('race.');
+    customId.startsWith('bj.') || customId.startsWith('roulette.') || customId.startsWith('race.') ||
+    customId.startsWith('trivia.') || customId.startsWith('hangman.');
   const ALLOWED_GAME_CHANNELS = ['1492571851178901706', '1492228049272438834'];
   if (isGameInteraction && !ALLOWED_GAME_CHANNELS.includes(interaction.channelId)) {
     await interaction.reply({ content: `🎮 Games only run in <#1492571851178901706>.`, ephemeral: true }); return;
@@ -3093,6 +3175,113 @@ client.on('interactionCreate', async interaction => {
       } catch (_) {
         await interaction.reply({ content: `❌ I couldn't DM you. Please enable DMs from server members and try again.`, ephemeral: true });
       }
+      return;
+    }
+
+    // ── TRIVIA: start ────────────────────────────────────────────────────────
+    if (customId === 'menu.trivia') {
+      const cid = interaction.channelId;
+      if (activeTrivia.has(cid)) { await interaction.reply({ content: '🧠 A trivia game is already running in this channel!', ephemeral: true }); return; }
+      const cdKey = `trivia.${cid}`;
+      const cdLeft = (gameCooldowns.get(cdKey) || 0) - Date.now();
+      if (cdLeft > 0) { await interaction.reply({ content: `⏳ Trivia on cooldown — **${Math.ceil(cdLeft/1000)}s** left.`, ephemeral: true }); return; }
+
+      await interaction.reply({ content: '🧠 Generating a question...', ephemeral: true });
+      let trivia;
+      try { trivia = await generateTriviaQuestion(); } catch { await interaction.followUp({ content: '❌ Failed to generate a question. Try again.', ephemeral: true }); return; }
+
+      const { question, options, answer } = trivia;
+      const triviaEmbed = new EmbedBuilder().setColor('#c9a84c').setTitle('🧠 BULLYLAND Trivia')
+        .setDescription(`**${question}**\n\n🅰️ ${options.A}\n🅱️ ${options.B}\n🇨 ${options.C}\n🇩 ${options.D}`)
+        .setFooter({ text: "First correct answer: 75 BB • Others in time: 30 BB • 30 seconds!" }).setTimestamp();
+      const triviaRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('trivia.a').setLabel('A').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('trivia.b').setLabel('B').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('trivia.c').setLabel('C').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('trivia.d').setLabel('D').setStyle(ButtonStyle.Primary),
+      );
+      const triviaMsg = await interaction.channel.send({ embeds: [triviaEmbed], components: [triviaRow] });
+
+      const state = { question, options, answer: answer.toUpperCase(), messageId: triviaMsg.id, answered: new Map(), firstWinner: null };
+      activeTrivia.set(cid, state);
+
+      // Auto-close after 30s
+      state.timeout = setTimeout(async () => {
+        activeTrivia.delete(cid);
+        gameCooldowns.set(cdKey, Date.now() + 2 * 60 * 1000);
+        const disabledRow = new ActionRowBuilder().addComponents(
+          ['A','B','C','D'].map(l => new ButtonBuilder().setCustomId(`trivia.${l.toLowerCase()}_done`).setLabel(l).setStyle(l === answer.toUpperCase() ? ButtonStyle.Success : ButtonStyle.Secondary).setDisabled(true))
+        );
+        const resultLines = state.firstWinner ? [`✅ Correct answer: **${answer}** — ${options[answer.toUpperCase()]}`] : [`⏰ Time's up! Correct answer: **${answer}** — ${options[answer.toUpperCase()]}`, `Nobody got it right.`];
+        await triviaMsg.edit({ embeds: [triviaEmbed.setColor(state.firstWinner ? '#2ecc71' : '#8B0000').setFooter({ text: "Time's up! • Bully's World" })], components: [disabledRow] }).catch(() => {});
+        await interaction.channel.send(resultLines.join('\n')).catch(() => {});
+      }, 30000);
+      return;
+    }
+
+    // ── TRIVIA: answer buttons ────────────────────────────────────────────────
+    if (customId.startsWith('trivia.') && ['trivia.a','trivia.b','trivia.c','trivia.d'].includes(customId)) {
+      const cid = interaction.channelId;
+      const state = activeTrivia.get(cid);
+      if (!state) { await interaction.reply({ content: '⏰ No active trivia game.', ephemeral: true }); return; }
+      if (state.answered.has(userId)) { await interaction.reply({ content: '✋ You already answered!', ephemeral: true }); return; }
+
+      const chosen = customId.slice(-1).toUpperCase();
+      state.answered.set(userId, chosen);
+      const correct = chosen === state.answer;
+
+      if (correct) {
+        if (!state.firstWinner) {
+          state.firstWinner = userId;
+          addBB(userId, username, 75, 'trivia — first correct answer');
+          await interaction.reply({ content: `✅ **Correct!** You got it first — **+75 BB**!`, ephemeral: true });
+        } else {
+          addBB(userId, username, 30, 'trivia — correct answer');
+          await interaction.reply({ content: `✅ **Correct!** **+30 BB**`, ephemeral: true });
+        }
+      } else {
+        await interaction.reply({ content: `❌ Wrong answer! The clock is still ticking...`, ephemeral: true });
+      }
+      return;
+    }
+
+    // ── HANGMAN: start ───────────────────────────────────────────────────────
+    if (customId === 'menu.hangman') {
+      const cid = interaction.channelId;
+      if (activeHangman.has(cid)) { await interaction.reply({ content: '🔤 A hangman game is already running in this channel!', ephemeral: true }); return; }
+      const cdKey = `hangman.${cid}`;
+      const cdLeft = (gameCooldowns.get(cdKey) || 0) - Date.now();
+      if (cdLeft > 0) { await interaction.reply({ content: `⏳ Hangman on cooldown — **${Math.ceil(cdLeft/1000)}s** left.`, ephemeral: true }); return; }
+
+      await interaction.reply({ content: '🔤 Generating a word...', ephemeral: true });
+      let hwData;
+      try { hwData = await generateHangmanWord(); } catch { await interaction.followUp({ content: '❌ Failed to generate a word. Try again.', ephemeral: true }); return; }
+
+      const word = hwData.word.toUpperCase().replace(/[^A-Z ]/g, '');
+      const state = {
+        word, category: hwData.category, hint: hwData.hint,
+        guessed: new Set(), wrong: new Set(),
+        display: buildHangmanDisplay(word, new Set()),
+        participants: new Map(), // userId → Set of correct letters they guessed
+        solved: false,
+      };
+      const hmEmbed = buildHangmanEmbed(state);
+      const hmMsg = await interaction.channel.send({ embeds: [hmEmbed] });
+      state.messageId = hmMsg.id;
+      activeHangman.set(cid, state);
+
+      // Auto-end after 3 minutes
+      state.timeout = setTimeout(async () => {
+        const cur = activeHangman.get(cid);
+        if (!cur || cur.messageId !== hmMsg.id) return;
+        activeHangman.delete(cid);
+        gameCooldowns.set(cdKey, Date.now() + 2 * 60 * 1000);
+        const failEmbed = buildHangmanEmbed({ ...cur, wrong: new Set([...cur.wrong, '_FORCE']) }) // trick to show full body
+          .setColor('#8B0000').setTitle(`🔤 Hangman — Time's Up!`)
+          .setDescription(`${HANGMAN_STAGES[6]}\n\n**The word was: ${cur.word}**`);
+        await hmMsg.edit({ embeds: [failEmbed] }).catch(() => {});
+        await interaction.channel.send(`⏰ Time's up! The word was **${cur.word}**.`).catch(() => {});
+      }, 3 * 60 * 1000);
       return;
     }
 
@@ -3538,6 +3727,100 @@ Balance: **${bal.toLocaleString()} BB**`).setFooter({ text: "Bully's Casino • 
 });
 
 // ============================================================================
+// ============================================================================
+// HANGMAN — letter guess capture
+// ============================================================================
+client.on('messageCreate', async msg => {
+  if (msg.author?.bot || !msg.guild) return;
+  const state = activeHangman.get(msg.channelId);
+  if (!state) return;
+
+  const text = msg.content.trim().toUpperCase();
+
+  // Full word guess
+  const isFullGuess = text.length > 1 && text === state.word;
+  // Single letter guess
+  const isLetter = /^[A-Z]$/.test(text);
+  if (!isLetter && !isFullGuess) return;
+
+  const userId = msg.author.id, username = msg.author.username;
+  const cid = msg.channelId;
+  const cdKey = `hangman.${cid}`;
+
+  // Full word guess
+  if (isFullGuess) {
+    clearTimeout(state.timeout);
+    activeHangman.delete(cid);
+    gameCooldowns.set(cdKey, Date.now() + 2 * 60 * 1000);
+    addBB(userId, username, 100, 'hangman — solved the word');
+    state.guessed = new Set(state.word.replace(/ /g, '').split(''));
+    state.display = buildHangmanDisplay(state.word, state.guessed);
+    const winEmbed = buildHangmanEmbed(state).setColor('#2ecc71').setTitle('🔤 Hangman — Solved!').setFooter({ text: "Bully's World" });
+    const hmMsg = await msg.channel.messages.fetch(state.messageId).catch(() => null);
+    if (hmMsg) await hmMsg.edit({ embeds: [winEmbed] }).catch(() => {});
+    await msg.reply(`🎉 <@${userId}> got it — **${state.word}**! **+100 BB**`);
+    return;
+  }
+
+  // Single letter
+  const letter = text;
+  if (state.guessed.has(letter) || state.wrong.has(letter)) {
+    const r = await msg.reply(`Already guessed **${letter}**.`); setTimeout(() => r.delete().catch(() => {}), 3000);
+    await msg.delete().catch(() => {});
+    return;
+  }
+
+  if (state.word.includes(letter)) {
+    state.guessed.add(letter);
+    // Track who guessed this correct letter
+    if (!state.participants.has(userId)) state.participants.set(userId, new Set());
+    state.participants.get(userId).add(letter);
+
+    state.display = buildHangmanDisplay(state.word, state.guessed);
+
+    // Check if solved
+    const solved = state.word.replace(/ /g, '').split('').every(c => state.guessed.has(c));
+    if (solved) {
+      clearTimeout(state.timeout);
+      activeHangman.delete(cid);
+      gameCooldowns.set(cdKey, Date.now() + 2 * 60 * 1000);
+      addBB(userId, username, 100, 'hangman — solved the word');
+      // Pay per-letter contributors
+      const rewards = [];
+      for (const [uid, letters] of state.participants) {
+        if (uid === userId) continue;
+        const bbEarned = letters.size * 10;
+        const uname = (await msg.guild.members.fetch(uid).catch(() => null))?.user.username || uid;
+        addBB(uid, uname, bbEarned, `hangman — ${letters.size} correct letter(s)`);
+        rewards.push(`<@${uid}> +${bbEarned} BB`);
+      }
+      const winEmbed = buildHangmanEmbed(state).setColor('#2ecc71').setTitle('🔤 Hangman — Solved!').setFooter({ text: "Bully's World" });
+      const hmMsg = await msg.channel.messages.fetch(state.messageId).catch(() => null);
+      if (hmMsg) await hmMsg.edit({ embeds: [winEmbed] }).catch(() => {});
+      await msg.reply(`🎉 <@${userId}> solved it — **${state.word}**! **+100 BB**${rewards.length ? '\n' + rewards.join(' • ') : ''}`);
+    } else {
+      const hmMsg = await msg.channel.messages.fetch(state.messageId).catch(() => null);
+      if (hmMsg) await hmMsg.edit({ embeds: [buildHangmanEmbed(state)] }).catch(() => {});
+      await msg.delete().catch(() => {});
+    }
+  } else {
+    state.wrong.add(letter);
+    await msg.delete().catch(() => {});
+    if (state.wrong.size >= 6) {
+      clearTimeout(state.timeout);
+      activeHangman.delete(cid);
+      gameCooldowns.set(cdKey, Date.now() + 2 * 60 * 1000);
+      const loseEmbed = buildHangmanEmbed(state).setColor('#8B0000').setTitle('🔤 Hangman — Game Over').setFooter({ text: "Bully's World" });
+      const hmMsg = await msg.channel.messages.fetch(state.messageId).catch(() => null);
+      if (hmMsg) await hmMsg.edit({ embeds: [loseEmbed] }).catch(() => {});
+      await msg.channel.send(`💀 The word was **${state.word}**. Better luck next time!`);
+    } else {
+      const hmMsg = await msg.channel.messages.fetch(state.messageId).catch(() => null);
+      if (hmMsg) await hmMsg.edit({ embeds: [buildHangmanEmbed(state)] }).catch(() => {});
+    }
+  }
+});
+
 // ============================================================================
 // BLACK MARKET — DM-based item use target capture
 // ============================================================================
