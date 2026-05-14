@@ -180,6 +180,20 @@ db.exec(`
     last_used TEXT NOT NULL,
     PRIMARY KEY (user_id, item_id)
   );
+
+  CREATE TABLE IF NOT EXISTS booster_payouts (
+    user_id TEXT NOT NULL,
+    week    TEXT NOT NULL,
+    paid_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, week)
+  );
+
+  CREATE TABLE IF NOT EXISTS superfan_payouts (
+    user_id TEXT NOT NULL,
+    week    TEXT NOT NULL,
+    paid_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, week)
+  );
 `);
 
 // ── SQLite durability settings (must come before any writes) ──────────────────
@@ -380,6 +394,107 @@ function depositBB(userId, amount) {
 function withdrawBB(userId, amount) {
   db.prepare('UPDATE balances SET balance = balance + ?, bank_balance = bank_balance - ? WHERE user_id = ?').run(amount, amount, userId);
   db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(userId, amount, `bank withdrawal`);
+}
+
+// ─── BOOSTER & SUPERFAN CLUB ─────────────────────────────────────────────────
+// Returns an ISO week string like "2025-W20" — used as the payout period key
+function getISOWeek(date = new Date()) {
+  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+  d.setUTCDate(d.getUTCDate() + 4 - (d.getUTCDay() || 7));
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  const weekNo    = Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+  return `${d.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`;
+}
+
+const BOOSTER_WEEKLY_BB   = 500;
+const SUPERFAN_WEEKLY_BB  = 500;
+
+// ── Booster paycheck DM ───────────────────────────────────────────────────────
+async function sendBoosterPaycheck(member, isFirstTime = false) {
+  const embed = new EmbedBuilder()
+    .setColor('#f47fff')
+    .setTitle(isFirstTime ? '💜 Welcome to the Booster Club.' : '💜 Booster Club — Weekly Paycheck')
+    .setDescription(
+      isFirstTime
+        ? `You just boosted BULLYLAND and that means everything.\n\n` +
+          `The Booster Club is a small, exclusive group of people who actively invest in keeping this community alive and growing. ` +
+          `We don't take that lightly.\n\n` +
+          `As a member of the club, you'll receive **${BOOSTER_WEEKLY_BB} Bully Bucks every week** — automatically, like a paycheck — for as long as you're boosting.\n\n` +
+          `Your first paycheck just hit. Check your balance with \`!balance\`.\n\n` +
+          `Thank you for being part of something real. 🎨`
+        : `Your weekly Booster Club paycheck just dropped.\n\n` +
+          `**+${BOOSTER_WEEKLY_BB} BB** has been added to your balance as a thank you for keeping BULLYLAND boosted.\n\n` +
+          `You're part of an exclusive group of people who invest in this community — and this community invests back in you.\n\n` +
+          `Check your balance: \`!balance\``
+    )
+    .setFooter({ text: "Bully's World • Booster Club • Thank you." })
+    .setTimestamp();
+  await member.send({ embeds: [embed] }).catch(() => {});
+}
+
+// ── Superfan paycheck DM ──────────────────────────────────────────────────────
+async function sendSuperfanPaycheck(member, isFirstTime = false) {
+  const embed = new EmbedBuilder()
+    .setColor('#ff6b35')
+    .setTitle(isFirstTime ? '🔥 Welcome to the Superfan Club.' : '🔥 Superfan Club — Weekly Paycheck')
+    .setDescription(
+      isFirstTime
+        ? `You're a TikTok Superfan — and we see you.\n\n` +
+          `The Superfan Club is reserved for the people who support Bully's content at the highest level. ` +
+          `That kind of loyalty deserves to be rewarded, not just acknowledged.\n\n` +
+          `As a Superfan, you'll receive **${SUPERFAN_WEEKLY_BB} Bully Bucks every week** for as long as your subscription is active.\n\n` +
+          `Your first paycheck just hit. Check your balance with \`!balance\`.\n\n` +
+          `Welcome to the inner circle. 🎨`
+        : `Your weekly Superfan Club paycheck just dropped.\n\n` +
+          `**+${SUPERFAN_WEEKLY_BB} BB** added to your balance for being one of Bully's top supporters on TikTok.\n\n` +
+          `Superfan status is rare. The paycheck is your reminder that it's recognized.\n\n` +
+          `Check your balance: \`!balance\``
+    )
+    .setFooter({ text: "Bully's World • Superfan Club • Inner circle." })
+    .setTimestamp();
+  await member.send({ embeds: [embed] }).catch(() => {});
+}
+
+// ── Weekly booster payouts — runs every Monday at noon CT ────────────────────
+async function runBoosterPayouts() {
+  try {
+    const guild = await client.guilds.fetch(CONFIG.GUILD_ID);
+    await guild.members.fetch(); // populate cache
+    const week     = getISOWeek();
+    const boosters = guild.members.cache.filter(m => !!m.premiumSince);
+    let paid = 0;
+    for (const [, member] of boosters) {
+      const already = db.prepare('SELECT 1 FROM booster_payouts WHERE user_id = ? AND week = ?').get(member.id, week);
+      if (already) continue;
+      addBB(member.id, member.user.username, BOOSTER_WEEKLY_BB, 'Booster Club weekly paycheck');
+      db.prepare('INSERT OR IGNORE INTO booster_payouts (user_id, week) VALUES (?, ?)').run(member.id, week);
+      await sendBoosterPaycheck(member, false);
+      paid++;
+    }
+    console.log(`[Booster] Paid ${paid} boosters ${BOOSTER_WEEKLY_BB} BB each (week ${week})`);
+  } catch (e) { console.error('[Booster] Payout error:', e.message); }
+}
+
+// ── Weekly superfan payouts — runs every Monday at noon CT ───────────────────
+async function runSuperfanPayouts() {
+  try {
+    const guild = await client.guilds.fetch(CONFIG.GUILD_ID);
+    await guild.members.fetch();
+    const superfanRoleId = process.env.ROLE_SUPERFAN;
+    if (!superfanRoleId) { console.log('[Superfan] ROLE_SUPERFAN not set — skipping payouts'); return; }
+    const week      = getISOWeek();
+    const superfans = guild.members.cache.filter(m => m.roles.cache.has(superfanRoleId));
+    let paid = 0;
+    for (const [, member] of superfans) {
+      const already = db.prepare('SELECT 1 FROM superfan_payouts WHERE user_id = ? AND week = ?').get(member.id, week);
+      if (already) continue;
+      addBB(member.id, member.user.username, SUPERFAN_WEEKLY_BB, 'Superfan Club weekly paycheck');
+      db.prepare('INSERT OR IGNORE INTO superfan_payouts (user_id, week) VALUES (?, ?)').run(member.id, week);
+      await sendSuperfanPaycheck(member, false);
+      paid++;
+    }
+    console.log(`[Superfan] Paid ${paid} superfans ${SUPERFAN_WEEKLY_BB} BB each (week ${week})`);
+  } catch (e) { console.error('[Superfan] Payout error:', e.message); }
 }
 
 // ─── ITEM SHOP ────────────────────────────────────────────────────────────
@@ -1371,6 +1486,8 @@ const LEVEL_REWARD_INFO = {
 client.on('guildMemberUpdate', async (oldMember, newMember) => {
   try {
     const addedRoleIds = [...newMember.roles.cache.keys()].filter(id => !oldMember.roles.cache.has(id));
+
+    // ── Lurkr level-up rewards ────────────────────────────────────────────────
     for (const roleId of addedRoleIds) {
       const info = LEVEL_REWARD_INFO[roleId];
       if (!info) continue;
@@ -1384,8 +1501,34 @@ client.on('guildMemberUpdate', async (oldMember, newMember) => {
       await newMember.send({ embeds: [embed] }).catch(() => {});
       console.log(`[LevelUp] Sent reward DM to ${newMember.user.username} for role ${tier?.label || roleId}`);
     }
+
+    // ── New server boost detected ─────────────────────────────────────────────
+    if (!oldMember.premiumSince && newMember.premiumSince) {
+      const week = getISOWeek();
+      const already = db.prepare('SELECT 1 FROM booster_payouts WHERE user_id = ? AND week = ?').get(newMember.id, week);
+      if (!already) {
+        addBB(newMember.id, newMember.user.username, BOOSTER_WEEKLY_BB, 'Booster Club — first week reward');
+        db.prepare('INSERT OR IGNORE INTO booster_payouts (user_id, week) VALUES (?, ?)').run(newMember.id, week);
+        await sendBoosterPaycheck(newMember, true);
+        console.log(`[Booster] New booster: ${newMember.user.username} — paid ${BOOSTER_WEEKLY_BB} BB`);
+      }
+    }
+
+    // ── Superfan role granted (admin manually assigns ROLE_SUPERFAN) ──────────
+    const superfanRoleId = process.env.ROLE_SUPERFAN;
+    if (superfanRoleId && addedRoleIds.includes(superfanRoleId)) {
+      const week    = getISOWeek();
+      const already = db.prepare('SELECT 1 FROM superfan_payouts WHERE user_id = ? AND week = ?').get(newMember.id, week);
+      if (!already) {
+        addBB(newMember.id, newMember.user.username, SUPERFAN_WEEKLY_BB, 'Superfan Club — first week reward');
+        db.prepare('INSERT OR IGNORE INTO superfan_payouts (user_id, week) VALUES (?, ?)').run(newMember.id, week);
+        await sendSuperfanPaycheck(newMember, true);
+        console.log(`[Superfan] New superfan: ${newMember.user.username} — paid ${SUPERFAN_WEEKLY_BB} BB`);
+      }
+    }
+
   } catch (e) {
-    console.error('[LevelUp] guildMemberUpdate error:', e.message);
+    console.error('[LevelUp/Booster] guildMemberUpdate error:', e.message);
   }
 });
 
@@ -3082,6 +3225,12 @@ function startScheduler() {
   const firstDraw = new Date('2026-05-01T12:00:00-05:00');
   if (firstDraw > new Date()) schedule.scheduleJob(firstDraw, ()=>runGiveaway());
   schedule.scheduleJob({ rule:'0 12 1 2,5,8,11 *', tz:CONFIG.TIMEZONE }, ()=>runGiveaway());
+
+  // Booster + Superfan Club weekly paychecks — every Monday at 12pm CT
+  schedule.scheduleJob({ rule: '0 12 * * 1', tz: CONFIG.TIMEZONE }, () => {
+    runBoosterPayouts();
+    runSuperfanPayouts();
+  });
   console.log('[Scheduler] All jobs started.');
 }
 
@@ -4909,6 +5058,13 @@ client.on('messageCreate', async msg => {
         '`!dm` — DM a group (text → recipients → time → queued)\n' +
         '`!dmqueue` — View all scheduled DM blasts with IDs\n' +
         '`!canceldm [id]` — Cancel a queued DM blast by ID\n\n' +
+        '**BOOSTER & SUPERFAN CLUBS**\n' +
+        '`!superfan add @user` — Grant Superfan Club status + first paycheck\n' +
+        '`!superfan remove @user` — Remove Superfan Club status\n' +
+        '`!superfan list` — See all current superfans\n' +
+        '`!boosterlist` — See all current boosters\n' +
+        '`!payboost` — Manually trigger this week\'s booster payouts\n' +
+        '`!paysuperfan` — Manually trigger this week\'s superfan payouts\n\n' +
         '**TESTING MODE**\n' +
         '`!testingmode on` · `!testingmode off`\n\n' +
         '**CONSTRUCTION ZONE**\n' +
@@ -5048,6 +5204,59 @@ client.on('messageCreate', async msg => {
   }
   if (lower === '!testingmode on' || lower === '!testingmodeon') { TESTING_MODE = true; await msg.reply('🔒 Testing mode **ON** — only admins and @tester can use the bot.'); return; }
   if (lower === '!testingmode off' || lower === '!testingmodeoff') { TESTING_MODE = false; await msg.reply('✅ Testing mode **OFF** — bot is open to everyone.'); return; }
+
+  // ── !superfan add/remove/list ──────────────────────────────────────────────
+  if (lower.startsWith('!superfan')) {
+    const superfanRoleId = process.env.ROLE_SUPERFAN;
+    if (!superfanRoleId) { await msg.reply('❌ `ROLE_SUPERFAN` is not set in your environment variables. Create a Superfan role in Discord, copy its ID, and add it as `ROLE_SUPERFAN` in Railway.'); return; }
+    const sub    = lower.split(' ')[1];
+    const target = msg.mentions.members.first();
+    const guild  = await client.guilds.fetch(CONFIG.GUILD_ID);
+    const role   = guild.roles.cache.get(superfanRoleId) || await guild.roles.fetch(superfanRoleId).catch(() => null);
+    if (!role) { await msg.reply('❌ Superfan role not found. Check `ROLE_SUPERFAN` in Railway.'); return; }
+
+    if (sub === 'add') {
+      if (!target) { await msg.reply('Usage: `!superfan add @user`'); return; }
+      await target.roles.add(role).catch(() => {});
+      // guildMemberUpdate fires automatically and handles the paycheck + DM
+      await msg.reply(`✅ <@${target.id}> has been added to the Superfan Club. They'll receive a welcome DM and their first paycheck.`);
+      return;
+    }
+
+    if (sub === 'remove') {
+      if (!target) { await msg.reply('Usage: `!superfan remove @user`'); return; }
+      await target.roles.remove(role).catch(() => {});
+      await msg.reply(`✅ Removed Superfan Club status from <@${target.id}>.`);
+      return;
+    }
+
+    if (sub === 'list') {
+      await guild.members.fetch();
+      const superfans = guild.members.cache.filter(m => m.roles.cache.has(superfanRoleId));
+      if (!superfans.size) { await msg.reply('No current superfans.'); return; }
+      const lines = [...superfans.values()].map(m => `• ${m.user.username}`).join('\n');
+      await msg.reply({ embeds: [new EmbedBuilder().setColor('#ff6b35').setTitle(`🔥 Superfan Club (${superfans.size})`).setDescription(lines).setTimestamp()] });
+      return;
+    }
+
+    await msg.reply('Usage: `!superfan add @user` · `!superfan remove @user` · `!superfan list`');
+    return;
+  }
+
+  // ── !boosterlist ──────────────────────────────────────────────────────────
+  if (lower === '!boosterlist') {
+    const guild = await client.guilds.fetch(CONFIG.GUILD_ID);
+    await guild.members.fetch();
+    const boosters = guild.members.cache.filter(m => !!m.premiumSince);
+    if (!boosters.size) { await msg.reply('No active boosters right now.'); return; }
+    const lines = [...boosters.values()].map(m => `• ${m.user.username} *(boosting since ${new Date(m.premiumSince).toLocaleDateString()})*`).join('\n');
+    await msg.reply({ embeds: [new EmbedBuilder().setColor('#f47fff').setTitle(`💜 Booster Club (${boosters.size})`).setDescription(lines).setTimestamp()] });
+    return;
+  }
+
+  // ── !payboost / !paysuperfan — manual trigger ─────────────────────────────
+  if (lower === '!payboost') { await msg.reply('⏳ Running booster payouts…'); await runBoosterPayouts(); await msg.reply('✅ Booster payouts complete.'); return; }
+  if (lower === '!paysuperfan') { await msg.reply('⏳ Running superfan payouts…'); await runSuperfanPayouts(); await msg.reply('✅ Superfan payouts complete.'); return; }
 
   if (lower === '!testlottery') { await msg.reply('🎟️ Triggering lottery...'); await runLottery(); return; }
   if (lower === '!testchest') { await msg.reply('📦 Spawning chest...'); await spawnTreasureChest(); return; }
