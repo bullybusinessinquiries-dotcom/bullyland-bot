@@ -1288,44 +1288,83 @@ client.on('guildMemberAdd', async(member) => {
 });
 
 // ─── LEVEL-UP REWARDS — auto-DM when Lurkr assigns a new level role ──────────
+// NOTE: Disable Lurkr's own level-up DM in the Lurkr dashboard — this bot owns
+// the level-up experience. Two DMs would be confusing and redundant.
 const LEVEL_REWARD_INFO = {
   '1490053545116827934': { // Rookie
-    title: '🏁 You hit Level 1 — Welcome to the game.',
-    body: `Your **bank is now unlocked**. You can deposit up to **150 BB** to keep it safe from steals and heists.\n\n` +
-          `**What's open to you now:**\n` +
-          `• **!shop** — browse roles, perks & collectibles that rotate every 12 hours\n` +
-          `• **!bank** — deposit and withdraw your Bully Bucks\n` +
-          `• **!lottery** — buy tickets for the weekly jackpot\n` +
-          `• **!balance** — check your BB at any time\n\n` +
-          `Keep chatting to level up — each new level raises your bank cap and unlocks more.`,
+    color: '#2ecc71',
+    title: '🏁 Rookie. You made it in.',
+    body:
+      `Most people join and disappear. You didn't. That already means something.\n\n` +
+      `Here's what just unlocked for you:\n\n` +
+      `🏦 **Your bank is open.** Deposit up to **150 BB** to protect your bag from steals and heists. Use \`!deposit\` to lock it in.\n\n` +
+      `🛍️ **The shop is yours.** Roles, perks, and collectibles rotate every 12 hours. Type \`!shop\` to browse.\n\n` +
+      `🎟️ **Lottery access.** Buy tickets for the weekly jackpot through \`!bullygames\`.\n\n` +
+      `You're in the game now. Every level from here raises your bank cap and opens more. Keep going.`,
   },
   '1490051621521195099': { // Newbie
-    title: '📈 Level Up — Bank cap raised to 350 BB',
-    body: `Your bank can now hold up to **350 BB**. Deposit more to protect it.\n\nType **!bank** to manage your balance.`,
+    color: '#3498db',
+    title: '📶 Newbie. Still here — that\'s not nothing.',
+    body:
+      `A lot of people hit Rookie and stop. You kept going.\n\n` +
+      `Your bank cap just jumped to **350 BB**. Move more into savings — the bigger your bank, the harder you are to touch.\n\n` +
+      `Use \`!deposit\` to top it off. Use \`!bank\` to see your full picture.\n\n` +
+      `The next level is closer than you think. You already know how this works — just keep showing up.`,
   },
   '1490051740349894867': { // BB Member
-    title: '📈 Level Up — Bank cap raised to 700 BB',
-    body: `Your bank limit is now **700 BB**. The more you store, the more you have to protect — and the more you can flex.\n\nType **!bank** to deposit.`,
+    color: '#9b59b6',
+    title: '💜 BB Member. You\'re not a newcomer anymore.',
+    body:
+      `You've put in real time here. BULLYLAND recognizes that.\n\n` +
+      `Bank cap raised to **700 BB**. At this level your savings are starting to actually mean something — don't leave it sitting in your wallet where anyone can take it.\n\n` +
+      `You're becoming one of the regulars. The ones who've been around long enough to know how everything works.\n\n` +
+      `More levels ahead. More rewards waiting. Don't slow down now.`,
   },
   '1490051785048588449': { // Veteran
-    title: '📈 Level Up — Bank cap raised to 1,250 BB',
-    body: `Veteran status. Your bank now holds up to **1,250 BB**.\n\nYou're building real weight in BULLYLAND. Keep going.`,
+    color: '#e67e22',
+    title: '⚔️ Veteran. You\'ve earned that title.',
+    body:
+      `Not everyone gets here. You've been consistent enough that the server gave you a title for it.\n\n` +
+      `Bank cap raised to **1,250 BB**. At Veteran level your bank is a real asset — protect it, grow it, use it.\n\n` +
+      `You know this community better than most. That knowledge is worth something.\n\n` +
+      `Four levels down. Four to go. The higher you climb, the more exclusive the company gets.`,
   },
   '1490051823384662187': { // OG
-    title: '🔥 Level Up — OG. Bank cap raised to 2,500 BB',
-    body: `OG status unlocked. Your bank can now hold **2,500 BB**.\n\nYou've been here long enough to know how this works. Protect your bag.`,
+    color: '#e74c3c',
+    title: '🔥 OG. There\'s a short list of people who get here.',
+    body:
+      `OG status isn't handed out. You put in the time, stayed consistent, and showed up when others didn't.\n\n` +
+      `Bank cap raised to **2,500 BB**. You're sitting on real weight now. Make sure it's protected.\n\n` +
+      `You're part of the foundation of this community — the people who were here when it was being built. That matters.\n\n` +
+      `Three levels left. The top is visible from here.`,
   },
   '1490051918976913558': { // VIP
-    title: '💎 Level Up — VIP. Bank cap raised to 4,000 BB',
-    body: `You're VIP now. Bank cap at **4,000 BB**.\n\nNot many people get here. You've put in the work — BULLYLAND sees it.`,
+    color: '#c9a84c',
+    title: '💎 VIP. You\'re not just a member — you\'re a fixture.',
+    body:
+      `VIP. One of the most active, most present people in BULLYLAND.\n\n` +
+      `Bank cap raised to **4,000 BB**. At this level you're not playing around — you're stacking serious weight.\n\n` +
+      `Bully sees who's in the room every day. VIPs are the ones who never leave.\n\n` +
+      `Two levels between you and the top. You already know what to do.`,
   },
   '1490052510868574341': { // BOSS
-    title: '👑 Level Up — BOSS. Bank cap raised to 6,000 BB',
-    body: `BOSS tier. Your bank holds up to **6,000 BB** now.\n\nYou're one of the most active members in BULLYLAND. Respect.`,
+    color: '#8e44ad',
+    title: '👑 BOSS. Real ones recognize.',
+    body:
+      `BOSS tier. You're in the upper echelon of this community now.\n\n` +
+      `Bank cap raised to **6,000 BB**. Protect every bit of it.\n\n` +
+      `There are people in this server who've been here for months who haven't touched this level. You did. That's not luck — that's dedication.\n\n` +
+      `One level left. The highest one. You know what it is.`,
   },
   '1490051416449093652': { // BULLY Approved
-    title: '🌟 Max Level — BULLY Approved. Bank cap raised to 9,000 BB',
-    body: `You've reached the top. **BULLY Approved** — bank cap maxed at **9,000 BB**.\n\nThis is as high as it goes. You are BULLYLAND.`,
+    color: '#1a1a1a',
+    title: '🌟 BULLY Approved. This is as high as it goes.',
+    body:
+      `You made it to the top.\n\n` +
+      `**BULLY Approved** — the highest rank in BULLYLAND. Bank cap maxed at **9,000 BB**.\n\n` +
+      `There's no higher level. No more unlocks after this one. Just the fact that you're one of the very few people in this community who went all the way.\n\n` +
+      `Bully knows who you are. The community knows who you are.\n\n` +
+      `You are BULLYLAND. 🎨`,
   },
 };
 
@@ -1337,7 +1376,7 @@ client.on('guildMemberUpdate', async (oldMember, newMember) => {
       if (!info) continue;
       const tier = BANK_LEVEL_ROLES.find(t => t.roleId === roleId);
       const embed = new EmbedBuilder()
-        .setColor('#c9a84c')
+        .setColor(info.color || '#c9a84c')
         .setTitle(info.title)
         .setDescription(info.body)
         .setFooter({ text: "Bully's World • Keep leveling up." })
@@ -3054,6 +3093,10 @@ client.once('ready', async()=>{
   await refreshShop();
   startScheduler();
   dailyQ.init(client, db, addBB);
+
+  // Start analytics dashboard (Express) — available at your Railway URL
+  const { startDashboard } = require('./dashboard');
+  startDashboard(db);
 });
 
 
