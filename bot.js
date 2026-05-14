@@ -228,6 +228,7 @@ const CONFIG = {
     AUCTION:          process.env.CHANNEL_AUCTION,
     GENERAL:          process.env.CHANNEL_GENERAL,
     GAMES:            process.env.CHANNEL_GAMES,
+    QUOTES:           process.env.CHANNEL_QUOTES,
   },
 
   ROLES: {
@@ -3183,6 +3184,53 @@ const HEIST_NARRATIONS = {
 };
 
 
+// ─── MORNING QUOTE ────────────────────────────────────────────────────────────
+// Fetches a fresh quote each morning from ZenQuotes (primary) with Quotable as
+// fallback. Both are free, no API key required. Posts to CHANNEL_QUOTES.
+const QUOTE_COLORS = ['#c9a84c','#f47fff','#2ecc71','#3498db','#e67e22','#9b59b6','#1abc9c'];
+let _quoteColorIdx = 0;
+
+async function fetchQuote() {
+  // Primary: ZenQuotes /today — curated quote that changes every 24h
+  try {
+    const res  = await fetch('https://zenquotes.io/api/today', { signal: AbortSignal.timeout(6000) });
+    const data = await res.json();
+    if (data?.[0]?.q && data[0].q !== '...') return { text: data[0].q, author: data[0].a };
+  } catch (_) {}
+
+  // Fallback: Quotable — 3,000+ quotes, random each call
+  try {
+    const res  = await fetch('https://api.quotable.io/random?minLength=60&maxLength=280', { signal: AbortSignal.timeout(6000) });
+    const data = await res.json();
+    if (data?.content) return { text: data.content, author: data.author };
+  } catch (_) {}
+
+  return null; // both APIs down — skip silently
+}
+
+async function postMorningQuote() {
+  const channelId = CONFIG.CHANNELS.QUOTES;
+  if (!channelId) { console.log('[Quote] CHANNEL_QUOTES not set — skipping'); return; }
+
+  const quote = await fetchQuote();
+  if (!quote) { console.log('[Quote] Could not fetch quote — both APIs unavailable'); return; }
+
+  const channel = await client.channels.fetch(channelId).catch(() => null);
+  if (!channel) { console.log('[Quote] Channel not found'); return; }
+
+  const color = QUOTE_COLORS[_quoteColorIdx % QUOTE_COLORS.length];
+  _quoteColorIdx++;
+
+  const embed = new EmbedBuilder()
+    .setColor(color)
+    .setDescription(`*"${quote.text}"*\n\n— **${quote.author}**`)
+    .setFooter({ text: "Bully's World • Good morning 🌅" })
+    .setTimestamp();
+
+  await channel.send({ embeds: [embed] }).catch(e => console.error('[Quote] Send error:', e.message));
+  console.log(`[Quote] Posted: "${quote.text.slice(0, 60)}..." — ${quote.author}`);
+}
+
 function startScheduler() {
   schedule.scheduleJob('0 18 * * 0',   () => postMemberSpotlight());
   [{ d:'Monday',cron:'1'},{ d:'Wednesday',cron:'3'},{ d:'Saturday',cron:'6'}].forEach(({d,cron})=>{
@@ -3223,6 +3271,10 @@ function startScheduler() {
     runBoosterPayouts();
     runSuperfanPayouts();
   });
+
+  // Morning motivational quote — 8:00 AM CT daily (1 hour before daily question)
+  schedule.scheduleJob({ rule: '0 8 * * *', tz: CONFIG.TIMEZONE }, () => postMorningQuote());
+
   console.log('[Scheduler] All jobs started.');
 }
 
@@ -5041,7 +5093,7 @@ client.on('messageCreate', async msg => {
         '**HEIST** *(admins bypass cooldowns)*\n' +
         '`!testheiststart` · `!testheistcancel`\n\n' +
         '**OTHER**\n' +
-        '`!testlottery` · `!testchest` · `!testdrop` · `!testcheckin` · `!adminstatus`\n\n' +
+        '`!testlottery` · `!testchest` · `!testdrop` · `!testcheckin` · `!testquote` · `!adminstatus`\n\n' +
         '**ANNOUNCEMENTS**\n' +
         '`!announcement` — Start a new announcement (text → mention → time → queued)\n' +
         '`!announcementqueue` — View all scheduled announcements with IDs\n' +
@@ -5249,6 +5301,7 @@ client.on('messageCreate', async msg => {
   // ── !payboost / !paysuperfan — manual trigger ─────────────────────────────
   if (lower === '!payboost') { await msg.reply('⏳ Running booster payouts…'); await runBoosterPayouts(); await msg.reply('✅ Booster payouts complete.'); return; }
   if (lower === '!paysuperfan') { await msg.reply('⏳ Running superfan payouts…'); await runSuperfanPayouts(); await msg.reply('✅ Superfan payouts complete.'); return; }
+  if (lower === '!testquote') { await msg.reply('⏳ Fetching quote…'); await postMorningQuote(); await msg.delete().catch(() => {}); return; }
 
   if (lower === '!testlottery') { await msg.reply('🎟️ Triggering lottery...'); await runLottery(); return; }
   if (lower === '!testchest') { await msg.reply('📦 Spawning chest...'); await spawnTreasureChest(); return; }
