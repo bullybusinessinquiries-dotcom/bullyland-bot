@@ -417,7 +417,7 @@ async function sendBoosterPaycheck(member, isFirstTime = false) {
     .setDescription(
       isFirstTime
         ? `Welcome to The Boosters Club. 🧡\n\nYour weekly BB deposits are now active.\nEnjoy the perks ✨`
-        : `Your weekly Booster Club deposit has arrived. 🧡\n\n**+${BOOSTER_WEEKLY_BB} BB** has been added to your balance.`
+        : `Your weekly Booster Club deposit has arrived ✨\n\n**+${BOOSTER_WEEKLY_BB} BB** has been added to your balance.`
     )
     .setFooter({ text: "Bully's World • Booster Club" })
     .setTimestamp();
