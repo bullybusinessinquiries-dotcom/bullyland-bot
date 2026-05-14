@@ -645,14 +645,40 @@ async function generateTriviaQuestion(catId) {
 const HANGMAN_WORDS = require('./hangman_words.json');
 let _hmUsed = new Set(); // in-memory anti-repeat within a session
 
-function generateHangmanWord() {
-  // Reset if entire pool used
-  if (_hmUsed.size >= HANGMAN_WORDS.length) _hmUsed = new Set();
-  const available = HANGMAN_WORDS.filter((_, i) => !_hmUsed.has(i));
-  const idx = Math.floor(Math.random() * available.length);
-  const entry = available[idx];
-  _hmUsed.add(HANGMAN_WORDS.indexOf(entry));
-  return entry; // { word, category, hint }
+// Category definitions — slug → { label, filter }
+// filter = string matching .category in JSON, 'words' = Word+Phrase combined, null = all
+const HM_CATS = {
+  artist:  { label: '🎵 Artist',          filter: 'Artist'     },
+  song:    { label: '🎶 Song Title',       filter: 'Song Title' },
+  tvshow:  { label: '📺 TV Show',          filter: 'TV Show'    },
+  movie:   { label: '🎬 Movie',            filter: 'Movie'      },
+  athlete: { label: '🏆 Athlete',          filter: 'Athlete'    },
+  sneaker: { label: '👟 Sneaker',          filter: 'Sneaker'    },
+  brand:   { label: '🏷️ Brand',           filter: 'Brand'      },
+  slang:   { label: '💬 Slang',            filter: 'Slang'      },
+  app:     { label: '📱 App',              filter: 'App'        },
+  words:   { label: '📝 Words & Phrases',  filter: 'words'      },
+  random:  { label: '🎲 Random',           filter: null         },
+};
+
+function generateHangmanWord(filter) {
+  // Build pool based on filter
+  let pool;
+  if (!filter) {
+    pool = HANGMAN_WORDS;
+  } else if (filter === 'words') {
+    pool = HANGMAN_WORDS.filter(w => w.category === 'Word' || w.category === 'Phrase');
+  } else {
+    pool = HANGMAN_WORDS.filter(w => w.category === filter);
+  }
+  const poolIndices = pool.map(entry => HANGMAN_WORDS.indexOf(entry));
+  // Anti-repeat: if all entries in this pool used, clear only this pool from _hmUsed
+  const available = poolIndices.filter(i => !_hmUsed.has(i));
+  if (available.length === 0) poolIndices.forEach(i => _hmUsed.delete(i));
+  const finalPool = available.length > 0 ? available : poolIndices;
+  const pick = finalPool[Math.floor(Math.random() * finalPool.length)];
+  _hmUsed.add(pick);
+  return HANGMAN_WORDS[pick]; // { word, category, hint }
 }
 
 // ─── HANGMAN ASCII ────────────────────────────────────────────────────────
@@ -3310,7 +3336,7 @@ client.on('interactionCreate', async interaction => {
       return;
     }
 
-    // ── HANGMAN: start ───────────────────────────────────────────────────────
+    // ── HANGMAN: category picker ──────────────────────────────────────────────
     if (customId === 'menu.hangman') {
       const cid = interaction.channelId;
       if (activeHangman.has(cid)) { await interaction.reply({ content: '🔤 A hangman game is already running in this channel!', ephemeral: true }); return; }
@@ -3320,20 +3346,54 @@ client.on('interactionCreate', async interaction => {
         const mins = Math.floor(cdLeft / 60000), secs = Math.ceil((cdLeft % 60000) / 1000);
         await interaction.reply({ content: `⏳ Hangman on cooldown — **${mins > 0 ? mins + 'm ' : ''}${secs}s** left.`, ephemeral: true }); return;
       }
+      const catEmbed = new EmbedBuilder().setColor('#c9a84c').setTitle('🔤 Hangman — Pick a Category')
+        .setDescription('Choose a category to start the round.\n\nYou have **3 minutes** to solve the word.\nCorrect letters: **+10 BB** each • Solver: **+100 BB**')
+        .setFooter({ text: "Bully's World" }).setTimestamp();
+      const hmCatRow1 = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('hangman.cat.artist').setLabel('🎵 Artist').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('hangman.cat.song').setLabel('🎶 Song Title').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('hangman.cat.tvshow').setLabel('📺 TV Show').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('hangman.cat.movie').setLabel('🎬 Movie').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('hangman.cat.athlete').setLabel('🏆 Athlete').setStyle(ButtonStyle.Primary),
+      );
+      const hmCatRow2 = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('hangman.cat.sneaker').setLabel('👟 Sneaker').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('hangman.cat.brand').setLabel('🏷️ Brand').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('hangman.cat.slang').setLabel('💬 Slang').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('hangman.cat.app').setLabel('📱 App').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('hangman.cat.words').setLabel('📝 Words & Phrases').setStyle(ButtonStyle.Primary),
+      );
+      const hmCatRow3 = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('hangman.cat.random').setLabel('🎲 Random').setStyle(ButtonStyle.Secondary),
+      );
+      await interaction.reply({ embeds: [catEmbed], components: [hmCatRow1, hmCatRow2, hmCatRow3] });
+      return;
+    }
+
+    // ── HANGMAN: category selected — start game ───────────────────────────────
+    if (customId.startsWith('hangman.cat.')) {
+      const cid = interaction.channelId;
+      if (activeHangman.has(cid)) { await interaction.reply({ content: '🔤 A hangman game is already running!', ephemeral: true }); return; }
+      const cdKey = `hangman.${cid}`;
+      const slug = customId.slice('hangman.cat.'.length);
+      const catInfo = HM_CATS[slug] || HM_CATS.random;
+
+      await interaction.update({ content: `🔤 Loading **${catInfo.label}** hangman...`, embeds: [], components: [] });
 
       let hwData;
-      try { hwData = generateHangmanWord(); } catch { await interaction.reply({ content: '❌ Failed to start hangman. Try again.', ephemeral: true }); return; }
-      await interaction.reply({ content: '🔤 Starting hangman...', ephemeral: true });
+      try { hwData = generateHangmanWord(catInfo.filter); } catch {
+        await interaction.editReply({ content: '❌ Failed to start hangman. Try again.', embeds: [], components: [] }); return;
+      }
 
       const word = hwData.word.toUpperCase().replace(/[^A-Z ]/g, '');
       const state = {
         word, category: hwData.category, hint: hwData.hint,
         guessed: new Set(), wrong: new Set(),
         display: buildHangmanDisplay(word, new Set()),
-        participants: new Map(),  // userId → Set of correct letters they guessed
-        pendingGuess: new Map(),  // userId → 'letter' | 'solve'
-        letterCooldowns: new Map(), // userId → timestamp (30s between letters)
-        solveAttempts: new Map(), // userId → number of solve attempts used (max 2)
+        participants: new Map(),
+        pendingGuess: new Map(),
+        letterCooldowns: new Map(),
+        solveAttempts: new Map(),
       };
       const hmRow = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId('hangman.guess').setLabel('🔤 Guess Letter').setStyle(ButtonStyle.Primary),
@@ -3343,6 +3403,7 @@ client.on('interactionCreate', async interaction => {
       const hmMsg = await interaction.channel.send({ embeds: [hmEmbed], components: [hmRow] });
       state.messageId = hmMsg.id;
       activeHangman.set(cid, state);
+      await interaction.editReply({ content: `${catInfo.label} hangman started!`, embeds: [], components: [] }).catch(() => {});
 
       // Auto-end after 3 minutes
       state.timeout = setTimeout(async () => {
