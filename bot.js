@@ -5215,7 +5215,7 @@ client.on('messageCreate', async msg => {
   if (lower === '!adminhelp') {
     const embed = new EmbedBuilder()
       .setColor('#FF4500')
-      .setTitle('🛠️ Bully's World — Admin Panel')
+      .setTitle("🛠️ Bully's World — Admin Panel")
       .setDescription('Pick a category to see its commands. All responses are visible only to you.')
       .setFooter({ text: "Bully's World Admin • Use responsibly." })
       .setTimestamp();
