@@ -1,4 +1,4 @@
-const path = require('path');
+﻿const path = require('path');
 // Load .env.local first (local dev/test), fall back to .env (production)
 const _envLocal = path.join(__dirname, '.env.local');
 const _envFile  = require('fs').existsSync(_envLocal) ? _envLocal : path.join(__dirname, '.env');
@@ -618,6 +618,12 @@ function decodeHTML(str) {
     .replace(/&eacute;/g, 'é').replace(/&egrave;/g, 'è').replace(/&ntilde;/g, 'ñ')
     .replace(/&ouml;/g, 'ö').replace(/&uuml;/g, 'ü').replace(/&aacute;/g, 'á')
     .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)));
+}
+
+// Anti-cheat: invisible zero-width spaces between every character.
+// Text looks identical in Discord but copy-pasting to Google/AI returns garbage.
+function obfuscate(text) {
+  return [...text].join('​');
 }
 
 async function generateTriviaQuestion(catId) {
@@ -3291,9 +3297,10 @@ client.on('interactionCreate', async interaction => {
       }
 
       const { question, options, answer } = trivia;
+      // Obfuscate question + answers so copy-pasting to Google/AI returns garbage
       const triviaEmbed = new EmbedBuilder().setColor('#c9a84c')
         .setTitle(`🧠 ${catInfo.label} Trivia`)
-        .setDescription(`**${question}**\n\n🅰️  ${options.A}\n🅱️  ${options.B}\n🇨  ${options.C}\n🇩  ${options.D}`)
+        .setDescription(`**${obfuscate(question)}**\n\n🅰️  ${obfuscate(options.A)}\n🅱️  ${obfuscate(options.B)}\n🇨  ${obfuscate(options.C)}\n🇩  ${obfuscate(options.D)}`)
         .setFooter({ text: "Lock in your answer — results revealed when time's up! • 30 seconds" }).setTimestamp();
       const triviaRow = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId('trivia.a').setLabel('A').setStyle(ButtonStyle.Secondary),
