@@ -3706,6 +3706,146 @@ client.on('interactionCreate', async interaction => {
       return;
     }
 
+    // ── ADMIN HELP TOPIC BUTTONS ──────────────────────────────────────────────
+    if (customId.startsWith('admin.')) {
+      if (!isAdmin) { await interaction.reply({ content: '🔒 Admin only.', ephemeral: true }); return; }
+      const topic = customId.slice('admin.'.length);
+      let embed;
+
+      if (topic === 'bb') {
+        embed = new EmbedBuilder().setColor('#e74c3c').setTitle('💰 BB Control')
+          .addFields(
+            { name: '🎯 Target a user', value:
+              '`!gift @user [amount]` — gift BB to a specific user\n' +
+              '`!adjust @user [amount]` — adjust by ± amount\n' +
+              '`!set @user [amount]` — set exact balance\n' +
+              '`!resetuser @user` — zero out balance + streak\n' +
+              '`!balancecheck @user` — view any user\'s balance', inline: false },
+            { name: '🌐 Mass gifts', value:
+              '`!gifteveryone [amount]` — give BB to every server member\n' +
+              '`!giveall [amount]` — give BB to every DB user *(requires confirm)*\n' +
+              '`!giftall @role [amount]` — give BB to all members with a role\n' +
+              '`!giverole @role [amount]` — alias of giftall\n' +
+              '`!resetall` — zero everyone\'s balance *(requires confirm)*', inline: false },
+            { name: '🧪 Self-test', value:
+              '`!testgive [amount]` — add BB to yourself\n' +
+              '`!testgive @user [amount]` — add BB to any user\n' +
+              '`!testtake [amount]` — remove BB from yourself\n' +
+              '`!testbalance` — check your own balance\n' +
+              '`!testreset` — reset your own balance to 0', inline: false },
+            { name: '🎟️ Codes', value:
+              '`!createcode CODE [amount]` — create a stream event redeem code\n' +
+              '`!gifttickets @user [amount]` — give giveaway tickets to a user', inline: false },
+          ).setFooter({ text: 'Admin • BB Control' }).setTimestamp();
+
+      } else if (topic === 'events') {
+        embed = new EmbedBuilder().setColor('#e67e22').setTitle('📅 Events')
+          .addFields(
+            { name: '✅ Check-In', value: '`!testcheckin` — clear your own check-in cooldown so you can test it', inline: false },
+            { name: '🛍️ Shop', value: '`!testshop` — force-refresh the shop now\n`!testshopview` — preview current shop lineup', inline: false },
+            { name: '🎁 Mystery Drops', value:
+              '`!testdrop` — trigger a mystery drop right now\n' +
+              '`!pausedrops` — pause all scheduled drops\n' +
+              '`!resumedrops` — resume drops\n' +
+              '`!dropstatus` — check whether drops are active or paused', inline: false },
+            { name: '🎟️ Lottery', value: '`!testlottery` — trigger the weekly lottery draw now', inline: false },
+            { name: '🎰 Giveaway', value:
+              '`!testgiveaway` — trigger giveaway draw now\n' +
+              '`!testgiveawayopen` — open the giveaway channel\n' +
+              '`!testgiveawayhide` — hide the giveaway channel', inline: false },
+            { name: '📦 Treasure Chest', value: '`!testchest` — spawn a treasure chest now', inline: false },
+            { name: '🌟 Member Spotlight', value: '`!testspotlight` — post a member spotlight now', inline: false },
+            { name: '💬 Morning Quote', value: '`!testquote` — post today\'s morning quote now', inline: false },
+          ).setFooter({ text: 'Admin • Events' }).setTimestamp();
+
+      } else if (topic === 'games') {
+        embed = new EmbedBuilder().setColor('#3498db').setTitle('🎮 Games')
+          .addFields(
+            { name: '🎰 Casino', value:
+              '`!testcasino` — open casino right now\n' +
+              '*Admins bypass casino hours automatically*', inline: false },
+            { name: '🦹 Heists', value:
+              '`!testheist [number]` — launch a specific heist with a dummy crew (use number 1–' + '10)\n' +
+              '`!testheiststart` — force-start the currently recruiting heist\n' +
+              '`!testheistcancel` — cancel active heist and refund all entry fees\n' +
+              '*Admins bypass heist cooldowns automatically*', inline: false },
+          ).setFooter({ text: 'Admin • Games' }).setTimestamp();
+
+      } else if (topic === 'clubs') {
+        embed = new EmbedBuilder().setColor('#2ecc71').setTitle('👥 Clubs')
+          .addFields(
+            { name: '💜 Booster Club', value:
+              '`!boosterlist` — see all current server boosters\n' +
+              '`!payboost` — manually run this week\'s booster payouts now\n' +
+              '*New boosters are detected and paid automatically*', inline: false },
+            { name: '🔥 Superfan Club', value:
+              '`!superfan add @user` — grant Superfan status + send welcome DM + first paycheck\n' +
+              '`!superfan remove @user` — remove Superfan status\n' +
+              '`!superfan list` — see all current superfans\n' +
+              '`!paysuperfan` — manually run this week\'s superfan payouts now\n' +
+              '*Requires `ROLE_SUPERFAN` set in Railway env vars*', inline: false },
+          ).setFooter({ text: 'Admin • Clubs' }).setTimestamp();
+
+      } else if (topic === 'comms') {
+        embed = new EmbedBuilder().setColor('#9b59b6').setTitle('📣 Comms')
+          .addFields(
+            { name: '📢 Announcements', value:
+              '`!announcement` — guided flow: write text → pick mention → set time → queued\n' +
+              '`!announcementqueue` — view all queued announcements with IDs\n' +
+              '`!cancelannouncement [id]` — cancel a queued announcement by ID', inline: false },
+            { name: '✉️ DM Blasts', value:
+              '`!dm` — guided flow: write message → pick recipients → set time → queued\n' +
+              '`!dmqueue` — view all scheduled DM blasts with IDs\n' +
+              '`!canceldm [id]` — cancel a queued DM blast by ID', inline: false },
+          ).setFooter({ text: 'Admin • Comms' }).setTimestamp();
+
+      } else if (topic === 'dailyq') {
+        embed = new EmbedBuilder().setColor('#c9a84c').setTitle('🗓️ Daily Questionnaire')
+          .addFields(
+            { name: '▶️ Post & Close', value:
+              '`!dailyq post` — force-post today\'s question right now\n' +
+              '`!dailyq close` — force-close the active question right now', inline: false },
+            { name: '🧪 Testing', value:
+              '`!dailyq test` — post a live preview in THIS channel: 2-minute window, no BB awarded, no data saved', inline: false },
+            { name: '📊 Stats', value:
+              '`!dailyq stats` — show latest question, status, and response count\n' +
+              '`!dailyq streaks` — show top 10 responders by current streak', inline: false },
+            { name: 'ℹ️ Schedule', value: 'Auto-posts at **9:00 AM CT** · Closes at **9:00 PM CT** · Requires `CHANNEL_DAILYQ` in Railway', inline: false },
+          ).setFooter({ text: 'Admin • Daily Q' }).setTimestamp();
+
+      } else if (topic === 'auction') {
+        embed = new EmbedBuilder().setColor('#f0a500').setTitle('🔨 Auction')
+          .addFields(
+            { name: '🚀 Running an auction', value:
+              '`!auction start [title] | [description] | [image url]` — start a new auction\n' +
+              '`!auction end` — end the active auction and pay out the winner\n' +
+              '`!auction status` — check current auction details and top bid', inline: false },
+            { name: '🛡️ Moderation', value:
+              '`!auction unban @user` — remove an auction ban from a user\n' +
+              '`!auction warnings @user` — view a user\'s auction warning count', inline: false },
+          ).setFooter({ text: 'Admin • Auction' }).setTimestamp();
+
+      } else if (topic === 'system') {
+        embed = new EmbedBuilder().setColor('#7f8c8d').setTitle('🔧 System')
+          .addFields(
+            { name: '📊 Status', value: '`!adminstatus` — live snapshot: user count, BB in economy, casino/heist/shop state', inline: false },
+            { name: '⚠️ Fun / Chaos', value: '`!disaster` — hits every server member for 75 BB with a random disaster announcement', inline: false },
+            { name: '🔒 Testing Mode', value:
+              '`!testingmode on` — restrict bot to admins + @tester role only\n' +
+              '`!testingmode off` — open bot to everyone *(currently off by default)*', inline: false },
+            { name: '🚧 Construction Zone', value:
+              '`!servershutdown [time] ["msg"]` — lock server now or at a scheduled time\n' +
+              '`!serverrestore` — restore access immediately\n' +
+              '`!schedulerestore [time]` — schedule a restore at a specific time\n' +
+              '`!cancelschedule` — cancel any pending shutdown or restore\n' +
+              '`!constructionstatus` — view current construction zone state', inline: false },
+          ).setFooter({ text: 'Admin • System' }).setTimestamp();
+      }
+
+      if (embed) await interaction.reply({ embeds: [embed], ephemeral: true });
+      return;
+    }
+
     // ── BLACK MARKET: buy button ──────────────────────────────────────────────
     if (customId.startsWith('bm_buy.')) {
       const itemId = customId.slice('bm_buy.'.length);
@@ -5073,52 +5213,25 @@ client.on('messageCreate', async msg => {
 
   // ── !adminhelp ──
   if (lower === '!adminhelp') {
-    const embed = new EmbedBuilder().setColor('#FF4500').setTitle('🛠️ Admin Commands')
-      .setDescription(
-        '**BB CONTROL**\n' +
-        '`!testgive @user [amount]` — Add BB to a user\n' +
-        '`!testgive [amount]` — Add BB to yourself\n' +
-        '`!testtake [amount]` — Remove BB from yourself\n' +
-        '`!testbalance` — Check your balance\n' +
-        '`!testreset` — Reset your balance to 0\n' +
-        '`!set @user [amount]` — Set a user balance to exact amount\n' +
-        '`!resetall` — Set EVERYONE balance to 0 (requires confirm)\n' +
-        '`!giftall [amount]` — Gift every server member BB (requires confirm)\n' +
-        '`!giveall [amount]` — Give every DB user BB (requires confirm)\n' +
-        '`!giverole @role [amount]` — Give BB to all members with a specific role\n\n' +
-        '**CASINO** *(admins bypass hours)*\n' +
-        '`!testcasino` — Open casino now\n\n' +
-        '**SHOP**\n' +
-        '`!testshop` — Force refresh · `!testshopview` — Preview\n\n' +
-        '**HEIST** *(admins bypass cooldowns)*\n' +
-        '`!testheiststart` · `!testheistcancel`\n\n' +
-        '**OTHER**\n' +
-        '`!testlottery` · `!testchest` · `!testdrop` · `!testcheckin` · `!testquote` · `!adminstatus`\n\n' +
-        '**ANNOUNCEMENTS**\n' +
-        '`!announcement` — Start a new announcement (text → mention → time → queued)\n' +
-        '`!announcementqueue` — View all scheduled announcements with IDs\n' +
-        '`!cancelannouncement [id]` — Cancel a queued announcement by ID\n\n' +
-        '**DM BLASTS**\n' +
-        '`!dm` — DM a group (text → recipients → time → queued)\n' +
-        '`!dmqueue` — View all scheduled DM blasts with IDs\n' +
-        '`!canceldm [id]` — Cancel a queued DM blast by ID\n\n' +
-        '**BOOSTER & SUPERFAN CLUBS**\n' +
-        '`!superfan add @user` — Grant Superfan Club status + first paycheck\n' +
-        '`!superfan remove @user` — Remove Superfan Club status\n' +
-        '`!superfan list` — See all current superfans\n' +
-        '`!boosterlist` — See all current boosters\n' +
-        '`!payboost` — Manually trigger this week\'s booster payouts\n' +
-        '`!paysuperfan` — Manually trigger this week\'s superfan payouts\n\n' +
-        '**TESTING MODE**\n' +
-        '`!testingmode on` · `!testingmode off`\n\n' +
-        '**CONSTRUCTION ZONE**\n' +
-        '`!servershutdown [time] ["msg"]` — shut down now or at a time\n' +
-        '`!serverrestore` — restore immediately\n' +
-        '`!schedulerestore [time]` — schedule restore\n' +
-        '`!cancelschedule` — cancel scheduled shutdown/restore\n' +
-        '`!constructionstatus` — view construction zone state'
-      ).setFooter({ text: "Bully's World Admin" }).setTimestamp();
-    await msg.reply({ embeds: [embed] }); return;
+    const embed = new EmbedBuilder()
+      .setColor('#FF4500')
+      .setTitle('🛠️ Bully's World — Admin Panel')
+      .setDescription('Pick a category to see its commands. All responses are visible only to you.')
+      .setFooter({ text: "Bully's World Admin • Use responsibly." })
+      .setTimestamp();
+    const row1 = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('admin.bb').setLabel('💰 BB Control').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId('admin.events').setLabel('📅 Events').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('admin.games').setLabel('🎮 Games').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('admin.clubs').setLabel('👥 Clubs').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('admin.comms').setLabel('📣 Comms').setStyle(ButtonStyle.Secondary),
+    );
+    const row2 = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('admin.dailyq').setLabel('🗓️ Daily Q').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('admin.auction').setLabel('🔨 Auction').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('admin.system').setLabel('🔧 System').setStyle(ButtonStyle.Secondary),
+    );
+    await msg.reply({ embeds: [embed], components: [row1, row2] }); return;
   }
 
   // ── !set @user [amount] ──
