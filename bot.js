@@ -606,50 +606,53 @@ async function generateContent(prompt) {
 
 
 
-// ─── SAFE JSON EXTRACT — strips markdown code fences if present ───────────
-function extractJSON(text) {
-  const cleaned = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
-  return JSON.parse(cleaned);
+// ─── TRIVIA — Open Trivia DB (free, no API key) ───────────────────────────
+// Categories chosen to match BULLYLAND's audience
+const OPENTDB_CATEGORIES = [9, 11, 12, 14, 21, 26]; // General, Film, Music, TV, Sports, Celebrities
+
+function decodeHTML(str) {
+  return str
+    .replace(/&quot;/g, '"').replace(/&#039;/g, "'").replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&ldquo;/g, '"')
+    .replace(/&rdquo;/g, '"').replace(/&lsquo;/g, "'").replace(/&rsquo;/g, "'")
+    .replace(/&eacute;/g, 'é').replace(/&egrave;/g, 'è').replace(/&ntilde;/g, 'ñ')
+    .replace(/&ouml;/g, 'ö').replace(/&uuml;/g, 'ü').replace(/&aacute;/g, 'á')
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)));
 }
 
-// ─── TRIVIA GENERATOR ─────────────────────────────────────────────────────
 async function generateTriviaQuestion() {
-  const categories = [
-    'pop culture', 'music & artists', 'celebrity gossip & drama', 'reality TV',
-    'fashion & style', 'social media & internet culture', 'sports', 'movies & TV shows',
-    'Black culture & history', 'TikTok trends',
-  ];
-  const cat = categories[Math.floor(Math.random() * categories.length)];
-  const msg = await anthropic.messages.create({
-    model: 'claude-sonnet-4-20250514', max_tokens: 300,
-    messages: [{ role: 'user', content:
-      `Generate a fun trivia question about "${cat}" for a lively Discord community called BULLYLAND (Bully's World — urban, confident, pop-culture-savvy). ` +
-      `Return ONLY valid JSON, no markdown, no explanation:\n` +
-      `{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A"}` +
-      `\nRules: one clearly correct answer, three plausible wrong answers, fun but fair difficulty. Keep question under 120 chars.`
-    }],
-  });
-  return extractJSON(msg.content[0].text);
+  const cat = OPENTDB_CATEGORIES[Math.floor(Math.random() * OPENTDB_CATEGORIES.length)];
+  const res  = await fetch(`https://opentdb.com/api.php?amount=1&category=${cat}&type=multiple`);
+  const data = await res.json();
+  if (data.response_code !== 0 || !data.results?.length) throw new Error('OpenTDB returned no results');
+
+  const r = data.results[0];
+  const question = decodeHTML(r.question);
+  const correct  = decodeHTML(r.correct_answer);
+  const wrong    = r.incorrect_answers.map(decodeHTML);
+
+  // Shuffle all 4 options and assign A/B/C/D
+  const all = [correct, ...wrong].sort(() => Math.random() - 0.5);
+  const letters = ['A', 'B', 'C', 'D'];
+  const options  = {};
+  letters.forEach((l, i) => { options[l] = all[i]; });
+  const answer = letters[all.indexOf(correct)];
+
+  return { question, options, answer };
 }
 
-// ─── HANGMAN GENERATOR ────────────────────────────────────────────────────
-async function generateHangmanWord() {
-  const categories = [
-    'a celebrity name', 'a hit song title', 'a popular TV show', 'a viral slang term',
-    'a famous movie', 'a popular brand or sneaker', 'a rapper or singer name',
-    'a TikTok trend or phrase', 'a sports star name', 'a reality TV show',
-  ];
-  const cat = categories[Math.floor(Math.random() * categories.length)];
-  const msg = await anthropic.messages.create({
-    model: 'claude-sonnet-4-20250514', max_tokens: 150,
-    messages: [{ role: 'user', content:
-      `Generate a hangman word or short phrase (2–4 words max) that is ${cat}, well-known to a young urban pop-culture audience. ` +
-      `Return ONLY valid JSON, no markdown:\n` +
-      `{"word":"...","category":"...","hint":"..."}` +
-      `\nRules: word/phrase in ALL CAPS, no punctuation except spaces, category is short (e.g. "Celebrity", "Song Title"), hint is one short clue sentence.`
-    }],
-  });
-  return extractJSON(msg.content[0].text);
+// ─── HANGMAN — local word bank (free, instant) ───────────────────────────
+const HANGMAN_WORDS = require('./hangman_words.json');
+let _hmUsed = new Set(); // in-memory anti-repeat within a session
+
+function generateHangmanWord() {
+  // Reset if entire pool used
+  if (_hmUsed.size >= HANGMAN_WORDS.length) _hmUsed = new Set();
+  const available = HANGMAN_WORDS.filter((_, i) => !_hmUsed.has(i));
+  const idx = Math.floor(Math.random() * available.length);
+  const entry = available[idx];
+  _hmUsed.add(HANGMAN_WORDS.indexOf(entry));
+  return entry; // { word, category, hint }
 }
 
 // ─── HANGMAN ASCII ────────────────────────────────────────────────────────
@@ -3277,9 +3280,9 @@ client.on('interactionCreate', async interaction => {
         await interaction.reply({ content: `⏳ Hangman on cooldown — **${mins > 0 ? mins + 'm ' : ''}${secs}s** left.`, ephemeral: true }); return;
       }
 
-      await interaction.reply({ content: '🔤 Generating a word...', ephemeral: true });
       let hwData;
-      try { hwData = await generateHangmanWord(); } catch { await interaction.followUp({ content: '❌ Failed to generate a word. Try again.', ephemeral: true }); return; }
+      try { hwData = generateHangmanWord(); } catch { await interaction.reply({ content: '❌ Failed to start hangman. Try again.', ephemeral: true }); return; }
+      await interaction.reply({ content: '🔤 Starting hangman...', ephemeral: true });
 
       const word = hwData.word.toUpperCase().replace(/[^A-Z ]/g, '');
       const state = {
