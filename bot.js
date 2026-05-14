@@ -606,6 +606,12 @@ async function generateContent(prompt) {
 
 
 
+// ─── SAFE JSON EXTRACT — strips markdown code fences if present ───────────
+function extractJSON(text) {
+  const cleaned = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+  return JSON.parse(cleaned);
+}
+
 // ─── TRIVIA GENERATOR ─────────────────────────────────────────────────────
 async function generateTriviaQuestion() {
   const categories = [
@@ -615,7 +621,7 @@ async function generateTriviaQuestion() {
   ];
   const cat = categories[Math.floor(Math.random() * categories.length)];
   const msg = await anthropic.messages.create({
-    model: 'claude-haiku-4-20250514', max_tokens: 300,
+    model: 'claude-sonnet-4-20250514', max_tokens: 300,
     messages: [{ role: 'user', content:
       `Generate a fun trivia question about "${cat}" for a lively Discord community called BULLYLAND (Bully's World — urban, confident, pop-culture-savvy). ` +
       `Return ONLY valid JSON, no markdown, no explanation:\n` +
@@ -623,7 +629,7 @@ async function generateTriviaQuestion() {
       `\nRules: one clearly correct answer, three plausible wrong answers, fun but fair difficulty. Keep question under 120 chars.`
     }],
   });
-  return JSON.parse(msg.content[0].text.trim());
+  return extractJSON(msg.content[0].text);
 }
 
 // ─── HANGMAN GENERATOR ────────────────────────────────────────────────────
@@ -635,7 +641,7 @@ async function generateHangmanWord() {
   ];
   const cat = categories[Math.floor(Math.random() * categories.length)];
   const msg = await anthropic.messages.create({
-    model: 'claude-haiku-4-20250514', max_tokens: 150,
+    model: 'claude-sonnet-4-20250514', max_tokens: 150,
     messages: [{ role: 'user', content:
       `Generate a hangman word or short phrase (2–4 words max) that is ${cat}, well-known to a young urban pop-culture audience. ` +
       `Return ONLY valid JSON, no markdown:\n` +
@@ -643,7 +649,7 @@ async function generateHangmanWord() {
       `\nRules: word/phrase in ALL CAPS, no punctuation except spaces, category is short (e.g. "Celebrity", "Song Title"), hint is one short clue sentence.`
     }],
   });
-  return JSON.parse(msg.content[0].text.trim());
+  return extractJSON(msg.content[0].text);
 }
 
 // ─── HANGMAN ASCII ────────────────────────────────────────────────────────
