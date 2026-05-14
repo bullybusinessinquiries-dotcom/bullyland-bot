@@ -3179,12 +3179,16 @@ client.on('interactionCreate', async interaction => {
     }
 
     // ── TRIVIA: start ────────────────────────────────────────────────────────
+    // ── TRIVIA: start ────────────────────────────────────────────────────────
     if (customId === 'menu.trivia') {
       const cid = interaction.channelId;
       if (activeTrivia.has(cid)) { await interaction.reply({ content: '🧠 A trivia game is already running in this channel!', ephemeral: true }); return; }
       const cdKey = `trivia.${cid}`;
       const cdLeft = (gameCooldowns.get(cdKey) || 0) - Date.now();
-      if (cdLeft > 0) { await interaction.reply({ content: `⏳ Trivia on cooldown — **${Math.ceil(cdLeft/1000)}s** left.`, ephemeral: true }); return; }
+      if (cdLeft > 0) {
+        const mins = Math.floor(cdLeft / 60000), secs = Math.ceil((cdLeft % 60000) / 1000);
+        await interaction.reply({ content: `⏳ Trivia on cooldown — **${mins > 0 ? mins + 'm ' : ''}${secs}s** left.`, ephemeral: true }); return;
+      }
 
       await interaction.reply({ content: '🧠 Generating a question...', ephemeral: true });
       let trivia;
@@ -3192,56 +3196,63 @@ client.on('interactionCreate', async interaction => {
 
       const { question, options, answer } = trivia;
       const triviaEmbed = new EmbedBuilder().setColor('#c9a84c').setTitle('🧠 BULLYLAND Trivia')
-        .setDescription(`**${question}**\n\n🅰️ ${options.A}\n🅱️ ${options.B}\n🇨 ${options.C}\n🇩 ${options.D}`)
-        .setFooter({ text: "First correct answer: 75 BB • Others in time: 30 BB • 30 seconds!" }).setTimestamp();
+        .setDescription(`**${question}**\n\n🅰️  ${options.A}\n🅱️  ${options.B}\n🇨  ${options.C}\n🇩  ${options.D}`)
+        .setFooter({ text: "Pick an answer — results revealed when time's up! • 30 seconds" }).setTimestamp();
       const triviaRow = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('trivia.a').setLabel('A').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId('trivia.b').setLabel('B').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId('trivia.c').setLabel('C').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId('trivia.d').setLabel('D').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('trivia.a').setLabel('A').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('trivia.b').setLabel('B').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('trivia.c').setLabel('C').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('trivia.d').setLabel('D').setStyle(ButtonStyle.Secondary),
       );
       const triviaMsg = await interaction.channel.send({ embeds: [triviaEmbed], components: [triviaRow] });
 
-      const state = { question, options, answer: answer.toUpperCase(), messageId: triviaMsg.id, answered: new Map(), firstWinner: null };
+      // answered: Map userId → { choice, time } — ordered by insertion = answer order
+      const state = { question, options, answer: answer.toUpperCase(), messageId: triviaMsg.id, answered: new Map() };
       activeTrivia.set(cid, state);
 
-      // Auto-close after 30s
+      // Auto-close after 30s — reveal answer + all results
       state.timeout = setTimeout(async () => {
         activeTrivia.delete(cid);
-        gameCooldowns.set(cdKey, Date.now() + 2 * 60 * 1000);
+        gameCooldowns.set(cdKey, Date.now() + 5 * 60 * 1000);
+
+        // Determine winners in answer order
+        const correct = answer.toUpperCase();
+        const winners = [...state.answered.entries()].filter(([, v]) => v.choice === correct);
+        let bbLines = [];
+        winners.forEach(([uid, v], i) => {
+          const bb = i === 0 ? 75 : 30;
+          const uname = v.username;
+          addBB(uid, uname, bb, 'trivia — correct answer');
+          bbLines.push(`<@${uid}> +${bb} BB`);
+        });
+
         const disabledRow = new ActionRowBuilder().addComponents(
-          ['A','B','C','D'].map(l => new ButtonBuilder().setCustomId(`trivia.${l.toLowerCase()}_done`).setLabel(l).setStyle(l === answer.toUpperCase() ? ButtonStyle.Success : ButtonStyle.Secondary).setDisabled(true))
+          ['A','B','C','D'].map(l => new ButtonBuilder()
+            .setCustomId(`trivia.${l.toLowerCase()}_done`)
+            .setLabel(l)
+            .setStyle(l === correct ? ButtonStyle.Success : ButtonStyle.Secondary)
+            .setDisabled(true)
+          )
         );
-        const resultLines = state.firstWinner ? [`✅ Correct answer: **${answer}** — ${options[answer.toUpperCase()]}`] : [`⏰ Time's up! Correct answer: **${answer}** — ${options[answer.toUpperCase()]}`, `Nobody got it right.`];
-        await triviaMsg.edit({ embeds: [triviaEmbed.setColor(state.firstWinner ? '#2ecc71' : '#8B0000').setFooter({ text: "Time's up! • Bully's World" })], components: [disabledRow] }).catch(() => {});
-        await interaction.channel.send(resultLines.join('\n')).catch(() => {});
+        const resultEmbed = new EmbedBuilder().setColor(winners.length ? '#2ecc71' : '#8B0000')
+          .setTitle('🧠 BULLYLAND Trivia — Results')
+          .setDescription(`**${question}**\n\n🅰️  ${options.A}\n🅱️  ${options.B}\n🇨  ${options.C}\n🇩  ${options.D}`)
+          .addFields({ name: `✅ Answer: ${correct} — ${options[correct]}`, value: winners.length ? bbLines.join('\n') : 'Nobody got it right.' })
+          .setFooter({ text: "Bully's World" }).setTimestamp();
+        await triviaMsg.edit({ embeds: [resultEmbed], components: [disabledRow] }).catch(() => {});
       }, 30000);
       return;
     }
 
-    // ── TRIVIA: answer buttons ────────────────────────────────────────────────
-    if (customId.startsWith('trivia.') && ['trivia.a','trivia.b','trivia.c','trivia.d'].includes(customId)) {
+    // ── TRIVIA: answer buttons — silent lock-in, no feedback on correctness ──
+    if (['trivia.a','trivia.b','trivia.c','trivia.d'].includes(customId)) {
       const cid = interaction.channelId;
       const state = activeTrivia.get(cid);
       if (!state) { await interaction.reply({ content: '⏰ No active trivia game.', ephemeral: true }); return; }
-      if (state.answered.has(userId)) { await interaction.reply({ content: '✋ You already answered!', ephemeral: true }); return; }
-
-      const chosen = customId.slice(-1).toUpperCase();
-      state.answered.set(userId, chosen);
-      const correct = chosen === state.answer;
-
-      if (correct) {
-        if (!state.firstWinner) {
-          state.firstWinner = userId;
-          addBB(userId, username, 75, 'trivia — first correct answer');
-          await interaction.reply({ content: `✅ **Correct!** You got it first — **+75 BB**!`, ephemeral: true });
-        } else {
-          addBB(userId, username, 30, 'trivia — correct answer');
-          await interaction.reply({ content: `✅ **Correct!** **+30 BB**`, ephemeral: true });
-        }
-      } else {
-        await interaction.reply({ content: `❌ Wrong answer! The clock is still ticking...`, ephemeral: true });
-      }
+      if (state.answered.has(userId)) { await interaction.reply({ content: '🔒 You already locked in an answer.', ephemeral: true }); return; }
+      const chosen = customId.slice(-1).toUpperCase(); // 'a' → 'A'
+      state.answered.set(userId, { choice: chosen, username });
+      await interaction.reply({ content: `🤫 Answer locked in. Results drop when the timer ends.`, ephemeral: true });
       return;
     }
 
@@ -3251,7 +3262,10 @@ client.on('interactionCreate', async interaction => {
       if (activeHangman.has(cid)) { await interaction.reply({ content: '🔤 A hangman game is already running in this channel!', ephemeral: true }); return; }
       const cdKey = `hangman.${cid}`;
       const cdLeft = (gameCooldowns.get(cdKey) || 0) - Date.now();
-      if (cdLeft > 0) { await interaction.reply({ content: `⏳ Hangman on cooldown — **${Math.ceil(cdLeft/1000)}s** left.`, ephemeral: true }); return; }
+      if (cdLeft > 0) {
+        const mins = Math.floor(cdLeft / 60000), secs = Math.ceil((cdLeft % 60000) / 1000);
+        await interaction.reply({ content: `⏳ Hangman on cooldown — **${mins > 0 ? mins + 'm ' : ''}${secs}s** left.`, ephemeral: true }); return;
+      }
 
       await interaction.reply({ content: '🔤 Generating a word...', ephemeral: true });
       let hwData;
@@ -3262,11 +3276,17 @@ client.on('interactionCreate', async interaction => {
         word, category: hwData.category, hint: hwData.hint,
         guessed: new Set(), wrong: new Set(),
         display: buildHangmanDisplay(word, new Set()),
-        participants: new Map(), // userId → Set of correct letters they guessed
-        solved: false,
+        participants: new Map(),  // userId → Set of correct letters they guessed
+        pendingGuess: new Map(),  // userId → 'letter' | 'solve'
+        letterCooldowns: new Map(), // userId → timestamp (30s between letters)
+        solveAttempts: new Set(), // userIds who already used their solve
       };
+      const hmRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('hangman.guess').setLabel('🔤 Guess Letter').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('hangman.solve').setLabel('🔍 Solve').setStyle(ButtonStyle.Success),
+      );
       const hmEmbed = buildHangmanEmbed(state);
-      const hmMsg = await interaction.channel.send({ embeds: [hmEmbed] });
+      const hmMsg = await interaction.channel.send({ embeds: [hmEmbed], components: [hmRow] });
       state.messageId = hmMsg.id;
       activeHangman.set(cid, state);
 
@@ -3275,13 +3295,36 @@ client.on('interactionCreate', async interaction => {
         const cur = activeHangman.get(cid);
         if (!cur || cur.messageId !== hmMsg.id) return;
         activeHangman.delete(cid);
-        gameCooldowns.set(cdKey, Date.now() + 2 * 60 * 1000);
-        const failEmbed = buildHangmanEmbed({ ...cur, wrong: new Set([...cur.wrong, '_FORCE']) }) // trick to show full body
-          .setColor('#8B0000').setTitle(`🔤 Hangman — Time's Up!`)
-          .setDescription(`${HANGMAN_STAGES[6]}\n\n**The word was: ${cur.word}**`);
-        await hmMsg.edit({ embeds: [failEmbed] }).catch(() => {});
+        gameCooldowns.set(cdKey, Date.now() + 5 * 60 * 1000);
+        const failEmbed = new EmbedBuilder().setColor('#8B0000').setTitle(`🔤 Hangman — Time's Up!`)
+          .setDescription(`${HANGMAN_STAGES[6]}\n\n**The word was: ${cur.word}**`)
+          .setFooter({ text: "Bully's World" }).setTimestamp();
+        await hmMsg.edit({ embeds: [failEmbed], components: [] }).catch(() => {});
         await interaction.channel.send(`⏰ Time's up! The word was **${cur.word}**.`).catch(() => {});
       }, 3 * 60 * 1000);
+      return;
+    }
+
+    // ── HANGMAN: guess letter button ─────────────────────────────────────────
+    if (customId === 'hangman.guess') {
+      const cid = interaction.channelId;
+      const state = activeHangman.get(cid);
+      if (!state) { await interaction.reply({ content: '❌ No active hangman game.', ephemeral: true }); return; }
+      const cdLeft = (state.letterCooldowns.get(userId) || 0) - Date.now();
+      if (cdLeft > 0) { await interaction.reply({ content: `⏳ Wait **${Math.ceil(cdLeft/1000)}s** before guessing again.`, ephemeral: true }); return; }
+      state.pendingGuess.set(userId, 'letter');
+      await interaction.reply({ content: `↩️ Reply to the hangman message with a **single letter** to make your guess.`, ephemeral: true });
+      return;
+    }
+
+    // ── HANGMAN: solve button ────────────────────────────────────────────────
+    if (customId === 'hangman.solve') {
+      const cid = interaction.channelId;
+      const state = activeHangman.get(cid);
+      if (!state) { await interaction.reply({ content: '❌ No active hangman game.', ephemeral: true }); return; }
+      if (state.solveAttempts.has(userId)) { await interaction.reply({ content: `❌ You already used your solve attempt this game.`, ephemeral: true }); return; }
+      state.pendingGuess.set(userId, 'solve');
+      await interaction.reply({ content: `↩️ Reply to the hangman message with the **full word or phrase** to solve it.`, ephemeral: true });
       return;
     }
 
@@ -3728,96 +3771,125 @@ Balance: **${bal.toLocaleString()} BB**`).setFooter({ text: "Bully's Casino • 
 
 // ============================================================================
 // ============================================================================
-// HANGMAN — letter guess capture
+// HANGMAN — reply-based guess capture
 // ============================================================================
 client.on('messageCreate', async msg => {
   if (msg.author?.bot || !msg.guild) return;
-  const state = activeHangman.get(msg.channelId);
-  if (!state) return;
-
-  const text = msg.content.trim().toUpperCase();
-
-  // Full word guess
-  const isFullGuess = text.length > 1 && text === state.word;
-  // Single letter guess
-  const isLetter = /^[A-Z]$/.test(text);
-  if (!isLetter && !isFullGuess) return;
+  // Must be a reply to a message
+  if (!msg.reference?.messageId) return;
 
   const userId = msg.author.id, username = msg.author.username;
-  const cid = msg.channelId;
-  const cdKey = `hangman.${cid}`;
 
-  // Full word guess
-  if (isFullGuess) {
-    clearTimeout(state.timeout);
-    activeHangman.delete(cid);
-    gameCooldowns.set(cdKey, Date.now() + 2 * 60 * 1000);
-    addBB(userId, username, 100, 'hangman — solved the word');
-    state.guessed = new Set(state.word.replace(/ /g, '').split(''));
-    state.display = buildHangmanDisplay(state.word, state.guessed);
-    const winEmbed = buildHangmanEmbed(state).setColor('#2ecc71').setTitle('🔤 Hangman — Solved!').setFooter({ text: "Bully's World" });
-    const hmMsg = await msg.channel.messages.fetch(state.messageId).catch(() => null);
-    if (hmMsg) await hmMsg.edit({ embeds: [winEmbed] }).catch(() => {});
-    await msg.reply(`🎉 <@${userId}> got it — **${state.word}**! **+100 BB**`);
-    return;
-  }
-
-  // Single letter
-  const letter = text;
-  if (state.guessed.has(letter) || state.wrong.has(letter)) {
-    const r = await msg.reply(`Already guessed **${letter}**.`); setTimeout(() => r.delete().catch(() => {}), 3000);
-    await msg.delete().catch(() => {});
-    return;
-  }
-
-  if (state.word.includes(letter)) {
-    state.guessed.add(letter);
-    // Track who guessed this correct letter
-    if (!state.participants.has(userId)) state.participants.set(userId, new Set());
-    state.participants.get(userId).add(letter);
-
-    state.display = buildHangmanDisplay(state.word, state.guessed);
-
-    // Check if solved
-    const solved = state.word.replace(/ /g, '').split('').every(c => state.guessed.has(c));
-    if (solved) {
-      clearTimeout(state.timeout);
-      activeHangman.delete(cid);
-      gameCooldowns.set(cdKey, Date.now() + 2 * 60 * 1000);
-      addBB(userId, username, 100, 'hangman — solved the word');
-      // Pay per-letter contributors
-      const rewards = [];
-      for (const [uid, letters] of state.participants) {
-        if (uid === userId) continue;
-        const bbEarned = letters.size * 10;
-        const uname = (await msg.guild.members.fetch(uid).catch(() => null))?.user.username || uid;
-        addBB(uid, uname, bbEarned, `hangman — ${letters.size} correct letter(s)`);
-        rewards.push(`<@${uid}> +${bbEarned} BB`);
-      }
-      const winEmbed = buildHangmanEmbed(state).setColor('#2ecc71').setTitle('🔤 Hangman — Solved!').setFooter({ text: "Bully's World" });
-      const hmMsg = await msg.channel.messages.fetch(state.messageId).catch(() => null);
-      if (hmMsg) await hmMsg.edit({ embeds: [winEmbed] }).catch(() => {});
-      await msg.reply(`🎉 <@${userId}> solved it — **${state.word}**! **+100 BB**${rewards.length ? '\n' + rewards.join(' • ') : ''}`);
-    } else {
-      const hmMsg = await msg.channel.messages.fetch(state.messageId).catch(() => null);
-      if (hmMsg) await hmMsg.edit({ embeds: [buildHangmanEmbed(state)] }).catch(() => {});
+  // ── Hangman reply ──────────────────────────────────────────────────────────
+  const hmState = activeHangman.get(msg.channelId);
+  if (hmState && msg.reference.messageId === hmState.messageId) {
+    const pendingType = hmState.pendingGuess.get(userId);
+    if (!pendingType) {
+      // Not prompted — delete silently
       await msg.delete().catch(() => {});
+      return;
     }
-  } else {
-    state.wrong.add(letter);
-    await msg.delete().catch(() => {});
-    if (state.wrong.size >= 6) {
-      clearTimeout(state.timeout);
-      activeHangman.delete(cid);
-      gameCooldowns.set(cdKey, Date.now() + 2 * 60 * 1000);
-      const loseEmbed = buildHangmanEmbed(state).setColor('#8B0000').setTitle('🔤 Hangman — Game Over').setFooter({ text: "Bully's World" });
-      const hmMsg = await msg.channel.messages.fetch(state.messageId).catch(() => null);
-      if (hmMsg) await hmMsg.edit({ embeds: [loseEmbed] }).catch(() => {});
-      await msg.channel.send(`💀 The word was **${state.word}**. Better luck next time!`);
+    hmState.pendingGuess.delete(userId);
+    const text = msg.content.trim().toUpperCase().replace(/[^A-Z ]/g, '');
+    const cid = msg.channelId;
+    const cdKey = `hangman.${cid}`;
+
+    // ── Solve attempt ──
+    if (pendingType === 'solve') {
+      hmState.solveAttempts.add(userId);
+      await msg.delete().catch(() => {});
+      if (text === hmState.word) {
+        // Correct solve
+        clearTimeout(hmState.timeout);
+        activeHangman.delete(cid);
+        gameCooldowns.set(cdKey, Date.now() + 5 * 60 * 1000);
+        addBB(userId, username, 100, 'hangman — solved the word');
+        // Pay per-letter contributors
+        const rewards = [];
+        for (const [uid, letters] of hmState.participants) {
+          if (uid === userId) continue;
+          const bbEarned = letters.size * 10;
+          const uname = (await msg.guild.members.fetch(uid).catch(() => null))?.user.username || uid;
+          addBB(uid, uname, bbEarned, `hangman — ${letters.size} correct letter(s)`);
+          rewards.push(`<@${uid}> +${bbEarned} BB`);
+        }
+        hmState.guessed = new Set(hmState.word.replace(/ /g, '').split(''));
+        hmState.display  = buildHangmanDisplay(hmState.word, hmState.guessed);
+        const winEmbed = buildHangmanEmbed(hmState).setColor('#2ecc71').setTitle('🔤 Hangman — Solved!').setFooter({ text: "Bully's World" });
+        const hmMsg = await msg.channel.messages.fetch(hmState.messageId).catch(() => null);
+        if (hmMsg) await hmMsg.edit({ embeds: [winEmbed], components: [] }).catch(() => {});
+        await msg.channel.send(`🎉 <@${userId}> solved it — **${hmState.word}**! **+100 BB**${rewards.length ? '\n' + rewards.join(' • ') : ''}`);
+      } else {
+        // Wrong solve — private notice only
+        await msg.channel.send({ content: `<@${userId}> ❌ That's not it. You've used your solve attempt.` })
+          .then(r => setTimeout(() => r.delete().catch(() => {}), 5000)).catch(() => {});
+      }
+      return;
+    }
+
+    // ── Letter guess ──
+    const letter = text.length === 1 ? text : null;
+    if (!letter) {
+      await msg.channel.send({ content: `<@${userId}> ❌ Send a **single letter** to guess.` })
+        .then(r => setTimeout(() => r.delete().catch(() => {}), 4000)).catch(() => {});
+      return;
+    }
+
+    if (hmState.guessed.has(letter) || hmState.wrong.has(letter)) {
+      await msg.channel.send({ content: `<@${userId}> **${letter}** was already guessed.` })
+        .then(r => setTimeout(() => r.delete().catch(() => {}), 4000)).catch(() => {});
+      return;
+    }
+
+    // Set 30s cooldown for this user's next letter
+    hmState.letterCooldowns.set(userId, Date.now() + 30 * 1000);
+
+    if (hmState.word.includes(letter)) {
+      hmState.guessed.add(letter);
+      if (!hmState.participants.has(userId)) hmState.participants.set(userId, new Set());
+      hmState.participants.get(userId).add(letter);
+      hmState.display = buildHangmanDisplay(hmState.word, hmState.guessed);
+
+      // Check if all letters revealed
+      const solved = hmState.word.replace(/ /g, '').split('').every(c => hmState.guessed.has(c));
+      if (solved) {
+        clearTimeout(hmState.timeout);
+        activeHangman.delete(cid);
+        gameCooldowns.set(cdKey, Date.now() + 5 * 60 * 1000);
+        addBB(userId, username, 100, 'hangman — completed the word');
+        const rewards = [];
+        for (const [uid, letters] of hmState.participants) {
+          if (uid === userId) continue;
+          const bbEarned = letters.size * 10;
+          const uname = (await msg.guild.members.fetch(uid).catch(() => null))?.user.username || uid;
+          addBB(uid, uname, bbEarned, `hangman — ${letters.size} correct letter(s)`);
+          rewards.push(`<@${uid}> +${bbEarned} BB`);
+        }
+        const winEmbed = buildHangmanEmbed(hmState).setColor('#2ecc71').setTitle('🔤 Hangman — Solved!').setFooter({ text: "Bully's World" });
+        const hmMsg = await msg.channel.messages.fetch(hmState.messageId).catch(() => null);
+        if (hmMsg) await hmMsg.edit({ embeds: [winEmbed], components: [] }).catch(() => {});
+        await msg.channel.send(`🎉 <@${userId}> filled in the last letter — **${hmState.word}**! **+100 BB**${rewards.length ? '\n' + rewards.join(' • ') : ''}`);
+      } else {
+        const hmMsg = await msg.channel.messages.fetch(hmState.messageId).catch(() => null);
+        if (hmMsg) await hmMsg.edit({ embeds: [buildHangmanEmbed(hmState)] }).catch(() => {});
+      }
     } else {
-      const hmMsg = await msg.channel.messages.fetch(state.messageId).catch(() => null);
-      if (hmMsg) await hmMsg.edit({ embeds: [buildHangmanEmbed(state)] }).catch(() => {});
+      hmState.wrong.add(letter);
+      if (hmState.wrong.size >= 6) {
+        clearTimeout(hmState.timeout);
+        activeHangman.delete(cid);
+        gameCooldowns.set(cdKey, Date.now() + 5 * 60 * 1000);
+        const loseEmbed = buildHangmanEmbed(hmState).setColor('#8B0000').setTitle('🔤 Hangman — Game Over').setFooter({ text: "Bully's World" });
+        const hmMsg = await msg.channel.messages.fetch(hmState.messageId).catch(() => null);
+        if (hmMsg) await hmMsg.edit({ embeds: [loseEmbed], components: [] }).catch(() => {});
+        await msg.channel.send(`💀 The word was **${hmState.word}**. Better luck next time!`);
+      } else {
+        const hmMsg = await msg.channel.messages.fetch(hmState.messageId).catch(() => null);
+        if (hmMsg) await hmMsg.edit({ embeds: [buildHangmanEmbed(hmState)] }).catch(() => {});
+      }
     }
+    await msg.delete().catch(() => {});
+    return;
   }
 });
 
