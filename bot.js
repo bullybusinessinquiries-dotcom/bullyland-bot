@@ -701,7 +701,11 @@ const HANGMAN_STAGES = [
 ];
 
 function buildHangmanDisplay(word, guessed) {
-  return word.split('').map(c => c === ' ' ? '  ' : (guessed.has(c) ? c : '_')).join(' ');
+  // Each word shown as connected chars/underscores, words separated by 3 spaces
+  // e.g. "DOGS ARE GREAT" with A,R guessed → "D__S  AR_  _R_A_"
+  return word.split(' ')
+    .map(w => w.split('').map(c => guessed.has(c) ? c : '_').join(''))
+    .join('   ');
 }
 
 function buildHangmanEmbed(state) {
@@ -3996,10 +4000,12 @@ client.on('messageCreate', async msg => {
         if (hmMsg) await hmMsg.edit({ embeds: [winEmbed], components: [] }).catch(() => {});
         await msg.channel.send(`🎉 <@${userId}> filled in the last letter — **${hmState.word}**! **+100 BB**${rewards.length ? '\n' + rewards.join(' • ') : ''}`);
       } else {
-        // ✅ Correct letter — update embed + notify
+        // ✅ Correct letter — update embed + notify (permanent message, visible to all)
         const hmMsg = await msg.channel.messages.fetch(hmState.messageId).catch(() => null);
         if (hmMsg) await hmMsg.edit({ embeds: [buildHangmanEmbed(hmState)] }).catch(() => {});
-        await sendTemp(`<@${userId}> ✅ **${letter}** is in the word! ⏳ Come back in **30 seconds** to guess again.`);
+        const count = hmState.word.split('').filter(c => c === letter).length;
+        const spotText = count === 1 ? '1 spot' : `${count} spots`;
+        await msg.channel.send(`✅ <@${userId}> — **${letter}** is in the word! Found in **${spotText}**. ⏳ 30s cooldown before your next guess.`);
       }
     } else {
       // ❌ Wrong letter — update embed + notify
