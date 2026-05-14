@@ -413,21 +413,22 @@ const SUPERFAN_WEEKLY_BB  = 500;
 async function sendBoosterPaycheck(member, isFirstTime = false) {
   const embed = new EmbedBuilder()
     .setColor('#f47fff')
-    .setTitle(isFirstTime ? '💜 Welcome to the Booster Club.' : '💜 Booster Club — Weekly Paycheck')
+    .setTitle(isFirstTime ? '💜 You\'re in the Club.' : '💜 The Club takes care of its own.')
     .setDescription(
       isFirstTime
-        ? `You just boosted BULLYLAND and that means everything.\n\n` +
-          `The Booster Club is a small, exclusive group of people who actively invest in keeping this community alive and growing. ` +
-          `We don't take that lightly.\n\n` +
-          `As a member of the club, you'll receive **${BOOSTER_WEEKLY_BB} Bully Bucks every week** — automatically, like a paycheck — for as long as you're boosting.\n\n` +
-          `Your first paycheck just hit. Check your balance with \`!balance\`.\n\n` +
-          `Thank you for being part of something real. 🎨`
-        : `Your weekly Booster Club paycheck just dropped.\n\n` +
-          `**+${BOOSTER_WEEKLY_BB} BB** has been added to your balance as a thank you for keeping BULLYLAND boosted.\n\n` +
-          `You're part of an exclusive group of people who invest in this community — and this community invests back in you.\n\n` +
-          `Check your balance: \`!balance\``
+        ? `${member.displayName}, you just boosted BULLYLAND — and that put you somewhere most people never get to go.\n\n` +
+          `**Welcome to the Booster Club.**\n\n` +
+          `This isn't a perk list. This is a circle. A small group of people who chose to invest in this community when they didn't have to — and because of that, this community invests right back.\n\n` +
+          `Here's how it works:\n` +
+          `Every week, for as long as you're boosting, **${BOOSTER_WEEKLY_BB} Bully Bucks** hit your balance automatically. No commands. No catching a window. It just shows up — because you showed up first.\n\n` +
+          `Your first deposit just landed. Type \`!balance\` to see it.\n\n` +
+          `Not many people are in this room. You are. That means something. 🎨`
+        : `${member.displayName}, another week in the Booster Club — another **+${BOOSTER_WEEKLY_BB} BB** in your balance.\n\n` +
+          `While everyone else is grinding check-ins and games, yours came in automatically. That's what the Club is.\n\n` +
+          `You keep the server powered. We keep the bag moving.\n\n` +
+          `\`!balance\` to see your stack. 💜`
     )
-    .setFooter({ text: "Bully's World • Booster Club • Thank you." })
+    .setFooter({ text: "Bully's World • Booster Club • You're one of the few." })
     .setTimestamp();
   await member.send({ embeds: [embed] }).catch(() => {});
 }
