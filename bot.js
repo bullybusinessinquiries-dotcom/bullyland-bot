@@ -182,13 +182,19 @@ db.exec(`
   );
 `);
 
+// ── SQLite durability settings (must come before any writes) ──────────────────
+// WAL mode: writes don't block reads, survives crashes mid-write.
+// NORMAL sync: safe without a full fsync on every commit (much faster on Railway).
+db.pragma('journal_mode = WAL');
+db.pragma('synchronous  = NORMAL');
+
 // Migrate existing DB — add bank_balance column if it doesn't exist yet
 try { db.exec('ALTER TABLE balances ADD COLUMN bank_balance INTEGER DEFAULT 0'); } catch (_) {}
 // Garnishment debt — tracks BB owed to the King after a treason punishment
 try { db.exec('ALTER TABLE balances ADD COLUMN garnish_debt INTEGER NOT NULL DEFAULT 0'); } catch (_) {}
 
 // Integrity check — runs after tables are guaranteed to exist
-{ const count = db.prepare('SELECT COUNT(*) as c FROM balances').get()?.c ?? 0; console.log(`[DB] Users in database: ${count}${count === 0 ? ' ⚠️  (empty — check DB_PATH if this is unexpected)' : ''}`); }
+{ const count = db.prepare('SELECT COUNT(*) as c FROM balances').get()?.c ?? 0; console.log(`[DB] Users in database: ${count}${count === 0 ? ' ⚠️  (empty — check DB_PATH if this is unexpected on a live server)' : ''}`); }
 
 // ─── CONFIG ────────────────────────────────────────────────────────────────
 const CONFIG = {
@@ -1610,19 +1616,17 @@ client.on('messageCreate', async(message) => {
   // ── !balance ──
   if (content === '!balance') {
     const u = getUser(userId, username);
-    const isTester = hasAccess(message.member);
-    const embed = new EmbedBuilder().setColor('#1a1a1a').setTitle('Your Bully Bucks Balance')
+    const bankBalance = u.bank_balance ?? 0;
+    const { capacity, label } = getBankCapacity(message.member);
+    const embed = new EmbedBuilder().setColor('#1a1a1a').setTitle('💰 Your Bully Bucks Balance')
       .addFields(
-        { name: '👛 Wallet',       value: `${u.balance} BB`,      inline: true },
-        { name: '📈 Total Earned', value: `${u.total_earned} BB`, inline: true },
+        { name: '👛 Wallet',       value: `${u.balance.toLocaleString()} BB`,      inline: true },
+        { name: '📈 Total Earned', value: `${u.total_earned.toLocaleString()} BB`, inline: true },
         { name: '🔥 Streak',       value: `${u.streak||0} days`,  inline: true },
+        { name: '🏦 Bank',         value: `${bankBalance.toLocaleString()} / ${capacity.toLocaleString()} BB  *(${label})*`, inline: false },
       )
+      .addFields({ name: '📌 Tip', value: 'Use `!bank` to see all banking tiers and how to deposit/withdraw.', inline: false })
       .setFooter({ text: "Bully's World • Keep earning." }).setTimestamp();
-    if (isTester) {
-      const bankBalance = u.bank_balance ?? 0;
-      const { capacity, label } = getBankCapacity(message.member);
-      embed.addFields({ name: '🏦 Bank', value: `${bankBalance} / ${capacity} BB  *(${label})*`, inline: false });
-    }
     // Send privately — balance is personal info
     await message.delete().catch(() => {});
     try {
@@ -1635,14 +1639,8 @@ client.on('messageCreate', async(message) => {
     return;
   }
 
-  // ── BANK COMMANDS (tester-only while in development) ──────────────────────
+  // ── BANK COMMANDS ──────────────────────────────────────────────────────────
   if (content.startsWith('!deposit') || content.startsWith('!withdraw')) {
-    if (!hasAccess(message.member)) {
-      const r = await message.reply('🔒 The bank system is coming soon.');
-      setTimeout(() => r.delete().catch(() => {}), 5000);
-      await message.delete().catch(() => {});
-      return;
-    }
     const u = getUser(userId, username);
     const { capacity, label } = getBankCapacity(message.member);
     const bankBalance = u.bank_balance ?? 0;
@@ -1681,14 +1679,58 @@ client.on('messageCreate', async(message) => {
     }
   }
 
+  // ── !bank — banking tier guide ──────────────────────────────────────────────
+  if (content === '!bank') {
+    const u = getUser(userId, username);
+    const bankBalance = u.bank_balance ?? 0;
+    const { capacity, label } = getBankCapacity(message.member);
+    const tierLines = BANK_LEVEL_ROLES.map(t => {
+      const isCurrent = label === t.label;
+      return `${isCurrent ? '▶️' : '◾'} **${t.label}** — up to **${t.capacity.toLocaleString()} BB**${isCurrent ? '  ← *your tier*' : ''}`;
+    }).join('\n');
+    const embed = new EmbedBuilder()
+      .setColor('#c9a84c')
+      .setTitle('🏦 Bully Bucks Banking Guide')
+      .setDescription(
+        `The bank protects your BB from steals and lets you save up for big purchases. ` +
+        `Your bank limit grows as your server level increases.\n\n` +
+        `**Your Bank:** ${bankBalance.toLocaleString()} / ${capacity.toLocaleString()} BB  *(${label})*`
+      )
+      .addFields(
+        {
+          name: '📊 Banking Tiers (Level → Capacity)',
+          value:
+            `> *(No role yet)* — bank locked until you reach Rookie\n` +
+            tierLines,
+          inline: false
+        },
+        {
+          name: '💡 How to Use It',
+          value:
+            '`!deposit [amount]` or `!deposit all` — move BB from wallet → bank\n' +
+            '`!withdraw [amount]` or `!withdraw all` — move BB from bank → wallet\n' +
+            '`!balance` — see your wallet + bank at a glance',
+          inline: false
+        },
+        {
+          name: '🔒 Why Bank?',
+          value:
+            '• BB in your **bank cannot be stolen**\n' +
+            '• Your bank balance **counts toward the leaderboard**\n' +
+            '• Level up in the server (just chat + check in) to unlock bigger tiers',
+          inline: false
+        }
+      )
+      .setFooter({ text: "Bully's World • Stack and protect your BB." })
+      .setTimestamp();
+    await message.delete().catch(() => {});
+    try { await message.author.send({ embeds: [embed] }); }
+    catch (_) { const r = await message.channel.send({ content: `<@${userId}>`, embeds: [embed] }); setTimeout(() => r.delete().catch(() => {}), 25000); }
+    return;
+  }
+
   // ── !blackmarket ──
   if (content === '!blackmarket') {
-    if (!hasAccess(message.member)) {
-      const r = await message.reply('🔒 The black market is coming soon.');
-      setTimeout(() => r.delete().catch(() => {}), 5000);
-      await message.delete().catch(() => {});
-      return;
-    }
     const u = getUser(userId, username);
     const embed = new EmbedBuilder().setColor('#1a1a1a').setTitle('🖤 Black Market')
       .setDescription(Object.values(ITEMS).map(item => {
@@ -1800,10 +1842,24 @@ client.on('messageCreate', async(message) => {
 
   // ── !help ──
   if (content === '!help') {
-    const embed = new EmbedBuilder().setColor('#1a1a1a').setTitle("Bully's World — How It Works")
-      .setDescription(`**Earning Bully Bucks:**\n• Chat — 5 BB per message (5 sec cooldown)\n• Daily check-in — 25-400 BB depending on streak\n• Win on-stream TikTok events — gifted by Bully\n\n**Essential Commands:**\n!balance — your BB & streak\n!checkin — claim daily BB (during check-in window)\n!bullygames — access all games (Raids, Heist, Casino, Lottery)\n!heistrules — how heists work\n!steal @user [amount] — try to steal BB from another member\n!gift @user [amount] — send your own BB to another member\n!shop — browse current shop (Rookie+)\n!buy [number] — purchase item\n!leaderboard — monthly top earners\n!history — last 5 transactions\n!stats — server economy\n!claim — claim a mystery drop\n!feedback — share your thoughts\n!redeem CODE — redeem a stream event code\n\n**Streaks double every 7 days:** 25 → 50 → 100 → 200 → 400 BB`)
-      .setFooter({text:"Bully's World • Now get to earning."}).setTimestamp();
-    await message.reply({ embeds: [embed] }); return;
+    const embed = new EmbedBuilder()
+      .setColor('#c9a84c')
+      .setTitle("🏠 Bully's World — Quick Guide")
+      .setDescription(
+        `Welcome! Pick a topic below to learn more — no searching needed.\n\n` +
+        `**Quick commands you can always use:**\n` +
+        `\`!balance\` · \`!bank\` · \`!checkin\` · \`!bullygames\` · \`!shop\``
+      )
+      .setFooter({ text: "Bully's World • Tap a button to learn more." })
+      .setTimestamp();
+    const row1 = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('help.earning').setLabel('💰 Earning BB').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('help.banking').setLabel('🏦 Banking').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('help.games').setLabel('🎮 Games').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('help.stealing').setLabel('🕵️ Stealing').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('help.shop').setLabel('🛒 Shop').setStyle(ButtonStyle.Secondary),
+    );
+    await message.reply({ embeds: [embed], components: [row1] }); return;
   }
 
   // ── !redeem ──
@@ -3177,7 +3233,7 @@ client.on('messageCreate', async msg => {
     return;
   }
   const embed = new EmbedBuilder().setColor('#c9a84c').setTitle('🎮 BULLYLAND Games')
-    .setDescription('**Welcome to the game room.** Pick a game below.\n\n⚔️ **Raid** — Team battles\n👹 **Boss Raid** — Legendary bosses\n🦹 **Heist** — Crew heists for BB\n🎰 **Casino** — Slots, Blackjack, Roulette, Horse Racing\n🎟️ **Lottery** — Weekly jackpot draw\n🧠 **Trivia** — Answer fast, earn BB\n🔤 **Hangman** — Guess the word together')
+    .setDescription('**Welcome to the game room.** Pick a game below.\n\n⚔️ **Raid** — Team battles\n👹 **Boss Raid** — Legendary bosses\n🦹 **Heist** — Crew heists for BB\n🎰 **Casino** — Slots, Blackjack, Roulette, Horse Racing\n🎟️ **Lottery** — Weekly jackpot draw\n🧠 **Trivia** — Answer fast, earn BB\n🔤 **Hangman** — Guess the word together\n\n*Type `!help` for a full guide to earning, banking, and stealing.*')
     .setFooter({ text: "Bully's World" }).setTimestamp();
   const row1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('menu.raid').setLabel('⚔️ Raid').setStyle(ButtonStyle.Primary),
@@ -3335,9 +3391,85 @@ client.on('interactionCreate', async interaction => {
   }
 
   try {
+
+    // ── HELP TOPIC BUTTONS ────────────────────────────────────────────────────
+    if (customId.startsWith('help.')) {
+      const topic = customId.slice('help.'.length);
+      let embed;
+      if (topic === 'earning') {
+        embed = new EmbedBuilder().setColor('#f1c40f').setTitle('💰 How to Earn Bully Bucks')
+          .addFields(
+            { name: '💬 Chat',         value: '**+5 BB** per message (5-second cooldown between rewards)', inline: false },
+            { name: '📅 Daily Check-In', value: '**+25 BB** base · streak bonuses stack every 7 days\n⠀**0–6 days:** +25 BB\n⠀**7+ days:** +50 BB\n⠀**14+ days:** +100 BB\n⠀**21+ days:** +200 BB\n⠀**28+ days:** +400 BB', inline: false },
+            { name: '🎮 Games',        value: 'Win BB through Trivia, Heists, Casino, Raids, and Lottery', inline: false },
+            { name: '🎁 Events',       value: 'Bully gifts BB live on TikTok — redeem codes with `!redeem CODE`', inline: false },
+            { name: '📌 Key Commands', value: '`!checkin` — daily reward\n`!balance` — see your BB\n`!history` — last 5 transactions', inline: false }
+          )
+          .setFooter({ text: "Bully's World • Consistency pays." }).setTimestamp();
+      } else if (topic === 'banking') {
+        const u = getUser(userId, username);
+        const bankBal = u.bank_balance ?? 0;
+        const { capacity, label } = getBankCapacity(interaction.member);
+        const tierLines = BANK_LEVEL_ROLES.map(t => {
+          const isCurrent = label === t.label;
+          return `${isCurrent ? '▶️' : '◾'} **${t.label}** — ${t.capacity.toLocaleString()} BB${isCurrent ? '  ← *your tier*' : ''}`;
+        }).join('\n');
+        embed = new EmbedBuilder().setColor('#c9a84c').setTitle('🏦 Banking Guide')
+          .setDescription(`Your bank protects BB from steals and counts toward the leaderboard. Capacity grows as you level up.\n\n**Your bank:** ${bankBal.toLocaleString()} / ${capacity.toLocaleString()} BB *(${label})*`)
+          .addFields(
+            { name: '📊 Tier Table', value: `> *(No role)* — locked until Rookie\n${tierLines}`, inline: false },
+            { name: '💡 Commands',   value: '`!deposit [amount]` or `!deposit all`\n`!withdraw [amount]` or `!withdraw all`\n`!bank` — full guide in your DMs', inline: false },
+            { name: '🔒 Why Bank?', value: '• BB in the bank **cannot be stolen**\n• Counts toward the **leaderboard ranking**\n• Level up by chatting + checking in daily', inline: false }
+          )
+          .setFooter({ text: "Bully's World • Protect your bag." }).setTimestamp();
+      } else if (topic === 'games') {
+        embed = new EmbedBuilder().setColor('#2ecc71').setTitle('🎮 Bully Games — Quick Guide')
+          .setDescription('All games are in <#' + CONFIG.CHANNELS.GAMES + '>. Type `!bullygames` to open the menu.')
+          .addFields(
+            { name: '🎰 Casino',    value: 'Slots, Blackjack, Roulette, Horse Racing — bet BB and win big', inline: false },
+            { name: '🦹 Heist',     value: 'Join a crew, pick a target, split the payout — or lose it all', inline: false },
+            { name: '🧠 Trivia',    value: '5 rounds, 15 sec each · most first-answers wins 100BB + 5BB/correct · others get 10BB/correct', inline: false },
+            { name: '🔤 Hangman',  value: 'Team up to guess the hidden word — one wrong letter at a time', inline: false },
+            { name: '🎟️ Lottery',   value: 'Buy tickets weekly · more tickets = better odds · winner drawn each week', inline: false },
+            { name: '📌 Tip',       value: 'Casino games auto-cancel after 5 min of inactivity. Use the **Cancel Bet** button if you get stuck.', inline: false }
+          )
+          .setFooter({ text: "Bully's World • May the odds be in your favor." }).setTimestamp();
+      } else if (topic === 'stealing') {
+        embed = new EmbedBuilder().setColor('#e74c3c').setTitle('🕵️ Stealing — Rules & Protections')
+          .addFields(
+            { name: '📋 How It Works', value: '`!steal @user [amount]` — attempt to steal BB from someone\nThe target gets a DM and has a short window to **block** it', inline: false },
+            { name: '⏳ Cooldown',      value: 'You can only steal once every **3 minutes**', inline: false },
+            { name: '🛡️ Who Is Protected?', value:
+              '• Anyone with **25 BB or less** in their wallet — you lose **10 BB** for trying\n' +
+              '• Anyone with an active **shield** (`!shield` — 100 BB for 24h protection)\n' +
+              '• Steal too many times and you may get caught (penalty up to 50% of the steal amount)',
+              inline: false },
+            { name: '⚠️ Risks',        value: '• Target can block it — you lose up to 50% of the attempt as penalty\n• Attempt against low-balance users = instant -10 BB fine\n• Going below -50 BB freezes your steal ability', inline: false },
+            { name: '📌 Other Crime',  value: '`!bounty @user [amount]` — put a price on someone\'s head\n`!heist` (via `!bullygames`) — organized crew robbery', inline: false }
+          )
+          .setFooter({ text: "Bully's World • Crime doesn't always pay." }).setTimestamp();
+      } else if (topic === 'shop') {
+        embed = new EmbedBuilder().setColor('#9b59b6').setTitle('🛒 Shop & Spending Guide')
+          .addFields(
+            { name: '🏪 Main Shop',    value: '`!shop` — browse collectible roles you can buy and equip\n**Requires Rookie rank** (Level 1+) to access', inline: false },
+            { name: '🖤 Black Market', value: '`!blackmarket` — special items with unique abilities\n(Account Pull, Pocket Scan, Vault Key)', inline: false },
+            { name: '🎁 Gift & Redeem', value: '`!gift @user [amount]` — send your own BB to someone\n`!redeem CODE` — redeem a stream event code for BB', inline: false },
+            { name: '🏷️ Role Rarities', value:
+              '⬜ **Common** — 75 BB\n' +
+              '🟦 **Uncommon** — 150 BB\n' +
+              '🟣 **Rare** — 300 BB\n' +
+              '🟡 **Legendary** — 600 BB',
+              inline: false },
+            { name: '🎒 Inventory',    value: '`!inventory` — see your roles and equip/unequip them (max 3 equipped)', inline: false }
+          )
+          .setFooter({ text: "Bully's World • Spend wisely." }).setTimestamp();
+      }
+      if (embed) await interaction.reply({ embeds: [embed], ephemeral: true });
+      return;
+    }
+
     // ── BLACK MARKET: buy button ──────────────────────────────────────────────
     if (customId.startsWith('bm_buy.')) {
-      if (!hasAccess(interaction.member)) { await interaction.reply({ content: '🔒 Black market is not yet public.', ephemeral: true }); return; }
       const itemId = customId.slice('bm_buy.'.length);
       const item = ITEMS[itemId];
       if (!item) { await interaction.reply({ content: '❌ Unknown item.', ephemeral: true }); return; }
@@ -3353,7 +3485,6 @@ client.on('interactionCreate', async interaction => {
 
     // ── BLACK MARKET: use button — prompts for target ─────────────────────────
     if (customId.startsWith('bm_use.')) {
-      if (!hasAccess(interaction.member)) { await interaction.reply({ content: '🔒 Black market is not yet public.', ephemeral: true }); return; }
       const itemId = customId.slice('bm_use.'.length);
       const item = ITEMS[itemId];
       if (!item) { await interaction.reply({ content: '❌ Unknown item.', ephemeral: true }); return; }
@@ -4350,14 +4481,14 @@ client.on('messageCreate', async msg => {
     }, delayMs);
   }
 
-  if (targetUser.balance <= 10) {
+  if (targetUser.balance <= 25) {
     const stealerUser = getUser(userId, username);
     const penalty = Math.min(10, Math.max(0, stealerUser.balance));
     if (penalty > 0) {
       db.prepare('UPDATE balances SET balance = balance - ? WHERE user_id = ?').run(penalty, userId);
-      db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(userId, -penalty, `penalty — attempted steal from low-balance user ${target.username}`);
+      db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(userId, -penalty, `penalty — attempted steal from protected user ${target.username}`);
     }
-    await msg.reply(`**${target.username}** doesn't have enough BB to steal from. You lose **${penalty} BB** for the wasted attempt.`);
+    await msg.reply(`🛡️ **${target.username}** has **25 BB or less** and is protected from steals. You lose **${penalty} BB** for the wasted attempt.`);
     return;
   }
   if (targetUser.balance < stealAmount) { await msg.reply(`**${target.username}** only has **${targetUser.balance} BB**.`); return; }
