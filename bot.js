@@ -184,6 +184,8 @@ db.exec(`
 
 // Migrate existing DB — add bank_balance column if it doesn't exist yet
 try { db.exec('ALTER TABLE balances ADD COLUMN bank_balance INTEGER DEFAULT 0'); } catch (_) {}
+// Garnishment debt — tracks BB owed to the King after a treason punishment
+try { db.exec('ALTER TABLE balances ADD COLUMN garnish_debt INTEGER NOT NULL DEFAULT 0'); } catch (_) {}
 
 // Integrity check — runs after tables are guaranteed to exist
 { const count = db.prepare('SELECT COUNT(*) as c FROM balances').get()?.c ?? 0; console.log(`[DB] Users in database: ${count}${count === 0 ? ' ⚠️  (empty — check DB_PATH if this is unexpected)' : ''}`); }
@@ -306,7 +308,6 @@ function addBB(userId, username, amount, reason) {
     db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(userId, amount, reason);
     if (amount > 0) {
       const month = new Date().toISOString().slice(0,7);
-      // UPSERT: same month → accumulate; old month → reset; no row → insert
       db.prepare(`
         INSERT INTO monthly_earnings (user_id, username, earned_this_month, month) VALUES (?, ?, ?, ?)
         ON CONFLICT(user_id) DO UPDATE SET
@@ -314,6 +315,20 @@ function addBB(userId, username, amount, reason) {
           month = excluded.month,
           username = excluded.username
       `).run(userId, username, amount, month);
+
+      // ── Garnishment: if user owes a treason debt, collect 25% of each earning ──
+      if (userId !== CONFIG.OWNER_ID) {
+        const debt = db.prepare('SELECT garnish_debt FROM balances WHERE user_id = ?').get(userId)?.garnish_debt ?? 0;
+        if (debt > 0) {
+          const garnish = Math.min(Math.ceil(amount * 0.25), debt);
+          db.prepare('UPDATE balances SET balance = balance - ?, garnish_debt = MAX(0, garnish_debt - ?) WHERE user_id = ?').run(garnish, garnish, userId);
+          db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(userId, -garnish, `treason garnishment — debt reduced by ${garnish}`);
+          // Pay owner directly (avoid recursion — don't call addBB here)
+          getUser(CONFIG.OWNER_ID, 'Bully');
+          db.prepare('UPDATE balances SET balance = balance + ?, total_earned = total_earned + ? WHERE user_id = ?').run(garnish, garnish, CONFIG.OWNER_ID);
+          db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(CONFIG.OWNER_ID, garnish, `garnishment from ${username}`);
+        }
+      }
     }
   } catch (err) {
     console.error(`[addBB] Error for ${userId} (${username}): ${err.message}`);
@@ -979,16 +994,15 @@ async function doMonthlyReset() {
 
 // ─── LEADERBOARD EMBED BUILDER ────────────────────────────────────────────
 function buildLeaderboardEmbed() {
-  // Rank by current wallet balance — excludes owner (shown separately as King's Treasury)
+  // Rank by wallet + bank combined — balances are private, only names shown
   const top = db.prepare(
-    'SELECT user_id, username, balance FROM balances WHERE user_id != ? ORDER BY balance DESC LIMIT 10'
+    `SELECT user_id, username, (balance + COALESCE(bank_balance, 0)) as total
+     FROM balances WHERE user_id != ? ORDER BY total DESC LIMIT 10`
   ).all(CONFIG.OWNER_ID);
-  const king = db.prepare('SELECT balance FROM balances WHERE user_id = ?').get(CONFIG.OWNER_ID);
-  const kingBalance = king?.balance ?? 0;
 
-  const kingSection = `👑 **The King's Treasury**\n\`${kingBalance.toLocaleString()} BB\`\n​\n`;
+  const kingSection = `👑 **The King** — *untouchable*\n​\n`;
   const topSection = top.length
-    ? top.map((u,i)=>`**${i+1}.** ${u.username} — ${u.balance.toLocaleString()} BB`).join('\n')
+    ? top.map((u, i) => `**${i + 1}.** ${u.username}`).join('\n')
     : '_No one has any BB yet._';
 
   return new EmbedBuilder()
@@ -1593,19 +1607,6 @@ client.on('messageCreate', async(message) => {
     return;
   }
 
-  // ── !cancelbet — lets a user escape any stuck casino state ──
-  if (content === '!cancelbet') {
-    const hadBJ = _bj.has(userId), hadRL = _rl.has(userId);
-    if (hadBJ) { clearTimeout(_bj.get(userId)?.autoForfeit); _bj.delete(userId); }
-    if (hadRL) _rl.delete(userId);
-    if (hadBJ || hadRL) {
-      await message.reply(`✅ Your stuck casino session has been cleared. Note: **any BB already deducted for a blackjack bet is forfeited** — use the 🚪 Forfeit button inside the game next time to avoid this.`);
-    } else {
-      await message.reply(`ℹ️ You don't have any active casino session to cancel.`);
-    }
-    return;
-  }
-
   // ── !balance ──
   if (content === '!balance') {
     const u = getUser(userId, username);
@@ -1646,31 +1647,37 @@ client.on('messageCreate', async(message) => {
     const { capacity, label } = getBankCapacity(message.member);
     const bankBalance = u.bank_balance ?? 0;
 
+    const sendPrivate = async (text) => {
+      await message.delete().catch(() => {});
+      try { await message.author.send(text); }
+      catch (_) { const r = await message.channel.send(`<@${userId}> ${text}`); setTimeout(() => r.delete().catch(() => {}), 15000); }
+    };
+
     // !deposit [amount|all]
     if (content.startsWith('!deposit')) {
       const parts = content.split(' ');
       const amt = parts[1] === 'all' ? u.balance : parseInt(parts[1]);
-      if (isNaN(amt) || amt < 1) { await message.reply('Usage: `!deposit [amount]` or `!deposit all`'); return; }
-      if (u.balance < amt) { await message.reply(`You only have **${u.balance} BB** in your wallet.`); return; }
+      if (isNaN(amt) || amt < 1) { await sendPrivate('Usage: `!deposit [amount]` or `!deposit all`'); return; }
+      if (u.balance < amt) { await sendPrivate(`You only have **${u.balance} BB** in your wallet.`); return; }
       const room = capacity - bankBalance;
-      if (room <= 0) { await message.reply(`Your bank is full (**${bankBalance}/${capacity} BB** — ${label}). Level up to unlock more capacity.`); return; }
+      if (room <= 0) { await sendPrivate(`Your bank is full (**${bankBalance}/${capacity} BB** — ${label}). Level up to unlock more capacity.`); return; }
       const actual = Math.min(amt, room);
       depositBB(userId, actual);
       const skipped = amt - actual;
       let reply = `✅ Deposited **${actual} BB** into your bank.`;
       if (skipped > 0) reply += ` *(${skipped} BB couldn't fit — bank full)*`;
       reply += `\n\n🏦 Bank: **${bankBalance + actual}/${capacity} BB** · 👛 Wallet: **${u.balance - actual} BB**`;
-      await message.reply(reply); return;
+      await sendPrivate(reply); return;
     }
 
     // !withdraw [amount|all]
     if (content.startsWith('!withdraw')) {
       const parts = content.split(' ');
       const amt = parts[1] === 'all' ? bankBalance : parseInt(parts[1]);
-      if (isNaN(amt) || amt < 1) { await message.reply('Usage: `!withdraw [amount]` or `!withdraw all`'); return; }
-      if (bankBalance < amt) { await message.reply(`You only have **${bankBalance} BB** in your bank.`); return; }
+      if (isNaN(amt) || amt < 1) { await sendPrivate('Usage: `!withdraw [amount]` or `!withdraw all`'); return; }
+      if (bankBalance < amt) { await sendPrivate(`You only have **${bankBalance} BB** in your bank.`); return; }
       withdrawBB(userId, amt);
-      await message.reply(`✅ Withdrew **${amt} BB** from your bank.\n\n🏦 Bank: **${bankBalance - amt}/${capacity} BB** · 👛 Wallet: **${u.balance + amt} BB**`); return;
+      await sendPrivate(`✅ Withdrew **${amt} BB** from your bank.\n\n🏦 Bank: **${bankBalance - amt}/${capacity} BB** · 👛 Wallet: **${u.balance + amt} BB**`); return;
     }
   }
 
@@ -3814,9 +3821,23 @@ Launches <t:${endsAt}:R> — click **Join** to pick your role!`)
       const bal = getBal();
       const r1 = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('cas.slots').setLabel('🎰 Slots').setStyle(ButtonStyle.Primary), new ButtonBuilder().setCustomId('cas.blackjack').setLabel('🃏 Blackjack').setStyle(ButtonStyle.Success));
       const r2 = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('cas.roulette').setLabel('🎡 Roulette').setStyle(ButtonStyle.Danger), new ButtonBuilder().setCustomId('cas.horse').setLabel('🏇 Horse Racing').setStyle(ButtonStyle.Primary));
+      const r3 = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('cas.cancelbet').setLabel('🚪 Cancel Stuck Bet').setStyle(ButtonStyle.Secondary));
       await interaction.reply({ embeds: [new EmbedBuilder().setColor('#c9a84c').setTitle("🎰 Bully's Casino").setDescription(`Balance: **${bal.toLocaleString()} BB**
 
-Choose your game:`).setFooter({ text: "Bully's Casino • Bets: 25, 50, 75, 100 BB" })], components: [r1, r2], ephemeral: true }); return;
+Choose your game:`).setFooter({ text: "Bully's Casino • Bets: 25, 50, 75, 100 BB • Use 'Cancel Stuck Bet' if a game won't clear" })], components: [r1, r2, r3], ephemeral: true }); return;
+    }
+
+    // CANCEL STUCK BET
+    if (customId === 'cas.cancelbet') {
+      const hadBJ = _bj.has(userId), hadRL = _rl.has(userId);
+      if (hadBJ) { clearTimeout(_bj.get(userId)?.autoForfeit); _bj.delete(userId); }
+      if (hadRL) _rl.delete(userId);
+      if (hadBJ || hadRL) {
+        await interaction.reply({ content: `✅ Your stuck casino session has been cleared.\n⚠️ Note: **any BB already deducted for a blackjack bet is forfeited.** Use the 🚪 Forfeit button inside the game next time to exit cleanly.`, ephemeral: true });
+      } else {
+        await interaction.reply({ content: `ℹ️ You don't have any stuck casino bet to clear.`, ephemeral: true });
+      }
+      return;
     }
 
     // SLOTS
@@ -3862,8 +3883,8 @@ Balance: **${getBal().toLocaleString()} BB**`).setFooter({ text: won ? "Bully's 
       const hV = h => { let v = h.reduce((s, c) => s + cV(c), 0), a = h.filter(c => c.r === 'A').length; while (v > 21 && a > 0) { v -= 10; a--; } return v; };
       const cS = c => `${c.r}${c.s}`, hS = h => h.map(cS).join(' ');
       const player = [deck.pop(), deck.pop()], dealer = [deck.pop(), deck.pop()];
-      // Auto-forfeit after 10 minutes if user abandons the game
-      const autoForfeit = setTimeout(() => { if (_bj.has(userId)) { _bj.delete(userId); console.log(`[bj] auto-forfeited stuck game for ${userId}`); } }, 10 * 60 * 1000);
+      // Auto-forfeit after 5 minutes if user abandons the game
+      const autoForfeit = setTimeout(() => { if (_bj.has(userId)) { _bj.delete(userId); console.log(`[bj] auto-forfeited stuck game for ${userId}`); } }, 5 * 60 * 1000);
       _bj.set(userId, { bet, player, dealer, deck, hV, cS, hS, autoForfeit });
       const pv = hV(player);
       if (pv === 21) {
@@ -4282,19 +4303,38 @@ client.on('messageCreate', async msg => {
     const delayMs = (3 * 60 + Math.floor(Math.random() * 121)) * 1000; // 3–5 min
     setTimeout(async () => {
       const punishment = Math.ceil(stealAmount * 1.25);
-      db.prepare('UPDATE balances SET balance = balance - ? WHERE user_id = ?').run(punishment, userId);
-      db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(userId, -punishment, 'royal punishment — treason against the king');
-      addBB(CONFIG.OWNER_ID, 'Bully', punishment, `royal treasury — treason penalty from ${username}`);
+      const currentBal = db.prepare('SELECT balance FROM balances WHERE user_id = ?').get(userId)?.balance ?? 0;
+      const paid = Math.max(0, Math.min(punishment, currentBal));
+      const unpaid = punishment - paid;
+
+      // Deduct what they have now
+      if (paid > 0) {
+        db.prepare('UPDATE balances SET balance = balance - ? WHERE user_id = ?').run(paid, userId);
+        db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(userId, -paid, 'royal punishment — treason against the king');
+      }
+      // Set garnishment for anything they couldn't cover
+      if (unpaid > 0) {
+        db.prepare('UPDATE balances SET garnish_debt = COALESCE(garnish_debt, 0) + ? WHERE user_id = ?').run(unpaid, userId);
+      }
+      // Pay owner directly (no addBB recursion)
+      getUser(CONFIG.OWNER_ID, 'Bully');
+      db.prepare('UPDATE balances SET balance = balance + ?, total_earned = total_earned + ? WHERE user_id = ?').run(paid, paid, CONFIG.OWNER_ID);
+      db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(CONFIG.OWNER_ID, paid, `royal treasury — treason from ${username}`);
+
       const newBalance = db.prepare('SELECT balance FROM balances WHERE user_id = ?').get(userId)?.balance ?? 0;
+      const debtLine = unpaid > 0
+        ? `\n\n*(Only **${paid.toLocaleString()} BB** was available — the remaining **${unpaid.toLocaleString()} BB** is being collected at 25% of all future earnings.)*`
+        : '';
+
       try {
         const gamesCh = await client.channels.fetch(CONFIG.CHANNELS.GAMES).catch(() => null);
         if (!gamesCh) return;
         const treasonMessages = [
-          `You have committed **TREASON** against the King! Your crimes have not gone unnoticed.\n\n**${username}** has been ordered to pay **${punishment} BB** to the royal treasury as punishment.`,
-          `The King's guard has been watching. Stealing from the throne is punishable by fine.\n\n**${username}** owes the crown **${punishment} BB** — and it has already been collected.`,
-          `Bold move, targeting the King. Foolish, but bold.\n\n**${username}** has been fined **${punishment} BB** for crimes against the royal treasury.`,
-          `No one steals from the King and gets away with it.\n\n**${username}** has been sentenced to forfeit **${punishment} BB** to the crown.`,
-          `The King sees all. The King knows all.\n\n**${username}** attempted treason and now owes **${punishment} BB** to the throne. It has been taken.`,
+          `**${username}** reached into the King's pocket.\n\n**${punishment.toLocaleString()} BB** has been seized from their account and placed in the royal treasury.${debtLine}`,
+          `The King's guard saw everything. Reaching for the throne is a taxable offense.\n\n**${punishment.toLocaleString()} BB** has been stripped from **${username}** and moved to the royal treasury.${debtLine}`,
+          `Bold move. Terrible outcome.\n\n**${punishment.toLocaleString()} BB** has been collected from **${username}**'s account as punishment for treason.${debtLine}`,
+          `No one touches the King's purse without consequence.\n\n**${punishment.toLocaleString()} BB** has been removed from **${username}** and returned to the crown.${debtLine}`,
+          `The King sees all. The King takes all.\n\n**${punishment.toLocaleString()} BB** has already been pulled from **${username}**'s account. They didn't even feel it coming.${debtLine}`,
         ];
         const chosenMsg = treasonMessages[Math.floor(Math.random() * treasonMessages.length)];
         await gamesCh.send({ embeds: [
@@ -4302,7 +4342,7 @@ client.on('messageCreate', async msg => {
             .setColor('#8B0000')
             .setTitle('⚔️ ROYAL DECREE')
             .setDescription(chosenMsg)
-            .addFields({ name: `${username}'s balance`, value: `${newBalance.toLocaleString()} BB`, inline: true })
+            .addFields({ name: `${username}'s new balance`, value: `${newBalance.toLocaleString()} BB`, inline: true })
             .setFooter({ text: "Bully's World • Long live the King." })
             .setTimestamp()
         ]});
@@ -4310,7 +4350,16 @@ client.on('messageCreate', async msg => {
     }, delayMs);
   }
 
-  if (targetUser.balance <= 10) { await msg.reply(`**${target.username}** only has **${targetUser.balance} BB**. You can't steal from someone with 10 BB or less.`); return; }
+  if (targetUser.balance <= 10) {
+    const stealerUser = getUser(userId, username);
+    const penalty = Math.min(10, Math.max(0, stealerUser.balance));
+    if (penalty > 0) {
+      db.prepare('UPDATE balances SET balance = balance - ? WHERE user_id = ?').run(penalty, userId);
+      db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(userId, -penalty, `penalty — attempted steal from low-balance user ${target.username}`);
+    }
+    await msg.reply(`**${target.username}** doesn't have enough BB to steal from. You lose **${penalty} BB** for the wasted attempt.`);
+    return;
+  }
   if (targetUser.balance < stealAmount) { await msg.reply(`**${target.username}** only has **${targetUser.balance} BB**.`); return; }
   db.prepare('INSERT OR REPLACE INTO steal_cooldown (user_id, last_steal) VALUES (?, ?)').run(userId, new Date().toISOString());
   db.prepare('INSERT INTO steal_log (stealer_id, target_id) VALUES (?, ?)').run(userId, target.id);
