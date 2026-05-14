@@ -620,8 +620,8 @@ function decodeHTML(str) {
     .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)));
 }
 
-async function generateTriviaQuestion() {
-  const cat = OPENTDB_CATEGORIES[Math.floor(Math.random() * OPENTDB_CATEGORIES.length)];
+async function generateTriviaQuestion(catId) {
+  const cat = catId || OPENTDB_CATEGORIES[Math.floor(Math.random() * OPENTDB_CATEGORIES.length)];
   const res  = await fetch(`https://opentdb.com/api.php?amount=1&category=${cat}&type=multiple`);
   const data = await res.json();
   if (data.response_code !== 0 || !data.results?.length) throw new Error('OpenTDB returned no results');
@@ -3193,6 +3193,7 @@ client.on('interactionCreate', async interaction => {
 
     // ── TRIVIA: start ────────────────────────────────────────────────────────
     // ── TRIVIA: start ────────────────────────────────────────────────────────
+    // ── TRIVIA: category picker ───────────────────────────────────────────────
     if (customId === 'menu.trivia') {
       const cid = interaction.channelId;
       if (activeTrivia.has(cid)) { await interaction.reply({ content: '🧠 A trivia game is already running in this channel!', ephemeral: true }); return; }
@@ -3202,15 +3203,59 @@ client.on('interactionCreate', async interaction => {
         const mins = Math.floor(cdLeft / 60000), secs = Math.ceil((cdLeft % 60000) / 1000);
         await interaction.reply({ content: `⏳ Trivia on cooldown — **${mins > 0 ? mins + 'm ' : ''}${secs}s** left.`, ephemeral: true }); return;
       }
+      const catEmbed = new EmbedBuilder().setColor('#c9a84c').setTitle('🧠 BULLYLAND Trivia')
+        .setDescription('Pick a category to start the round.\n\nYou have **30 seconds** to answer once the question drops.\nFirst correct answer: **75 BB** • All others correct: **30 BB**')
+        .setFooter({ text: "Bully's World" }).setTimestamp();
+      const catRow1 = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('trivia.cat.26').setLabel('🌟 Celebrities').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('trivia.cat.12').setLabel('🎵 Music').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('trivia.cat.14').setLabel('📺 TV Shows').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('trivia.cat.11').setLabel('🎬 Movies').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('trivia.cat.21').setLabel('🏆 Sports').setStyle(ButtonStyle.Primary),
+      );
+      const catRow2 = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('trivia.cat.9').setLabel('🧠 General Knowledge').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('trivia.cat.0').setLabel('🎲 Random').setStyle(ButtonStyle.Secondary),
+      );
+      await interaction.reply({ embeds: [catEmbed], components: [catRow1, catRow2] });
+      return;
+    }
 
-      await interaction.reply({ content: '🧠 Generating a question...', ephemeral: true });
+    // ── TRIVIA: category selected — fetch question and start round ────────────
+    if (customId.startsWith('trivia.cat.')) {
+      const cid = interaction.channelId;
+      if (activeTrivia.has(cid)) { await interaction.reply({ content: '🧠 A trivia game is already running!', ephemeral: true }); return; }
+      const cdKey = `trivia.${cid}`;
+      const cdLeft = (gameCooldowns.get(cdKey) || 0) - Date.now();
+      if (cdLeft > 0) {
+        const mins = Math.floor(cdLeft / 60000), secs = Math.ceil((cdLeft % 60000) / 1000);
+        await interaction.reply({ content: `⏳ Trivia on cooldown — **${mins > 0 ? mins + 'm ' : ''}${secs}s** left.`, ephemeral: true }); return;
+      }
+
+      const TRIVIA_CATS = {
+        '26': { label: '🌟 Celebrities',      id: 26 },
+        '12': { label: '🎵 Music',             id: 12 },
+        '14': { label: '📺 TV Shows',          id: 14 },
+        '11': { label: '🎬 Movies',            id: 11 },
+        '21': { label: '🏆 Sports',            id: 21 },
+        '9':  { label: '🧠 General Knowledge', id: 9  },
+        '0':  { label: '🎲 Random',            id: OPENTDB_CATEGORIES[Math.floor(Math.random() * OPENTDB_CATEGORIES.length)] },
+      };
+      const catKey = customId.slice('trivia.cat.'.length);
+      const catInfo = TRIVIA_CATS[catKey] || TRIVIA_CATS['0'];
+
+      await interaction.update({ content: `🧠 Loading **${catInfo.label}** question...`, embeds: [], components: [] });
+
       let trivia;
-      try { trivia = await generateTriviaQuestion(); } catch { await interaction.followUp({ content: '❌ Failed to generate a question. Try again.', ephemeral: true }); return; }
+      try { trivia = await generateTriviaQuestion(catInfo.id); } catch {
+        await interaction.editReply({ content: '❌ Couldn\'t fetch a question. Try again.', embeds: [], components: [] }); return;
+      }
 
       const { question, options, answer } = trivia;
-      const triviaEmbed = new EmbedBuilder().setColor('#c9a84c').setTitle('🧠 BULLYLAND Trivia')
+      const triviaEmbed = new EmbedBuilder().setColor('#c9a84c')
+        .setTitle(`🧠 ${catInfo.label} Trivia`)
         .setDescription(`**${question}**\n\n🅰️  ${options.A}\n🅱️  ${options.B}\n🇨  ${options.C}\n🇩  ${options.D}`)
-        .setFooter({ text: "Pick an answer — results revealed when time's up! • 30 seconds" }).setTimestamp();
+        .setFooter({ text: "Lock in your answer — results revealed when time's up! • 30 seconds" }).setTimestamp();
       const triviaRow = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId('trivia.a').setLabel('A').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('trivia.b').setLabel('B').setStyle(ButtonStyle.Secondary),
@@ -3218,27 +3263,23 @@ client.on('interactionCreate', async interaction => {
         new ButtonBuilder().setCustomId('trivia.d').setLabel('D').setStyle(ButtonStyle.Secondary),
       );
       const triviaMsg = await interaction.channel.send({ embeds: [triviaEmbed], components: [triviaRow] });
+      await interaction.editReply({ content: `${catInfo.label} trivia started!`, embeds: [], components: [] }).catch(() => {});
 
-      // answered: Map userId → { choice, time } — ordered by insertion = answer order
-      const state = { question, options, answer: answer.toUpperCase(), messageId: triviaMsg.id, answered: new Map() };
+      const state = { question, options, answer: answer.toUpperCase(), catLabel: catInfo.label, messageId: triviaMsg.id, answered: new Map() };
       activeTrivia.set(cid, state);
 
-      // Auto-close after 30s — reveal answer + all results
       state.timeout = setTimeout(async () => {
         activeTrivia.delete(cid);
         gameCooldowns.set(cdKey, Date.now() + 5 * 60 * 1000);
 
-        // Determine winners in answer order
         const correct = answer.toUpperCase();
         const winners = [...state.answered.entries()].filter(([, v]) => v.choice === correct);
-        let bbLines = [];
+        const bbLines = [];
         winners.forEach(([uid, v], i) => {
           const bb = i === 0 ? 75 : 30;
-          const uname = v.username;
-          addBB(uid, uname, bb, 'trivia — correct answer');
+          addBB(uid, v.username, bb, `trivia — ${catInfo.label} correct answer`);
           bbLines.push(`<@${uid}> +${bb} BB`);
         });
-
         const disabledRow = new ActionRowBuilder().addComponents(
           ['A','B','C','D'].map(l => new ButtonBuilder()
             .setCustomId(`trivia.${l.toLowerCase()}_done`)
@@ -3248,7 +3289,7 @@ client.on('interactionCreate', async interaction => {
           )
         );
         const resultEmbed = new EmbedBuilder().setColor(winners.length ? '#2ecc71' : '#8B0000')
-          .setTitle('🧠 BULLYLAND Trivia — Results')
+          .setTitle(`🧠 ${catInfo.label} Trivia — Results`)
           .setDescription(`**${question}**\n\n🅰️  ${options.A}\n🅱️  ${options.B}\n🇨  ${options.C}\n🇩  ${options.D}`)
           .addFields({ name: `✅ Answer: ${correct} — ${options[correct]}`, value: winners.length ? bbLines.join('\n') : 'Nobody got it right.' })
           .setFooter({ text: "Bully's World" }).setTimestamp();
@@ -3263,7 +3304,7 @@ client.on('interactionCreate', async interaction => {
       const state = activeTrivia.get(cid);
       if (!state) { await interaction.reply({ content: '⏰ No active trivia game.', ephemeral: true }); return; }
       if (state.answered.has(userId)) { await interaction.reply({ content: '🔒 You already locked in an answer.', ephemeral: true }); return; }
-      const chosen = customId.slice(-1).toUpperCase(); // 'a' → 'A'
+      const chosen = customId.slice(-1).toUpperCase();
       state.answered.set(userId, { choice: chosen, username });
       await interaction.reply({ content: `🤫 Answer locked in. Results drop when the timer ends.`, ephemeral: true });
       return;
