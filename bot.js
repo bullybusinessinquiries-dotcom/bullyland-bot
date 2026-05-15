@@ -837,10 +837,12 @@ const HANGMAN_STAGES = [
 ];
 
 function buildHangmanDisplay(word, guessed) {
-  // Each word shown as connected chars/underscores, words separated by 3 spaces
-  // e.g. "DOGS ARE GREAT" with A,R guessed → "D__S  AR_  _R_A_"
+  // Each character slot spaced out so players can clearly count letters per word.
+  // Non-alpha characters (apostrophes, hyphens, etc.) are always shown.
+  // Words separated by extra space so phrase/sentence structure is obvious.
+  // e.g. "DOGS ARE GREAT" with A,R,G guessed → "D _ G _   A R _   G R _ A _"
   return word.split(' ')
-    .map(w => w.split('').map(c => guessed.has(c) ? c : '_').join(''))
+    .map(w => w.split('').map(c => /[A-Z]/i.test(c) ? (guessed.has(c) ? c : '_') : c).join(' '))
     .join('   ');
 }
 
