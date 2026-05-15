@@ -3423,8 +3423,9 @@ client.on('messageCreate', async msg => {
   if (msg.author?.bot || !msg.guild) return;
   if (TESTING_MODE && !hasAccess(msg.member)) return;
   if (msg.content.trim().toLowerCase() !== '!bullygames') return;
+  const _isAdmin = msg.member?.permissions.has(PermissionsBitField.Flags.Administrator);
   const GAME_CHANNELS = [CONFIG.CHANNELS.GAMES];
-  if (!GAME_CHANNELS.includes(msg.channelId)) {
+  if (!_isAdmin && !GAME_CHANNELS.includes(msg.channelId)) {
     const r = await msg.reply(`🎮 Games only run in <#${CONFIG.CHANNELS.GAMES}>. Head over there!`);
     setTimeout(() => r.delete().catch(() => {}), 6000);
     await msg.delete().catch(() => {});
