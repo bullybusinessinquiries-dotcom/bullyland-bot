@@ -1120,7 +1120,7 @@ function buildLeaderboardEmbed() {
   const kingTotal = king ? (king.balance + king.bank) : 0;
   const kingSection = `👑 **The King** — **${kingTotal.toLocaleString()} BB** *(untouchable)*\n​\n`;
   const topSection = top.length
-    ? top.map((u, i) => `**${i + 1}.** ${u.username} — **${u.total.toLocaleString()} BB**`).join('\n')
+    ? top.map((u, i) => `**${i + 1}.** ${u.username}`).join('\n')
     : '_No one has any BB yet._';
 
   return new EmbedBuilder()
@@ -2501,6 +2501,56 @@ Check your balance with !balance.`)
     if (!mention) { await message.reply('Usage: !balancecheck @user'); return; }
     const u = getUser(mention.id, mention.username);
     await message.reply(`${mention.username}: **${u.balance} BB** | Total earned: ${u.total_earned} BB | Streak: ${u.streak||0} days`); return;
+  }
+
+  // ── !balanceid <userId> — look up any user's balance by raw ID (no mention needed) ──
+  if (content.startsWith('!balanceid ')) {
+    const targetId = message.content.trim().split(/\s+/)[1];
+    if (!targetId) { await message.reply('Usage: `!balanceid <userId>`'); return; }
+    const u = db.prepare('SELECT * FROM balances WHERE user_id = ?').get(targetId);
+    if (!u) { await message.reply(`No record found for user ID \`${targetId}\`.`); return; }
+    const bank = u.bank_balance ?? 0;
+    const total = u.balance + bank;
+    const embed = new EmbedBuilder()
+      .setColor('#1a1a1a')
+      .setTitle(`🔍 Balance Lookup — ${u.username}`)
+      .addFields(
+        { name: '🆔 User ID',       value: `\`${targetId}\``,                    inline: false },
+        { name: '👛 Wallet',        value: `**${u.balance.toLocaleString()} BB**`, inline: true  },
+        { name: '🏦 Bank',          value: `**${bank.toLocaleString()} BB**`,      inline: true  },
+        { name: '💰 Total',         value: `**${total.toLocaleString()} BB**`,     inline: true  },
+        { name: '📈 Total Earned',  value: `${u.total_earned.toLocaleString()} BB`, inline: true },
+        { name: '🔥 Streak',        value: `${u.streak || 0} days`,               inline: true  },
+      )
+      .setFooter({ text: "Admin View • Bully's World" }).setTimestamp();
+    await message.reply({ embeds: [embed] }); return;
+  }
+
+  // ── !adminlb — full leaderboard with exact amounts, admin eyes only ──
+  if (content === '!adminlb' || content.startsWith('!adminlb ')) {
+    const page = parseInt(message.content.trim().split(/\s+/)[1]) || 1;
+    const pageSize = 20;
+    const offset = (page - 1) * pageSize;
+    const rows = db.prepare(
+      `SELECT user_id, username, balance, COALESCE(bank_balance, 0) as bank,
+              (balance + COALESCE(bank_balance, 0)) as total, total_earned, streak
+       FROM balances ORDER BY total DESC LIMIT ? OFFSET ?`
+    ).all(pageSize, offset);
+    const totalUsers = db.prepare('SELECT COUNT(*) as c FROM balances').get().c;
+    const totalPages = Math.ceil(totalUsers / pageSize);
+    if (!rows.length) { await message.reply(`No users found on page ${page}.`); return; }
+    const lines = rows.map((u, i) => {
+      const rank = offset + i + 1;
+      const kingMark = u.user_id === CONFIG.OWNER_ID ? ' 👑' : '';
+      return `**${rank}.** ${u.username}${kingMark} — 💰 ${u.total.toLocaleString()} BB *(👛 ${u.balance.toLocaleString()} · 🏦 ${u.bank.toLocaleString()})* · ID: \`${u.user_id}\``;
+    });
+    const embed = new EmbedBuilder()
+      .setColor('#c9a84c')
+      .setTitle(`📊 Admin Leaderboard — Page ${page}/${totalPages}`)
+      .setDescription(lines.join('\n'))
+      .setFooter({ text: `${totalUsers} total users · !adminlb [page] · !balanceid <userId>` })
+      .setTimestamp();
+    await message.reply({ embeds: [embed] }); return;
   }
   if (content.startsWith('!adjust ')) {
     const mention = message.mentions.users.first(); const amount = parseInt(message.content.trim().split(' ')[2]);
