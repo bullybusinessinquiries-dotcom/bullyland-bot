@@ -448,7 +448,7 @@ async function sendSuperfanPaycheck(member, isFirstTime = false) {
   await member.send({ embeds: [embed] }).catch(() => {});
 }
 
-// ── Weekly booster payouts — runs every Monday at noon CT ────────────────────
+// ── Weekly booster payouts — runs every Friday at noon CT ────────────────────
 async function runBoosterPayouts() {
   try {
     const guild = await client.guilds.fetch(CONFIG.GUILD_ID);
@@ -468,7 +468,7 @@ async function runBoosterPayouts() {
   } catch (e) { console.error('[Booster] Payout error:', e.message); }
 }
 
-// ── Weekly superfan payouts — runs every Monday at noon CT ───────────────────
+// ── Weekly superfan payouts — runs every Friday at noon CT ───────────────────
 async function runSuperfanPayouts() {
   try {
     const guild = await client.guilds.fetch(CONFIG.GUILD_ID);
@@ -3225,8 +3225,8 @@ function startScheduler() {
   if (firstDraw > new Date()) schedule.scheduleJob(firstDraw, ()=>runGiveaway());
   schedule.scheduleJob({ rule:'0 12 1 2,5,8,11 *', tz:CONFIG.TIMEZONE }, ()=>runGiveaway());
 
-  // Booster + Superfan Club weekly paychecks — every Monday at 12pm CT
-  schedule.scheduleJob({ rule: '0 12 * * 1', tz: CONFIG.TIMEZONE }, () => {
+  // Booster + Superfan Club weekly paychecks — every Friday at 12pm CT
+  schedule.scheduleJob({ rule: '0 12 * * 5', tz: CONFIG.TIMEZONE }, () => {
     runBoosterPayouts();
     runSuperfanPayouts();
   });
