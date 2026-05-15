@@ -225,33 +225,75 @@ function updatePsychology(db, userId, username, category, tone) {
   }
 }
 
-// ─── IMAGE LOADER ─────────────────────────────────────────────────────────────
-// Reads all images from dailyq/images/ and returns them as a rotating pool.
-// Images are cycled in order (no random repeats) using a simple index stored in
-// the dq_posts table count. Add any .png/.jpg/.gif/.webp files to that folder.
-const IMAGES_DIR = path.join(__dirname, 'images');
-let _imagePool   = null; // lazy-loaded
+// ─── MORNING IMAGE LOADER ─────────────────────────────────────────────────────
+// Reads from dailyq/morning/ — drop your good morning images there.
+// Falls back to dailyq/images/ if morning/ is empty or missing.
+// Picks randomly without repeating until every image has been used, then reshuffles.
+// Shuffle state is persisted in dailyq/morning_state.json across restarts.
+const MORNING_DIR  = path.join(__dirname, 'morning');
+const IMAGES_DIR   = path.join(__dirname, 'images');
+const IMG_STATE    = path.join(__dirname, 'morning_state.json');
 
-function getImagePool() {
-  if (_imagePool !== null) return _imagePool;
-  try {
-    const files = fs.readdirSync(IMAGES_DIR)
-      .filter(f => /\.(png|jpg|jpeg|gif|webp)$/i.test(f))
-      .map(f => path.join(IMAGES_DIR, f));
-    _imagePool = files;
-    console.log(`[DailyQ] ${files.length} image${files.length !== 1 ? 's' : ''} loaded from dailyq/images/`);
-  } catch (_) {
-    _imagePool = [];
-    console.log('[DailyQ] No images/ folder found — posting without images');
+function loadImageFiles() {
+  for (const dir of [MORNING_DIR, IMAGES_DIR]) {
+    try {
+      const files = fs.readdirSync(dir)
+        .filter(f => /\.(png|jpg|jpeg|gif|webp)$/i.test(f))
+        .sort()
+        .map(f => path.join(dir, f));
+      if (files.length) {
+        console.log(`[DailyQ] ${files.length} morning images loaded from ${path.basename(dir)}/`);
+        return files;
+      }
+    } catch (_) {}
   }
-  return _imagePool;
+  console.log('[DailyQ] No morning images found — posting without image');
+  return [];
 }
 
-function pickImage(postCount) {
-  const pool = getImagePool();
-  if (!pool.length) return null;
-  // Rotate in order so every image gets used before repeating
-  return pool[postCount % pool.length];
+function fisherYates(arr) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+function pickImage() {
+  const files = loadImageFiles();
+  if (!files.length) return null;
+
+  let state = { order: [], index: 0 };
+  try { state = JSON.parse(fs.readFileSync(IMG_STATE, 'utf8')); } catch (_) {}
+
+  // Reshuffle when exhausted or pool size changed (new images added/removed)
+  if (!state.order.length || state.index >= state.order.length || state.order.length !== files.length) {
+    state.order = fisherYates(files);
+    state.index = 0;
+    console.log('[DailyQ] Image pool reshuffled');
+  }
+
+  const chosen = state.order[state.index++];
+  try { fs.writeFileSync(IMG_STATE, JSON.stringify(state), 'utf8'); } catch (_) {}
+  return chosen;
+}
+
+// ─── QUOTE FETCHER ────────────────────────────────────────────────────────────
+// ZenQuotes (primary, curated daily quote) → Quotable (fallback, random).
+// Both are free with no API key required.
+async function fetchQuote() {
+  try {
+    const res  = await fetch('https://zenquotes.io/api/today', { signal: AbortSignal.timeout(6000) });
+    const data = await res.json();
+    if (data?.[0]?.q && data[0].q !== '...') return { text: data[0].q, author: data[0].a };
+  } catch (_) {}
+  try {
+    const res  = await fetch('https://api.quotable.io/random?minLength=60&maxLength=280', { signal: AbortSignal.timeout(6000) });
+    const data = await res.json();
+    if (data?.content) return { text: data.content, author: data.author };
+  } catch (_) {}
+  return null;
 }
 
 // ─── TONE EMOJIS (decorative only) ───────────────────────────────────────────
@@ -294,7 +336,7 @@ const dailyQ = {
     const c = CFG.closeTime;
     schedule.scheduleJob({ hour: c.hour, minute: c.minute, tz: c.timezone }, () => this.closeActivePost());
 
-    console.log('[DailyQ] Initialized — posts scheduled 9am / closes 9pm Chicago');
+    console.log('[DailyQ] Initialized — posts scheduled 8am / closes 9pm Chicago');
   },
 
   // ── Catch-up: run on every restart to handle missed scheduled events ────────
@@ -315,11 +357,6 @@ const dailyQ = {
       return;
     }
 
-    // Bot came back AFTER post time, BEFORE close time, and nothing was posted — post now
-    if (nowMins >= postMins && nowMins < closeMins && !this.activePost) {
-      console.log('[DailyQ] Catch-up: bot missed post window — posting now');
-      this.postDailyQuestion().catch(e => console.error('[DailyQ] Catch-up post error:', e.message));
-    }
   },
 
   _restoreActive() {
@@ -353,26 +390,29 @@ const dailyQ = {
 
     const q = selectQuestion(this.db) || generateFromTemplate();
 
-    // How many posts have gone out so far (used for image rotation index)
-    const postCount = this.db.prepare('SELECT COUNT(*) as c FROM dq_posts').get()?.c ?? 0;
-    const imagePath = pickImage(postCount);
+    const imagePath = pickImage();
 
-    const description =
-      `${CFG.display.greeting}\n` +
-      `**${q.question}**\n\n` +
-      `${CFG.display.cta}`;
+    // Fetch quote — don't let a network failure block the post
+    const quote = await fetchQuote().catch(() => null);
+
+    let desc = '';
+    if (quote) desc += `*"${quote.text}"*\n— **${quote.author}**\n\n`;
+    desc += `─────────────────────\n\n`;
+    desc += `**${q.question}**\n\n`;
+    desc += CFG.display.cta;
 
     const embed = new EmbedBuilder()
       .setColor('#c9a84c')
-      .setDescription(description)
+      .setTitle('☀️ Good Morning, Bully\'s World')
+      .setDescription(desc)
       .setFooter({ text: CFG.display.footerText })
       .setTimestamp();
 
-    const sendOpts = { embeds: [embed] };
+    const sendOpts = { content: '@everyone', embeds: [embed] };
 
     if (imagePath) {
-      const attachment = new AttachmentBuilder(imagePath, { name: 'daily.png' });
-      embed.setImage('attachment://daily.png');
+      const attachment = new AttachmentBuilder(imagePath, { name: 'morning.png' });
+      embed.setImage('attachment://morning.png');
       sendOpts.files = [attachment];
     }
 
@@ -531,6 +571,14 @@ const dailyQ = {
     if (content === '!dailyq post') {
       await this.postDailyQuestion();
       await message.reply('✅ Daily question posted.').then(r => setTimeout(() => r.delete().catch(() => {}), 5000));
+      await message.delete().catch(() => {});
+      return true;
+    }
+
+    if (content === '!dailyq force') {
+      if (this.activePost) await this.closeActivePost();
+      await this.postDailyQuestion();
+      await message.reply('✅ Force-posted daily question.').then(r => setTimeout(() => r.delete().catch(() => {}), 5000));
       await message.delete().catch(() => {});
       return true;
     }

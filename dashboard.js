@@ -170,30 +170,82 @@ const ARCHETYPE_INTEL = {
   },
 };
 
-// ─── CATEGORY → CONTENT INSIGHT ───────────────────────────────────────────────
+// ─── CATEGORY → SHORT INSIGHT (used in topic resonance table) ─────────────────
 const CATEGORY_INTEL = {
-  emotional_comfort:        'They want to feel safe and understood. Warmth and reassurance in your content will land.',
-  emotional_safety:         'Trust is everything to these users. Consistency and authenticity build your hold on them.',
-  loneliness:               'Your community is filling a real void for these users. Community-first content has outsized impact.',
-  attention_triggers:       'This segment wants to be seen. Shout-outs, mentions, and audience-focused content drives their loyalty.',
-  attraction:               'Aesthetic and image-conscious content performs well. Visual quality and style matter to this group.',
-  social_energy:            'Hype-driven content and community energy keep this group engaged.',
-  boredom:                  'Entertainment is the hook. If it\'s not engaging in 3 seconds, you\'ve lost them.',
-  chaos_vs_stability:       'These users are thinking about structure vs. freedom. Authentic and unfiltered content resonates.',
-  humor:                    'Comedy is a direct path to their loyalty. Don\'t be afraid to be funny and self-aware.',
-  trust:                    'They need to believe in you before they\'ll buy from you. Consistency over time is your biggest asset.',
-  interpersonal_values:     'Relationships and character matter to them. Show who you are as a person.',
-  conflict:                 'Bold opinions and directness earn their respect. Don\'t soften everything.',
-  confidence:               'They\'re drawn to people who own their identity without apology.',
-  validation:               'Acknowledging your audience\'s experience and perspective builds deep connection.',
-  memory_nostalgia:         'Throwbacks, origin stories, and milestone content hits hard with this group.',
-  social_dynamics:          'Content about culture, trends, and group behavior gets engagement.',
-  communication_style:      'How you say things matters as much as what you say. Voice and tone are crucial.',
-  emotional_intelligence:   'Depth and nuance in your content earns outsized respect from this segment.',
-  insecurity:               'Vulnerability and honesty about your own struggles builds exceptional loyalty.',
-  personality_preference:   'Authenticity and individuality are their filters. Be yourself — loudly.',
-  lifestyle_preferences:    'Aspirational content showing your actual lifestyle converts well.',
-  routine:                  'Consistency and ritual-building keeps this group coming back.',
+  social_motivators:   'They\'re here for belonging. The community itself is their product — recognition and inclusion drive loyalty.',
+  communication_needs: 'How you say it matters as much as what you say. Tone, voice, and format are deciding factors for this group.',
+  pain_points:         'They\'re working through something. Content that says "I get it" builds deeper loyalty than anything polished.',
+  emotional_triggers:  'They act on feeling. Logic doesn\'t close them — emotion does. Create the feeling first.',
+  aspirations:         'They\'re chasing a version of their life. Sell the destination, not the product.',
+  core_values:         'They need to agree with you before they trust you. Integrity and consistency are non-negotiable.',
+  self_image:          'Identity is the product for these users. They buy things that say something about who they are.',
+};
+
+// ─── COMMUNITY INTEL (per-category full personality + sales profile) ───────────
+const COMMUNITY_INTEL = {
+  social_motivators: {
+    emoji: '🤝',
+    color: '#3498db',
+    label: 'The Belongers',
+    who: 'These people joined for the feeling of being part of something. The content matters, but the community is what keeps them. They need to feel included, seen, and like there\'s a place for them here specifically.',
+    stays: 'Recognition. Shout them out. Give them roles, status, and reasons to feel like insiders. When the community goes through something, they stay loyal because they\'re loyal to the people, not just the creator.',
+    sells: 'Membership, exclusivity, and anything that deepens their sense of belonging. "Join the club" framing converts them. FOMO is a real driver — they don\'t want to miss what the group is part of.',
+    avoid: 'Making them feel like just a number. Ignoring the community to chase new followers will bleed this segment out fast.',
+  },
+  communication_needs: {
+    emoji: '🗣️',
+    color: '#9b59b6',
+    label: 'The Listeners',
+    who: 'These users are highly attuned to how you communicate. They\'re evaluating your tone, your word choice, and whether what you say feels real. They engage with people who talk to them, not at them.',
+    stays: 'Consistency in how you show up. They notice when the energy shifts, when something feels forced, or when you\'re clearly reading a script. Be the same person across every post.',
+    sells: 'Conversation-style content converts them. Direct, personal messaging. The less it feels like a pitch and the more it feels like a conversation, the better.',
+    avoid: 'Corporate tone, copy-paste captions, or anything that feels like it was written for a brand deck. They can tell.',
+  },
+  pain_points: {
+    emoji: '🩹',
+    color: '#e74c3c',
+    label: 'The Processors',
+    who: 'These users are working through something — a chapter, a loss, a version of themselves they\'re trying to leave behind. They engage most with content that names what they\'re feeling before they\'ve named it themselves.',
+    stays: 'They stay when they feel understood. Not fixed, not coached — just understood. If your content or community has been a safe place during a hard time, you own a piece of their trust that\'s almost impossible to lose.',
+    sells: 'Transformation-framed products. "This is for the version of you that\'s getting there." Growth, tools, and self-investment. They don\'t buy luxury — they buy progress.',
+    avoid: 'Toxic positivity. "Just be grateful" energy will lose them immediately. Acknowledge the hard part before you offer the solution.',
+  },
+  emotional_triggers: {
+    emoji: '⚡',
+    color: '#f39c12',
+    label: 'The Feelers',
+    who: 'These users run entirely on feeling. What makes them stop scrolling, what makes them share something, what makes them buy — it\'s never logical. It\'s always emotional first. They\'re your most reactive segment — in both directions.',
+    stays: 'Content that consistently makes them feel something keeps them coming back. Doesn\'t have to be deep — can be funny, exciting, nostalgic, warm. As long as it hits.',
+    sells: 'Urgency and feeling. A limited drop with an emotional hook will convert faster than any rational offer. Create the feeling of "I need to be part of this right now."',
+    avoid: 'Dry, informational content. If it doesn\'t evoke a reaction within seconds, this segment is already gone.',
+  },
+  aspirations: {
+    emoji: '🚀',
+    color: '#2ecc71',
+    label: 'The Builders',
+    who: 'These users have somewhere they\'re trying to get to. They see their life as a project and they\'re actively building toward a version of themselves or their circumstances. They follow people who seem further down the road.',
+    stays: 'Progress content. Show the journey, not just the destination. Let them see you moving, evolving, building — because it mirrors what they\'re doing and makes them feel less alone in it.',
+    sells: 'Aspirational positioning. "This is for people who are serious about where they\'re going." Early access, exclusive tiers, and anything that feels like an investment in their future hits. Price is less of a barrier for this group — they frame it as an investment.',
+    avoid: 'Stagnation. If you stop evolving visibly, they move on to someone who appears to be winning.',
+  },
+  core_values: {
+    emoji: '🏛️',
+    color: '#c9a84c',
+    label: 'The Principled',
+    who: 'These users have a clear sense of what they stand for and they\'re watching to see if you do too. They\'re not easily impressed and they\'re not easily converted — but once they\'re in, they\'re in for real. They defend people they respect.',
+    stays: 'Integrity. Say what you mean. Do what you say. Take stands even when it costs you something. This segment watches how you handle controversy more than how you handle success.',
+    sells: 'Alignment over persuasion. They won\'t buy from someone whose values they don\'t respect regardless of the deal. But if they respect you? They buy without needing to be sold to. Limited drops framed around a belief or a statement convert them.',
+    avoid: 'Flip-flopping, over-apologizing, or changing your position based on public pressure. It signals weakness to this group and you lose them permanently.',
+  },
+  self_image: {
+    emoji: '🪞',
+    color: '#8e44ad',
+    label: 'The Identity-Driven',
+    who: 'These users see what they consume and who they follow as extensions of who they are. Being part of your community says something about them in their own mind. They\'re invested in the image — both yours and theirs.',
+    stays: 'Content that makes them feel like being a fan of you is something to be proud of. Elevate the community\'s identity. Make it mean something to be here.',
+    sells: 'Identity products. Anything they can wear, display, or signal publicly. They\'re not buying a hoodie — they\'re buying a statement. Premium pricing often works in your favor here because it adds perceived identity value.',
+    avoid: 'Cheapening the brand. Mass-market moves, low-effort content, or anything that makes being a fan feel like something anyone can stumble into. Exclusivity is what keeps this segment engaged.',
+  },
 };
 
 // ─── TONE → CONTENT INSIGHT ───────────────────────────────────────────────────
@@ -213,13 +265,14 @@ const TONE_INTEL = {
   gossip_style:            'Entertaining, informal storytelling keeps your audience hooked.',
   girl_group_chat:         'Relatable, community-driven content builds belonging and loyalty.',
   toxic:                   'Provocative content drives engagement — use intentionally.',
+  philosophical:           'Your audience thinks deeply. Content that asks real questions will earn more trust than content that just entertains.',
 };
 
 // ─── HTML TEMPLATE ─────────────────────────────────────────────────────────────
 function buildHTML(data) {
   const {
     totalUsers, totalResponses, archetypes, topCategories, topTones,
-    dominantArchetype, dominantCategory, dominantTone, contentStrategy,
+    dominantArchetype, dominantCategory, dominantTone, contentStrategy, communityProfile,
   } = data;
 
   const archetypeCards = archetypes.map(a => {
@@ -280,6 +333,46 @@ function buildHTML(data) {
   }).join('');
 
   const strategyItems = contentStrategy.map(s => `<li>✦ ${s}</li>`).join('');
+
+  // Community profile cards
+  const profileCards = communityProfile.map((p, i) => {
+    const intel = COMMUNITY_INTEL[p.category];
+    if (!intel) return '';
+    const barWidth = communityProfile[0].pct > 0 ? Math.round((p.pct / communityProfile[0].pct) * 100) : 0;
+    const rank = i === 0 ? '👑 #1 Dominant Type' : i === 1 ? '#2 Second Largest' : `#${i + 1}`;
+    return `
+      <div class="profile-card" style="border-left: 4px solid ${intel.color}">
+        <div class="profile-header">
+          <span class="profile-emoji">${intel.emoji}</span>
+          <div class="profile-title-block">
+            <div class="profile-rank">${rank}</div>
+            <div class="profile-name">${intel.label}</div>
+            <div class="profile-bar-wrap">
+              <div class="profile-bar" style="width:${barWidth}%;background:${intel.color}"></div>
+            </div>
+          </div>
+          <div class="profile-pct" style="color:${intel.color}">${p.pct}%</div>
+        </div>
+        <div class="profile-grid">
+          <div class="profile-block">
+            <div class="profile-label">👤 Who they are</div>
+            <p>${intel.who}</p>
+          </div>
+          <div class="profile-block">
+            <div class="profile-label">📌 What keeps them here</div>
+            <p>${intel.stays}</p>
+          </div>
+          <div class="profile-block">
+            <div class="profile-label">💰 What sells to them</div>
+            <p>${intel.sells}</p>
+          </div>
+          <div class="profile-block warn-block">
+            <div class="profile-label">⚠️ What loses them</div>
+            <p>${intel.avoid}</p>
+          </div>
+        </div>
+      </div>`;
+  }).join('');
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -352,6 +445,24 @@ function buildHTML(data) {
   .empty { text-align: center; padding: 60px 24px; color: var(--muted); }
   .empty p { margin-top: 8px; font-size: 13px; }
 
+  .profile-card { background: var(--surface2); border: 1px solid var(--border); border-radius: 12px; padding: 24px; margin-bottom: 20px; }
+  .profile-header { display: flex; align-items: center; gap: 16px; margin-bottom: 20px; }
+  .profile-emoji { font-size: 32px; line-height: 1; flex-shrink: 0; }
+  .profile-title-block { flex: 1; }
+  .profile-rank { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); margin-bottom: 4px; }
+  .profile-name { font-size: 20px; font-weight: 700; color: var(--text); margin-bottom: 10px; }
+  .profile-bar-wrap { height: 6px; background: #1e1e1e; border-radius: 3px; width: 100%; max-width: 300px; }
+  .profile-bar { height: 6px; border-radius: 3px; }
+  .profile-pct { font-size: 36px; font-weight: 800; flex-shrink: 0; line-height: 1; }
+  .profile-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 700px) { .profile-grid { grid-template-columns: 1fr; } }
+  .profile-block { background: var(--bg); border-radius: 8px; padding: 14px 16px; }
+  .profile-label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); margin-bottom: 8px; }
+  .profile-block p { color: #ccc; font-size: 13px; line-height: 1.6; }
+  .warn-block { background: #1a0f0f; border: 1px solid #2e1212; }
+  .warn-block .profile-label { color: #c0392b; }
+  .warn-block p { color: #e88; }
+
   footer { text-align: center; color: var(--muted); font-size: 11px; padding: 32px; }
 </style>
 </head>
@@ -372,15 +483,20 @@ function buildHTML(data) {
     <div class="stat-box"><div class="val">${dominantArchetype || '—'}</div><div class="lbl">Dominant Archetype</div></div>
   </div>
 
+  <div class="section">
+    <div class="section-title">🧠 Community Profile — Who Your People Actually Are</div>
+    ${communityProfile.length ? profileCards : `<div class="empty"><strong>No profile data yet.</strong><p>Data builds as members answer daily questions. Each answer moves them closer to a type.</p></div>`}
+  </div>
+
   ${contentStrategy.length ? `
   <div class="strategy-box">
-    <h2>🧭 Content Strategy — What Your Data Is Telling You</h2>
-    <p class="sub">Derived from your audience's response patterns. These are not guesses.</p>
+    <h2>🧭 What Your Data Is Telling You Right Now</h2>
+    <p class="sub">Derived directly from how your community engages. These are not guesses.</p>
     <ul>${strategyItems}</ul>
   </div>` : ''}
 
   <div class="section">
-    <div class="section-title">🧠 Audience Archetypes — Who Your Community Actually Is</div>
+    <div class="section-title">📊 Archetype Breakdown — Personality Mix</div>
     ${archetypes.length ? archetypeCards : `<div class="empty"><strong>No psychology data yet.</strong><p>Data builds as users respond to daily questions. Come back after a few days of posts.</p></div>`}
   </div>
 
@@ -454,38 +570,87 @@ function buildAnalyticsData(db) {
   const dominantCategory  = topCategories[0]?.category?.replace(/_/g, ' ') || null;
   const dominantTone      = topTones[0]?.tone || null;
 
-  // Generate plain-English content strategy from top signals
-  const contentStrategy = [];
-  const da  = ARCHETYPE_INTEL[dominantArchetype];
-  if (da && da.content.length) {
-    contentStrategy.push(`Your dominant archetype is **${dominantArchetype}** (${archetypes[0]?.count} users). ${da.headline} ${da.buys}`);
-    da.content.slice(0, 2).forEach(c => contentStrategy.push(c));
+  // ── Community profile: each user's dominant category = their "type" ──────────
+  const allPsychRows = db.prepare('SELECT cat_counts FROM dq_psychology WHERE cat_counts IS NOT NULL').all();
+  const dominantCounts = {};
+  for (const row of allPsychRows) {
+    try {
+      const counts = JSON.parse(row.cat_counts || '{}');
+      const entries = Object.entries(counts).filter(([, n]) => n > 0);
+      if (!entries.length) continue;
+      const dominant = entries.sort((a, b) => b[1] - a[1])[0][0];
+      dominantCounts[dominant] = (dominantCounts[dominant] || 0) + 1;
+    } catch (_) {}
   }
-  if (dominantCategory && CATEGORY_INTEL[dominantCategory.replace(/ /g,'_')]) {
-    contentStrategy.push(`Top topic engagement: **${dominantCategory}** — ${CATEGORY_INTEL[dominantCategory.replace(/ /g,'_')]}`);
+  const communityProfile = Object.entries(dominantCounts)
+    .map(([category, count]) => ({
+      category,
+      count,
+      pct: totalUsers > 0 ? Math.round((count / totalUsers) * 100) : 0,
+    }))
+    .sort((a, b) => b.count - a.count);
+
+  // ── Cross-segment insights: what combinations reveal ─────────────────────────
+  const crossInsights = [];
+  const profileMap = Object.fromEntries(communityProfile.map(p => [p.category, p.pct]));
+  if ((profileMap.social_motivators || 0) >= 30) {
+    crossInsights.push('Over a third of your community is here primarily for belonging. The community itself is your best product — when people feel included and recognized, they stay and they spend.');
   }
-  if (dominantTone && TONE_INTEL[dominantTone]) {
-    contentStrategy.push(`Top tone: **${dominantTone}** — ${TONE_INTEL[dominantTone]}`);
+  if ((profileMap.pain_points || 0) >= 20) {
+    crossInsights.push('A significant portion of your audience is working through something. They need to feel understood, not just entertained. "I\'ve been there" content builds loyalty that\'s almost impossible to lose.');
   }
-  if (archetypes.length >= 2) {
-    const second = ARCHETYPE_INTEL[archetypes[1]?.archetype];
-    if (second) contentStrategy.push(`Secondary segment: **${archetypes[1].archetype}** (${archetypes[1].count} users) — ${second.buys}`);
+  if ((profileMap.emotional_triggers || 0) >= 25) {
+    crossInsights.push('Your community runs on feeling. Logic and information won\'t move them — emotion and urgency will. If content doesn\'t make them feel something within seconds, it doesn\'t exist to them.');
+  }
+  if ((profileMap.aspirations || 0) >= 20) {
+    crossInsights.push('A solid portion of your audience is building toward something. They see you as part of the life they\'re working toward. Position yourself as the person who\'s already where they\'re trying to go.');
+  }
+  if ((profileMap.core_values || 0) >= 15) {
+    crossInsights.push('You have a principled audience that watches what you do more than what you say. Integrity and consistency are what keep this group — and they\'re the most valuable advocates you can have.');
+  }
+  if ((profileMap.self_image || 0) >= 15) {
+    crossInsights.push('A meaningful segment ties their identity to what they follow. Being associated with your brand means something to them. Premium, exclusive, and signature products convert this group at high rates.');
+  }
+  if ((profileMap.pain_points || 0) >= 15 && (profileMap.aspirations || 0) >= 15) {
+    crossInsights.push('You have users who know what\'s wrong AND know what they want. They just need someone to bridge the gap. Position yourself as that bridge — not a motivator, but a practical path forward.');
+  }
+  if ((profileMap.social_motivators || 0) >= 20 && (profileMap.pain_points || 0) >= 15) {
+    crossInsights.push('A portion of your community came seeking belonging during a hard time. These are your most emotionally loyal members — they\'re not just fans, you\'re part of how they got through something.');
   }
 
-  return { totalUsers, totalResponses, archetypes, topCategories, topTones, dominantArchetype, dominantCategory, dominantTone, contentStrategy };
+  // ── Content strategy bullets ─────────────────────────────────────────────────
+  const contentStrategy = [];
+  if (communityProfile.length > 0) {
+    const top = COMMUNITY_INTEL[communityProfile[0].category];
+    if (top) {
+      contentStrategy.push(`Your #1 audience type is **${top.label}** (${communityProfile[0].pct}% of community) — ${top.sells}`);
+    }
+  }
+  if (communityProfile.length > 1) {
+    const second = COMMUNITY_INTEL[communityProfile[1].category];
+    if (second) contentStrategy.push(`Second largest segment: **${second.label}** (${communityProfile[1].pct}%) — ${second.sells}`);
+  }
+  if (dominantTone && TONE_INTEL[dominantTone]) {
+    contentStrategy.push(`Most engaged tone: **${dominantTone}** — ${TONE_INTEL[dominantTone]}`);
+  }
+  crossInsights.forEach(i => contentStrategy.push(i));
+
+  return { totalUsers, totalResponses, archetypes, topCategories, topTones, dominantArchetype, dominantCategory, dominantTone, contentStrategy, communityProfile };
 }
 
 // ─── EXPRESS SERVER ────────────────────────────────────────────────────────────
 function startDashboard(db) {
+  console.log('[Dashboard] Initializing...');
   let express;
   try { express = require('express'); } catch (_) {
-    console.log('[Dashboard] Express not installed — run: npm install express');
+    console.error('[Dashboard] Express not installed — run: npm install express');
     return;
   }
 
   const app      = express();
   const PORT     = process.env.PORT || 3000;
   const PASSWORD = process.env.DASHBOARD_PASSWORD || null;
+  console.log(`[Dashboard] Starting on port ${PORT} (PASSWORD=${PASSWORD ? 'set' : 'NOT SET'})`);
 
   // Simple password gate
   app.use((req, res, next) => {
@@ -519,7 +684,7 @@ function startDashboard(db) {
     catch (e) { res.status(500).json({ error: e.message }); }
   });
 
-  app.listen(PORT, () => {
+  app.listen(PORT, '0.0.0.0', () => {
     console.log(`[Dashboard] Running on port ${PORT}${PASSWORD ? ' (password protected)' : ' (no password — set DASHBOARD_PASSWORD)'}`);
   });
 }

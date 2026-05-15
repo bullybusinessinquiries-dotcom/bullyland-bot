@@ -31,6 +31,7 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 // Auto-detect Railway persistent volume, fall back to DB_PATH env var, then __dirname
 const fs = require('fs');
 const dailyQ = require('./dailyq/index');
+const { startDashboard } = require('./dashboard');
 function resolveDBPath() {
   if (process.env.DB_PATH) return process.env.DB_PATH;
   // Railway mounts volumes at user-configured paths — try common ones
@@ -228,7 +229,6 @@ const CONFIG = {
     AUCTION:          process.env.CHANNEL_AUCTION,
     GENERAL:          process.env.CHANNEL_GENERAL,
     GAMES:            process.env.CHANNEL_GAMES,
-    QUOTES:           process.env.CHANNEL_QUOTES,
   },
 
   ROLES: {
@@ -1127,20 +1127,25 @@ function buildLeaderboardEmbed() {
     .setTimestamp();
 }
 
+async function purgeLeaderboardChannel(channel) {
+  try {
+    const messages = await channel.messages.fetch({ limit: 100 });
+    if (messages.size > 0) {
+      await channel.bulkDelete(messages).catch(async () => {
+        for (const [, m] of messages) await m.delete().catch(() => {});
+      });
+    }
+  } catch (_) {}
+}
+
 async function postDailyLeaderboard() {
   const channel = await client.channels.fetch(CONFIG.CHANNELS.LEADERBOARD).catch(() => null);
   if (!channel) return;
-  // Delete previous daily leaderboard embed
-  if (lastLeaderboardMessageId) {
-    const old = await channel.messages.fetch(lastLeaderboardMessageId).catch(() => null);
-    if (old) await old.delete().catch(() => {});
-    lastLeaderboardMessageId = null;
-  }
+  await purgeLeaderboardChannel(channel);
+  lastLeaderboardMessageId = null;
   const embed = buildLeaderboardEmbed();
   const msg = await channel.send({ embeds: [embed] });
   lastLeaderboardMessageId = msg.id;
-  // Auto-delete after 24 hours (replaced by next morning's post)
-  setTimeout(() => msg.delete().catch(() => {}), 24 * 60 * 60 * 1000);
 }
 
 // ─── GIVEAWAY CHANNEL VISIBILITY ──────────────────────────────────────────
@@ -3184,52 +3189,6 @@ const HEIST_NARRATIONS = {
 };
 
 
-// ─── MORNING QUOTE ────────────────────────────────────────────────────────────
-// Fetches a fresh quote each morning from ZenQuotes (primary) with Quotable as
-// fallback. Both are free, no API key required. Posts to CHANNEL_QUOTES.
-const QUOTE_COLORS = ['#c9a84c','#f47fff','#2ecc71','#3498db','#e67e22','#9b59b6','#1abc9c'];
-let _quoteColorIdx = 0;
-
-async function fetchQuote() {
-  // Primary: ZenQuotes /today — curated quote that changes every 24h
-  try {
-    const res  = await fetch('https://zenquotes.io/api/today', { signal: AbortSignal.timeout(6000) });
-    const data = await res.json();
-    if (data?.[0]?.q && data[0].q !== '...') return { text: data[0].q, author: data[0].a };
-  } catch (_) {}
-
-  // Fallback: Quotable — 3,000+ quotes, random each call
-  try {
-    const res  = await fetch('https://api.quotable.io/random?minLength=60&maxLength=280', { signal: AbortSignal.timeout(6000) });
-    const data = await res.json();
-    if (data?.content) return { text: data.content, author: data.author };
-  } catch (_) {}
-
-  return null; // both APIs down — skip silently
-}
-
-async function postMorningQuote() {
-  const channelId = CONFIG.CHANNELS.QUOTES;
-  if (!channelId) { console.log('[Quote] CHANNEL_QUOTES not set — skipping'); return; }
-
-  const quote = await fetchQuote();
-  if (!quote) { console.log('[Quote] Could not fetch quote — both APIs unavailable'); return; }
-
-  const channel = await client.channels.fetch(channelId).catch(() => null);
-  if (!channel) { console.log('[Quote] Channel not found'); return; }
-
-  const color = QUOTE_COLORS[_quoteColorIdx % QUOTE_COLORS.length];
-  _quoteColorIdx++;
-
-  const embed = new EmbedBuilder()
-    .setColor(color)
-    .setDescription(`*"${quote.text}"*\n\n— **${quote.author}**`)
-    .setFooter({ text: "Bully's World • Good morning 🌅" })
-    .setTimestamp();
-
-  await channel.send({ embeds: [embed] }).catch(e => console.error('[Quote] Send error:', e.message));
-  console.log(`[Quote] Posted: "${quote.text.slice(0, 60)}..." — ${quote.author}`);
-}
 
 function startScheduler() {
   schedule.scheduleJob('0 18 * * 0',   () => postMemberSpotlight());
@@ -3245,7 +3204,7 @@ function startScheduler() {
   });
   schedule.scheduleJob('0 */12 * * *', ()=>refreshShop());
   schedule.scheduleJob({ rule:'0 0 1 * *', tz:CONFIG.TIMEZONE }, ()=>doMonthlyReset());
-  schedule.scheduleJob({ rule:'0 6 * * *', tz:CONFIG.TIMEZONE }, ()=>postDailyLeaderboard());
+  schedule.scheduleJob('0 */6 * * *', ()=>postDailyLeaderboard());
   // Weekly lottery draw — Sunday at 8pm CT
   schedule.scheduleJob({ rule: '0 20 * * 0', tz: CONFIG.TIMEZONE }, () => runLottery());
 
@@ -3272,9 +3231,6 @@ function startScheduler() {
     runSuperfanPayouts();
   });
 
-  // Morning motivational quote — 8:00 AM CT daily (1 hour before daily question)
-  schedule.scheduleJob({ rule: '0 8 * * *', tz: CONFIG.TIMEZONE }, () => postMorningQuote());
-
   console.log('[Scheduler] All jobs started.');
 }
 
@@ -3288,8 +3244,11 @@ client.once('ready', async()=>{
   dailyQ.init(client, db, addBB);
 
   // Start analytics dashboard (Express) — available at your Railway URL
-  const { startDashboard } = require('./dashboard');
-  startDashboard(db);
+  try {
+    startDashboard(db);
+  } catch (e) {
+    console.error('[Dashboard] Failed to start:', e.message);
+  }
 });
 
 
@@ -3755,7 +3714,7 @@ client.on('interactionCreate', async interaction => {
               '`!testgiveawayhide` — hide the giveaway channel', inline: false },
             { name: '📦 Treasure Chest', value: '`!testchest` — spawn a treasure chest now', inline: false },
             { name: '🌟 Member Spotlight', value: '`!testspotlight` — post a member spotlight now', inline: false },
-            { name: '💬 Morning Quote', value: '`!testquote` — post today\'s morning quote now', inline: false },
+            { name: '💬 Daily Q', value: '`!dailyq post` — post today\'s daily question now (includes quote + image)', inline: false },
           ).setFooter({ text: 'Admin • Events' }).setTimestamp();
 
       } else if (topic === 'games') {
@@ -5414,7 +5373,6 @@ client.on('messageCreate', async msg => {
   // ── !payboost / !paysuperfan — manual trigger ─────────────────────────────
   if (lower === '!payboost') { await msg.reply('⏳ Running booster payouts…'); await runBoosterPayouts(); await msg.reply('✅ Booster payouts complete.'); return; }
   if (lower === '!paysuperfan') { await msg.reply('⏳ Running superfan payouts…'); await runSuperfanPayouts(); await msg.reply('✅ Superfan payouts complete.'); return; }
-  if (lower === '!testquote') { await msg.reply('⏳ Fetching quote…'); await postMorningQuote(); await msg.delete().catch(() => {}); return; }
 
   if (lower === '!testlottery') { await msg.reply('🎟️ Triggering lottery...'); await runLottery(); return; }
   if (lower === '!testchest') { await msg.reply('📦 Spawning chest...'); await spawnTreasureChest(); return; }
