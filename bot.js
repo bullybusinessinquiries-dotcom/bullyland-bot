@@ -229,6 +229,7 @@ const CONFIG = {
     AUCTION:          process.env.CHANNEL_AUCTION,
     GENERAL:          process.env.CHANNEL_GENERAL,
     GAMES:            process.env.CHANNEL_GAMES,
+    GAMES_2:          process.env.CHANNEL_GAMES_2,
   },
 
   ROLES: {
@@ -1108,15 +1109,16 @@ async function doMonthlyReset() {
 
 // ─── LEADERBOARD EMBED BUILDER ────────────────────────────────────────────
 function buildLeaderboardEmbed() {
-  // Rank by wallet + bank combined — balances are private, only names shown
   const top = db.prepare(
     `SELECT user_id, username, (balance + COALESCE(bank_balance, 0)) as total
      FROM balances WHERE user_id != ? ORDER BY total DESC LIMIT 10`
   ).all(CONFIG.OWNER_ID);
 
-  const kingSection = `👑 **The King** — *untouchable*\n​\n`;
+  const king = db.prepare('SELECT balance, COALESCE(bank_balance, 0) as bank FROM balances WHERE user_id = ?').get(CONFIG.OWNER_ID);
+  const kingTotal = king ? (king.balance + king.bank) : 0;
+  const kingSection = `👑 **The King** — **${kingTotal.toLocaleString()} BB** *(untouchable)*\n​\n`;
   const topSection = top.length
-    ? top.map((u, i) => `**${i + 1}.** ${u.username}`).join('\n')
+    ? top.map((u, i) => `**${i + 1}.** ${u.username} — **${u.total.toLocaleString()} BB**`).join('\n')
     : '_No one has any BB yet._';
 
   return new EmbedBuilder()
@@ -1719,7 +1721,7 @@ client.on('messageCreate', async(message) => {
   const _isAdmin = message.member?.permissions.has(PermissionsBitField.Flags.Administrator);
   if (content.startsWith('!') && !_isAdmin) {
     const cid = message.channelId;
-    const inGameChannel = cid === CONFIG.CHANNELS.GAMES;
+    const inGameChannel = cid === CONFIG.CHANNELS.GAMES || cid === CONFIG.CHANNELS.GAMES_2;
     const inLobby = cid === CONFIG.CHANNELS.GENERAL;
     const inMysteryDrops = cid === CONFIG.CHANNELS.MYSTERY_DROPS;
     if (inGameChannel) {
@@ -1727,7 +1729,7 @@ client.on('messageCreate', async(message) => {
     } else if (inLobby) {
       const cmd = content.split(' ')[0];
       if (!['!help', '!feedback', '!checkin'].includes(cmd)) {
-        const r = await message.reply(`🎮 Head to <#${CONFIG.CHANNELS.GAMES}> to use bot commands.`);
+        const r = await message.reply(`🎮 Head to <#${CONFIG.CHANNELS.GAMES}> or <#${CONFIG.CHANNELS.GAMES_2}> to use bot commands.`);
         setTimeout(() => r.delete().catch(() => {}), 5000);
         await message.delete().catch(() => {});
         return;
@@ -1735,7 +1737,7 @@ client.on('messageCreate', async(message) => {
     } else if (inMysteryDrops) {
       // pass through — !claim handles its own channel check
     } else {
-      const r = await message.reply(`🎮 Head to <#${CONFIG.CHANNELS.GAMES}> to use bot commands.`);
+      const r = await message.reply(`🎮 Head to <#${CONFIG.CHANNELS.GAMES}> or <#${CONFIG.CHANNELS.GAMES_2}> to use bot commands.`);
       setTimeout(() => r.delete().catch(() => {}), 5000);
       await message.delete().catch(() => {});
       return;
@@ -3264,6 +3266,21 @@ const autoDelete = (msg, ms = 8000) => { if (msg?.deletable !== false) setTimeou
 const _races = new Map();
 let _raceN = 0;
 
+// Returns the number of active games running in a given channel (trivia, hangman, heist, horse race)
+function getActiveGameCount(channelId) {
+  let count = 0;
+  if (activeTrivia.has(channelId))  count++;
+  if (activeHangman.has(channelId)) count++;
+  for (const h of activeHeists.values()) {
+    if ((h.channel?.id ?? h.channelId) === channelId) count++;
+  }
+  for (const r of _races.values()) {
+    if (r.channelId === channelId && r.phase !== 'done') count++;
+  }
+  return count;
+}
+const MAX_GAMES_PER_CHANNEL = 2;
+
 async function runHorseRace(rid, channel) {
   const race = _races.get(rid);
   if (!race || race.phase !== 'betting') return;
@@ -3424,9 +3441,9 @@ client.on('messageCreate', async msg => {
   if (TESTING_MODE && !hasAccess(msg.member)) return;
   if (msg.content.trim().toLowerCase() !== '!bullygames') return;
   const _isAdmin = msg.member?.permissions.has(PermissionsBitField.Flags.Administrator);
-  const GAME_CHANNELS = [CONFIG.CHANNELS.GAMES];
+  const GAME_CHANNELS = [CONFIG.CHANNELS.GAMES, CONFIG.CHANNELS.GAMES_2];
   if (!_isAdmin && !GAME_CHANNELS.includes(msg.channelId)) {
-    const r = await msg.reply(`🎮 Games only run in <#${CONFIG.CHANNELS.GAMES}>. Head over there!`);
+    const r = await msg.reply(`🎮 Games only run in <#${CONFIG.CHANNELS.GAMES}> or <#${CONFIG.CHANNELS.GAMES_2}>. Head over there!`);
     setTimeout(() => r.delete().catch(() => {}), 6000);
     await msg.delete().catch(() => {});
     return;
@@ -3584,9 +3601,9 @@ client.on('interactionCreate', async interaction => {
     customId.startsWith('lottery.') || customId.startsWith('slots.') ||
     customId.startsWith('bj.') || customId.startsWith('roulette.') || customId.startsWith('race.') ||
     customId.startsWith('trivia.') || customId.startsWith('hangman.');
-  const ALLOWED_GAME_CHANNELS = [CONFIG.CHANNELS.GAMES];
+  const ALLOWED_GAME_CHANNELS = [CONFIG.CHANNELS.GAMES, CONFIG.CHANNELS.GAMES_2];
   if (isGameInteraction && !ALLOWED_GAME_CHANNELS.includes(interaction.channelId)) {
-    await interaction.reply({ content: `🎮 Games only run in <#${CONFIG.CHANNELS.GAMES}>.`, ephemeral: true }); return;
+    await interaction.reply({ content: `🎮 Games only run in <#${CONFIG.CHANNELS.GAMES}> or <#${CONFIG.CHANNELS.GAMES_2}>.`, ephemeral: true }); return;
   }
 
   try {
@@ -3623,7 +3640,7 @@ client.on('interactionCreate', async interaction => {
           .setFooter({ text: "Bully's World • Protect your bag." }).setTimestamp();
       } else if (topic === 'games') {
         embed = new EmbedBuilder().setColor('#2ecc71').setTitle('🎮 Bully Games — Quick Guide')
-          .setDescription('All games are in <#' + CONFIG.CHANNELS.GAMES + '>. Type `!bullygames` to open the menu.')
+          .setDescription('All games are in <#' + CONFIG.CHANNELS.GAMES + '> or <#' + CONFIG.CHANNELS.GAMES_2 + '>. Type `!bullygames` to open the menu.')
           .addFields(
             { name: '🎰 Casino',    value: 'Slots, Blackjack, Roulette, Horse Racing — bet BB and win big', inline: false },
             { name: '🦹 Heist',     value: 'Join a crew, pick a target, split the payout — or lose it all', inline: false },
@@ -3847,6 +3864,7 @@ client.on('interactionCreate', async interaction => {
     if (customId === 'menu.trivia') {
       const cid = interaction.channelId;
       if (activeTrivia.has(cid)) { await interaction.reply({ content: '🧠 A trivia game is already running in this channel!', ephemeral: true }); return; }
+      if (getActiveGameCount(cid) >= MAX_GAMES_PER_CHANNEL) { await interaction.reply({ content: `⏳ **2 games are already running in this channel.** Wait for one to finish before starting another!`, ephemeral: true }); return; }
       const cdKey = `trivia.${cid}`;
       const cdLeft = (gameCooldowns.get(cdKey) || 0) - Date.now();
       if (cdLeft > 0) {
@@ -3930,6 +3948,7 @@ client.on('interactionCreate', async interaction => {
     if (customId === 'menu.hangman') {
       const cid = interaction.channelId;
       if (activeHangman.has(cid)) { await interaction.reply({ content: '🔤 A hangman game is already running in this channel!', ephemeral: true }); return; }
+      if (getActiveGameCount(cid) >= MAX_GAMES_PER_CHANNEL) { await interaction.reply({ content: `⏳ **2 games are already running in this channel.** Wait for one to finish before starting another!`, ephemeral: true }); return; }
       const cdKey = `hangman.${cid}`;
       const cdLeft = (gameCooldowns.get(cdKey) || 0) - Date.now();
       if (cdLeft > 0) {
@@ -4125,6 +4144,7 @@ client.on('interactionCreate', async interaction => {
     // HEIST MENU
     if (customId === 'menu.heist') {
       if (activeHeists.size >= 3) { await interaction.reply({ content: '🦹 3 heists are already running! Wait for one to finish.', ephemeral: true }); return; }
+      if (getActiveGameCount(interaction.channelId) >= MAX_GAMES_PER_CHANNEL) { await interaction.reply({ content: `⏳ **2 games are already running in this channel.** Wait for one to finish before starting another!`, ephemeral: true }); return; }
       if (heistSelectionPending.has(userId)) { await interaction.reply({ content: 'You already have a heist menu open!', ephemeral: true }); return; }
       if (!isAdmin) {
         const cd = db.prepare('SELECT last_heist FROM heist_cooldown WHERE user_id = ?').get(userId);
@@ -4441,6 +4461,7 @@ Balance: **${getBal().toLocaleString()} BB**`).setFooter({ text: won ? "Bully's 
       for (const [rid, race] of _races) { if (race.phase === 'betting' && !race.bets.has(userId)) { openRaceId = rid; break; } }
       if (!openRaceId) {
         if (_races.size >= 3) { await interaction.reply({ content: '🏇 Max 3 races running. Wait for one to finish!', ephemeral: true }); return; }
+        if (getActiveGameCount(channel.id) >= MAX_GAMES_PER_CHANNEL) { await interaction.reply({ content: `⏳ **2 games are already running in this channel.** Wait for one to finish before starting another!`, ephemeral: true }); return; }
         const rid = `R${++_raceN}`;
         _races.set(rid, { phase: 'betting', bets: new Map(), horses: HORSES, channelId: channel.id });
         openRaceId = rid;
@@ -4737,9 +4758,9 @@ client.on('messageCreate', async msg => {
   if (msg.author?.bot || !msg.guild) return;
   if (TESTING_MODE && !hasAccess(msg.member)) return;
   if (!msg.content.trim().toLowerCase().startsWith('!steal ')) return;
-  const STEAL_ALLOWED = [CONFIG.CHANNELS.GAMES];
+  const STEAL_ALLOWED = [CONFIG.CHANNELS.GAMES, CONFIG.CHANNELS.GAMES_2];
   if (!STEAL_ALLOWED.includes(msg.channelId)) {
-    const r = await msg.reply(`🎮 Head to <#${CONFIG.CHANNELS.GAMES}> to use bot commands.`);
+    const r = await msg.reply(`🎮 Head to <#${CONFIG.CHANNELS.GAMES}> or <#${CONFIG.CHANNELS.GAMES_2}> to use bot commands.`);
     setTimeout(() => r.delete().catch(() => {}), 5000);
     await msg.delete().catch(() => {});
     return;
@@ -4764,6 +4785,7 @@ client.on('messageCreate', async msg => {
     if (ts.c >= 8) { await msg.reply("You've hit your **8 steal limit** for the last 8 hours."); return; }
     const stealerUser = getUser(userId, username);
     if (stealerUser.balance <= -50) { await msg.reply("You're too broke to steal. You need to get back above **-50 BB** first."); return; }
+    if (stealerUser.balance <= 25) { await msg.reply("❌ You need more than **25 BB** to attempt a steal."); return; }
   }
   if (hasShield(target.id)) { await msg.reply(`**${target.username}** is shielded.`); return; }
   const targetUser = getUser(target.id, target.username);
