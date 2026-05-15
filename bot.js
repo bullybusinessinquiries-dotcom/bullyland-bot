@@ -270,10 +270,10 @@ const CONFIG = {
   // Shop items
   // Role prices by rarity — loaded from Google Sheet at boot
   ROLE_PRICES: {
-    Common:    75,
-    Uncommon:  150,
-    Rare:      300,
-    Legendary: 600,
+    Common:    200,
+    Uncommon:  450,
+    Rare:      900,
+    Legendary: 2000,
   },
   // Roles are loaded from Google Sheet — SHOP_ITEMS kept minimal for non-role items
   SHOP_ITEMS: [],
@@ -3547,6 +3547,15 @@ async function endTriviaRound(channel, state, triviaMsg) {
   }
 }
 
+// Trivia payouts scale with competition — solo play earns far less than a full lobby
+// Max MVP payout per tier (5 questions): solo=30, small=75, medium=120, full=150
+function getTriviaPayoutRates(playerCount) {
+  if (playerCount <= 1) return { mvpBonus: 15,  mvpPerCorrect: 3,  otherPerCorrect: 3  }; // solo  — max 30 BB
+  if (playerCount <= 3) return { mvpBonus: 50,  mvpPerCorrect: 5,  otherPerCorrect: 6  }; // 2–3   — max 75 BB
+  if (playerCount <= 6) return { mvpBonus: 90,  mvpPerCorrect: 6,  otherPerCorrect: 9  }; // 4–6   — max 120 BB
+  return                       { mvpBonus: 100, mvpPerCorrect: 10, otherPerCorrect: 10 }; // 7+    — max 150 BB
+}
+
 async function endTriviaGame(channel, state) {
   activeTrivia.delete(channel.id);
   gameCooldowns.set(state.cdKey, Date.now() + 5 * 60 * 1000);
@@ -3560,16 +3569,18 @@ async function endTriviaGame(channel, state) {
     return;
   }
 
+  const playerCount = allScores.length;
+  const { mvpBonus, mvpPerCorrect, otherPerCorrect } = getTriviaPayoutRates(playerCount);
   const maxFirsts = Math.max(...allScores.map(([, s]) => s.firsts));
   const payoutLines = [];
   for (const [uid, s] of allScores) {
     const isMvp = maxFirsts > 0 && s.firsts === maxFirsts;
-    const bbEarned = isMvp ? 100 + s.corrects * 5 : s.corrects * 10;
+    const bbEarned = isMvp ? mvpBonus + s.corrects * mvpPerCorrect : s.corrects * otherPerCorrect;
     if (bbEarned > 0) {
-      addBB(uid, s.username, bbEarned, `trivia — ${state.catLabel} (${s.corrects} correct, ${s.firsts} firsts)`);
+      addBB(uid, s.username, bbEarned, `trivia — ${state.catLabel} (${s.corrects} correct, ${s.firsts} firsts, ${playerCount} players)`);
       payoutLines.push(isMvp
-        ? `🏆 <@${uid}> **+${bbEarned} BB** — ${s.corrects} correct, ${s.firsts} first${s.firsts !== 1 ? 's' : ''} *(100 BB bonus + ${s.corrects}×5 BB)*`
-        : `<@${uid}> **+${bbEarned} BB** — ${s.corrects} correct *(${s.corrects}×10 BB)*`
+        ? `🏆 <@${uid}> **+${bbEarned} BB** — ${s.corrects} correct, ${s.firsts} first${s.firsts !== 1 ? 's' : ''} *(${mvpBonus} BB bonus + ${s.corrects}×${mvpPerCorrect} BB)*`
+        : `<@${uid}> **+${bbEarned} BB** — ${s.corrects} correct *(${s.corrects}×${otherPerCorrect} BB)*`
       );
     }
   }
@@ -3644,7 +3655,7 @@ client.on('interactionCreate', async interaction => {
           .addFields(
             { name: '🎰 Casino',    value: 'Slots, Blackjack, Roulette, Horse Racing — bet BB and win big', inline: false },
             { name: '🦹 Heist',     value: 'Join a crew, pick a target, split the payout — or lose it all', inline: false },
-            { name: '🧠 Trivia',    value: '5 rounds, 15 sec each · most first-answers wins 100BB + 5BB/correct · others get 10BB/correct', inline: false },
+            { name: '🧠 Trivia',    value: '5 rounds, 15 sec each · payouts scale with player count · MVP bonus goes to most first-answers · solo play earns the least', inline: false },
             { name: '🔤 Hangman',  value: 'Team up to guess the hidden word — one wrong letter at a time', inline: false },
             { name: '🎟️ Lottery',   value: 'Buy tickets weekly · more tickets = better odds · winner drawn each week', inline: false },
             { name: '📌 Tip',       value: 'Casino games auto-cancel after 5 min of inactivity. Use the **Cancel Bet** button if you get stuck.', inline: false }
@@ -3671,10 +3682,10 @@ client.on('interactionCreate', async interaction => {
             { name: '🖤 Black Market', value: '`!blackmarket` — special items with unique abilities\n(Account Pull, Pocket Scan, Vault Key)', inline: false },
             { name: '🎁 Gift & Redeem', value: '`!gift @user [amount]` — send your own BB to someone\n`!redeem CODE` — redeem a stream event code for BB', inline: false },
             { name: '🏷️ Role Rarities', value:
-              '⬜ **Common** — 75 BB\n' +
-              '🟦 **Uncommon** — 150 BB\n' +
-              '🟣 **Rare** — 300 BB\n' +
-              '🟡 **Legendary** — 600 BB',
+              '⬜ **Common** — 200 BB\n' +
+              '🟦 **Uncommon** — 450 BB\n' +
+              '🟣 **Rare** — 900 BB\n' +
+              '🟡 **Legendary** — 2,000 BB',
               inline: false },
             { name: '🎒 Inventory',    value: '`!inventory` — see your roles and equip/unequip them (max 3 equipped)', inline: false }
           )
@@ -3872,7 +3883,7 @@ client.on('interactionCreate', async interaction => {
         await interaction.reply({ content: `⏳ Trivia on cooldown — **${mins > 0 ? mins + 'm ' : ''}${secs}s** left.`, ephemeral: true }); return;
       }
       const catEmbed = new EmbedBuilder().setColor('#c9a84c').setTitle('🧠 BULLYLAND Trivia')
-        .setDescription('Pick a category for your **5-round trivia game!**\n\n⏱️ **15 seconds** per question\n🏆 Most first-correct answers: **100 BB bonus + 5 BB** per correct\n👥 Everyone else: **10 BB** per correct answer')
+        .setDescription('Pick a category for your **5-round trivia game!**\n\n⏱️ **15 seconds** per question\n💰 **Payouts scale with competition** — the more players, the bigger the reward\n🏆 Most first-correct answers wins the **MVP bonus**\n👥 Solo play earns the least — bring competition!')
         .setFooter({ text: "Bully's World" }).setTimestamp();
       const catRow1 = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId('trivia.cat.26').setLabel('🌟 Celebrities').setStyle(ButtonStyle.Primary),
