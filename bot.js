@@ -1716,7 +1716,8 @@ client.on('messageCreate', async(message) => {
   const content = message.content.trim().toLowerCase();
 
   // ── Channel gate — restrict commands to designated channels ──
-  if (content.startsWith('!')) {
+  const _isAdmin = message.member?.permissions.has(PermissionsBitField.Flags.Administrator);
+  if (content.startsWith('!') && !_isAdmin) {
     const cid = message.channelId;
     const inGameChannel = cid === CONFIG.CHANNELS.GAMES;
     const inLobby = cid === CONFIG.CHANNELS.GENERAL;
