@@ -639,6 +639,10 @@ function buildAnalyticsData(db) {
 }
 
 // ─── EXPRESS SERVER ────────────────────────────────────────────────────────────
+// Stripe payment callback — set by bot.js after boot so the webhook can trigger it
+let _stripePaymentCallback = null;
+function setStripePaymentCallback(fn) { _stripePaymentCallback = fn; }
+
 function startDashboard(db) {
   console.log('[Dashboard] Initializing...');
   let express;
@@ -651,6 +655,44 @@ function startDashboard(db) {
   const PORT     = process.env.PORT || 3000;
   const PASSWORD = process.env.DASHBOARD_PASSWORD || null;
   console.log(`[Dashboard] Starting on port ${PORT} (PASSWORD=${PASSWORD ? 'set' : 'NOT SET'})`);
+
+  // ── Stripe webhook — MUST be before any body parsers and the password gate ──
+  // Stripe requires the raw request body to verify the signature.
+  app.post('/webhook/stripe', express.raw({ type: 'application/json' }), (req, res) => {
+    const sig           = req.headers['stripe-signature'];
+    const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+
+    if (!webhookSecret) {
+      console.error('[Stripe Webhook] STRIPE_WEBHOOK_SECRET not set in Railway variables');
+      return res.status(500).send('Webhook secret not configured');
+    }
+
+    let event;
+    try {
+      const Stripe = require('stripe');
+      const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
+      event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
+    } catch (err) {
+      console.error('[Stripe Webhook] Signature verification failed:', err.message);
+      return res.status(400).send(`Webhook Error: ${err.message}`);
+    }
+
+    console.log(`[Stripe Webhook] Event received: ${event.type}`);
+
+    if (event.type === 'checkout.session.completed') {
+      const session = event.data.object;
+      console.log(`[Stripe Webhook] Payment confirmed — session ${session.id}, metadata:`, session.metadata);
+      if (_stripePaymentCallback) {
+        _stripePaymentCallback(session).catch(err =>
+          console.error('[Stripe Webhook] Callback error:', err.message)
+        );
+      } else {
+        console.warn('[Stripe Webhook] No payment callback registered yet');
+      }
+    }
+
+    res.json({ received: true });
+  });
 
   // Simple password gate
   app.use((req, res, next) => {
@@ -689,4 +731,4 @@ function startDashboard(db) {
   });
 }
 
-module.exports = { startDashboard };
+module.exports = { startDashboard, setStripePaymentCallback };

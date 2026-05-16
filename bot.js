@@ -31,7 +31,7 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 // Auto-detect Railway persistent volume, fall back to DB_PATH env var, then __dirname
 const fs = require('fs');
 const dailyQ = require('./dailyq/index');
-const { startDashboard } = require('./dashboard');
+const { startDashboard, setStripePaymentCallback } = require('./dashboard');
 function resolveDBPath() {
   if (process.env.DB_PATH) return process.env.DB_PATH;
   // Railway mounts volumes at user-configured paths — try common ones
@@ -110,6 +110,13 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS auction_warnings (
     user_id TEXT PRIMARY KEY, username TEXT,
     warnings INTEGER DEFAULT 0, blacklisted INTEGER DEFAULT 0
+  );
+  CREATE TABLE IF NOT EXISTS auction_payments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    auction_id INTEGER, stripe_session_id TEXT UNIQUE,
+    winner_id TEXT, winner_username TEXT,
+    amount REAL, status TEXT DEFAULT 'pending',
+    paid_at TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP
   );
 
   CREATE TABLE IF NOT EXISTS heist_log (
@@ -196,6 +203,10 @@ db.exec(`
     PRIMARY KEY (user_id, week)
   );
 `);
+
+// ── Auction scheduling columns (migration — safe to run on every boot) ────────
+try { db.exec('ALTER TABLE auctions ADD COLUMN scheduled_start TEXT'); }   catch(_) {}
+try { db.exec('ALTER TABLE auctions ADD COLUMN duration_minutes INTEGER DEFAULT 240'); } catch(_) {}
 
 // ── SQLite durability settings (must come before any writes) ──────────────────
 // WAL mode: writes don't block reads, survives crashes mid-write.
@@ -2192,7 +2203,7 @@ Stay active to catch the next rain!`)
     if (prevBidderId) {
       try {
         const prevMember = await message.guild.members.fetch(prevBidderId).catch(()=>null);
-        if (prevMember) await prevMember.send(`⚠️ You've been outbid on **${auction.title}**! The new leading bid is **$${amount.toFixed(2)}**. Type **!bid [amount]** to bid again.`);
+        if (prevMember) await prevMember.send(`⚠️ You've been outbid on **${auction.title}**! The new leading bid is **$${amount.toFixed(2)}**. Head to the auction channel to bid again.`);
       } catch {}
     }
     return;
@@ -2204,51 +2215,8 @@ Stay active to catch the next rain!`)
     const parts = message.content.trim().split(' ');
     const subcommand = parts[1]?.toLowerCase();
 
-    // !auction start [title] | [description] | [image url]
-    if (subcommand === 'start') {
-      if (activeAuction) { await message.reply('An auction is already running. End it first with `!auction end`.'); return; }
-      const auctionInput = message.content.slice('!auction start '.length).split('|').map(s => s.trim());
-      const title = auctionInput[0];
-      const description = auctionInput[1] || '';
-      const imageUrl = auctionInput[2] || null;
-      if (!title) { await message.reply('Usage: `!auction start [title] | [description] | [image url]`'); return; }
-
-      const endsAt = new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString();
-      const result = db.prepare('INSERT INTO auctions (title, description, image_url, starting_bid, current_bid, ends_at) VALUES (?, ?, ?, 50, null, ?)').run(title, description, imageUrl, endsAt);
-      const auctionId = result.lastInsertRowid;
-      activeAuction = auctionId;
-
-      const channel = await client.channels.fetch(CONFIG.CHANNELS.AUCTION).catch(()=>null);
-      if (!channel) { await message.reply('Auction channel not found. Check CHANNEL_AUCTION in your .env'); return; }
-
-      const endsAtTs = Math.floor(new Date(endsAt).getTime() / 1000);
-      const embed = new EmbedBuilder().setColor('#c9a84c').setTitle(`🎨 AUCTION — ${title}`)
-        .setDescription(
-          `${description}
-
-` +
-          `**Starting Bid:** $50.00
-` +
-          `**Leading Bidder:** No bids yet
-` +
-          `**Minimum Bid:** $50.00
-
-` +
-          `Type **!bid [amount]** to place your bid.
-Example: \`!bid 50\`
-
-` +
-          `⏰ Ends <t:${endsAtTs}:R>`
-        )
-        .setFooter({text:"Bully's World • Highest bid wins."}).setTimestamp();
-      if (imageUrl) embed.setImage(imageUrl);
-      const auctionMsg = await channel.send({ content: '@everyone', embeds: [embed] });
-      db.prepare('UPDATE auctions SET message_id = ? WHERE id = ?').run(auctionMsg.id, auctionId);
-
-      auctionTimer = setTimeout(() => endAuction(auctionId, true), 4 * 60 * 60 * 1000);
-      await message.reply(`✅ Auction started for **${title}**! Ends in 4 hours.`);
-      return;
-    }
+    // !auction start — deprecated, use !auction instead
+    if (subcommand === 'start') { await message.reply('Use `!auction` to set up a new auction interactively.'); return; }
 
     // !auction end
     if (subcommand === 'end') {
@@ -2284,6 +2252,9 @@ Example: \`!bid 50\`
       await message.reply(`${mention.username} — Warnings: ${row.warnings}/3 | Blacklisted: ${row.blacklisted ? 'Yes 🚫' : 'No ✅'}`);
       return;
     }
+
+    // !auction schedule — deprecated, use !auction instead
+    if (subcommand === 'schedule') { await message.reply('Use `!auction` to set up a new auction interactively.'); return; }
   }
 
   // ── !duel ──
@@ -2754,7 +2725,77 @@ let lotterySelectionPending = new Map(); // userId -> waiting for ticket count
 let activeDuels = new Map(); // challenged_id -> duel info
 
 let activeAuction = null;
-let auctionTimer = null;
+let auctionTimer  = null;
+const auctionSetupSessions = new Map(); // userId → true (setup in progress)
+
+// ── Parse "MM/DD/YYYY HH:MM" as Central Time → UTC Date ───────────────────────
+function parseCTString(str) {
+  const match = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})$/);
+  if (!match) return null;
+  const [, month, day, year, hour, minute] = match.map(Number);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  // Determine CT offset: CDT (UTC-5) Mar 2nd Sun → Nov 1st Sun, else CST (UTC-6)
+  const utcGuess = new Date(Date.UTC(year, month - 1, day, hour, minute));
+  const ctOffset = isCDT(utcGuess) ? 5 : 6;
+  return new Date(Date.UTC(year, month - 1, day, hour + ctOffset, minute));
+}
+function isCDT(utcDate) {
+  const m = utcDate.getUTCMonth(); // 0-indexed
+  if (m < 2 || m > 10) return false;
+  if (m > 2 && m < 10) return true;
+  const d = utcDate.getUTCDate(), y = utcDate.getUTCFullYear();
+  if (m === 2)  { const firstSun = (7 - new Date(Date.UTC(y, 2, 1)).getUTCDay()) % 7 + 1; const secondSun = firstSun + 7; return d >= secondSun; }
+  if (m === 10) { const firstSun = (7 - new Date(Date.UTC(y, 10, 1)).getUTCDay()) % 7 + 1; return d < firstSun; }
+  return false;
+}
+// ── Parse duration string → minutes ───────────────────────────────────────────
+function parseDuration(str) {
+  const match = str.trim().match(/^(\d+)\s*(minute|minutes|hour|hours|day|days)$/i);
+  if (!match) return null;
+  const n = parseInt(match[1]), unit = match[2].toLowerCase();
+  if (unit.startsWith('day'))    return n * 24 * 60;
+  if (unit.startsWith('hour'))   return n * 60;
+  if (unit.startsWith('minute')) return n;
+  return null;
+}
+
+// ── Start a scheduled auction (used both for scheduled and immediate launches) ─
+async function startScheduledAuction(auctionId) {
+  const auction = db.prepare('SELECT * FROM auctions WHERE id = ?').get(auctionId);
+  if (!auction || auction.status !== 'scheduled') return;
+  if (activeAuction) {
+    // Another auction is already live — reschedule this one for 30 min from now
+    console.warn(`[Auction] Cannot start #${auctionId} — another auction is active. Retrying in 30 min.`);
+    setTimeout(() => startScheduledAuction(auctionId), 30 * 60 * 1000);
+    return;
+  }
+  const channel = await client.channels.fetch(CONFIG.CHANNELS.AUCTION).catch(() => null);
+  if (!channel) { console.error('[Auction] Auction channel not found for scheduled auction.'); return; }
+
+  const durationMs  = (auction.duration_minutes || 240) * 60 * 1000;
+  const endsAt      = new Date(Date.now() + durationMs).toISOString();
+  const endsAtTs    = Math.floor(new Date(endsAt).getTime() / 1000);
+
+  db.prepare("UPDATE auctions SET status = 'active', ends_at = ? WHERE id = ?").run(endsAt, auctionId);
+  activeAuction = auctionId;
+
+  const embed = new EmbedBuilder().setColor('#c9a84c').setTitle(`🎨 AUCTION — ${auction.title}`)
+    .setDescription(
+      `${auction.description || ''}\n\n` +
+      `**Starting Bid:** $${(auction.starting_bid || 50).toFixed(2)}\n` +
+      `**Leading Bidder:** No bids yet\n\n` +
+      `⏰ Ends <t:${endsAtTs}:R>`
+    )
+    .setFooter({ text: "Bully's World • Highest bid wins." }).setTimestamp();
+  if (auction.image_url) embed.setImage(auction.image_url);
+  const bidRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('auction.bid').setLabel(`🔨 Place Bid — $${(auction.starting_bid || 50).toFixed(2)}`).setStyle(ButtonStyle.Success)
+  );
+  const auctionMsg = await channel.send({ content: '@everyone', embeds: [embed], components: [bidRow] });
+  db.prepare('UPDATE auctions SET message_id = ? WHERE id = ?').run(auctionMsg.id, auctionId);
+  auctionTimer = setTimeout(() => endAuction(auctionId, true), durationMs);
+  console.log(`[Auction] Scheduled auction #${auctionId} "${auction.title}" is now live.`);
+}
 
 async function endAuction(auctionId, expired = true) {
   const auction = db.prepare('SELECT * FROM auctions WHERE id = ?').get(auctionId);
@@ -2790,149 +2831,156 @@ Check your DMs to complete your purchase.`)
   activeAuction = null;
 }
 
+// Holds state for winners waiting on payment confirmation { stripeSessionId → { auction, winnerId, winnerUsername, winningBid, forfeitTimer } }
+const pendingAuctionPayments = new Map();
+
 async function processAuctionWinner(auction, winnerId, winnerUsername, winningBid) {
   try {
     const guild = await client.guilds.fetch(CONFIG.GUILD_ID);
     const winMember = await guild.members.fetch(winnerId).catch(()=>null);
     if (!winMember) return;
 
-    // Create Stripe payment link
+    // ── Create Stripe payment session ──────────────────────────────────────────
     let paymentUrl = null;
-    try {
-      const session = await stripe.checkout.sessions.create({
-        payment_method_types: ['card'],
-        line_items: [{
-          price_data: {
-            currency: 'usd',
-            product_data: {
-              name: auction.title,
-              description: `Original painting by Bully — auction winning bid`,
+    let stripeSessionId = null;
+    if (stripe) {
+      try {
+        const session = await stripe.checkout.sessions.create({
+          payment_method_types: ['card'],
+          line_items: [{
+            price_data: {
+              currency: 'usd',
+              product_data: {
+                name: auction.title,
+                description: `Original artwork by Bully — auction winning bid`,
+              },
+              unit_amount: Math.round(winningBid * 100),
             },
-            unit_amount: Math.round(winningBid * 100),
-          },
-          quantity: 1,
-        }],
-        mode: 'payment',
-        success_url: 'https://bullysapparel.fourthwall.com',
-        cancel_url: 'https://bullysapparel.fourthwall.com',
-        metadata: { auction_id: String(auction.id), winner_id: winnerId },
-      });
-      paymentUrl = session.url;
-    } catch(e) { console.error('[Auction] Stripe error:', e.message); }
+            quantity: 1,
+          }],
+          mode: 'payment',
+          success_url: 'https://bullysapparel.fourthwall.com',
+          cancel_url:  'https://bullysapparel.fourthwall.com',
+          metadata: { auction_id: String(auction.id), winner_id: winnerId },
+        });
+        paymentUrl     = session.url;
+        stripeSessionId = session.id;
+        // Record pending payment in DB
+        db.prepare(
+          `INSERT OR IGNORE INTO auction_payments (auction_id, stripe_session_id, winner_id, winner_username, amount, status)
+           VALUES (?, ?, ?, ?, ?, 'pending')`
+        ).run(auction.id, stripeSessionId, winnerId, winnerUsername, winningBid);
+      } catch(e) { console.error('[Auction] Stripe error:', e.message); }
+    }
 
-    const dmEmbed = new EmbedBuilder().setColor('#c9a84c').setTitle(`🎨 You won the auction — ${auction.title}!`)
+    // ── DM winner — payment step only ─────────────────────────────────────────
+    const paymentEmbed = new EmbedBuilder().setColor('#c9a84c')
+      .setTitle(`🎨 You won the auction — ${auction.title}!`)
       .setDescription(
-        `Congratulations! Your winning bid was **$${winningBid.toFixed(2)}**.
-
-` +
-        `─────────────────────
-
-` +
-        `**Step 1 — Complete your payment:**
-` +
-        `${paymentUrl ? `[Click here to pay securely](${paymentUrl})` : 'Payment link will be sent shortly.'}
-
-` +
-        `**Step 2 — Submit your shipping info:**
-` +
-        `Please reply to this DM with the form below filled out:
-
-` +
-        `**Full Name:**
-
-` +
-        `**Address Line 1:**
-
-` +
-        `**Address Line 2** *(type N/A if none)*:
-
-` +
-        `**City:**
-
-` +
-        `**State/Province:**
-
-` +
-        `**ZIP/Postal Code:**
-
-` +
-        `**Country:**
-
-` +
-        `**Phone Number:**
-
-` +
-        `─────────────────────
-
-` +
-        `You have **48 hours** to complete payment and submit shipping info or your win will be forfeited and the next highest bidder will be contacted.
-
-` +
-        `⚠️ Please fill out every field.`
+        `Congratulations! Your winning bid was **$${winningBid.toFixed(2)}**.\n\n` +
+        `─────────────────────\n\n` +
+        `**Step 1 — Complete your payment:**\n` +
+        (paymentUrl
+          ? `[👉 Click here to pay securely via Stripe](${paymentUrl})\n\n`
+          : `A payment link will be sent to you shortly.\n\n`) +
+        `─────────────────────\n\n` +
+        `Once your payment is confirmed, you'll receive a follow-up DM to submit your shipping address.\n\n` +
+        `⏳ You have **48 hours** to complete payment or your win will be forfeited and the next highest bidder will be contacted.`
       )
-      .setFooter({text:"Bully's Apparel • You earned this."}).setTimestamp();
-    await winMember.send({ embeds: [dmEmbed] });
+      .setFooter({ text: "Bully's Apparel • You earned this." }).setTimestamp();
+    await winMember.send({ embeds: [paymentEmbed] }).catch(()=>{});
 
-    // Collect shipping and forward to owner
-    const dmChannel = await winMember.createDM();
+    // ── Set 48-hour forfeit timer for non-payment ──────────────────────────────
+    const forfeitTimer = setTimeout(async () => {
+      // Only forfeit if payment still pending
+      const payRec = stripeSessionId
+        ? db.prepare('SELECT status FROM auction_payments WHERE stripe_session_id = ?').get(stripeSessionId)
+        : null;
+      if (payRec && payRec.status === 'paid') return; // already paid — skip
+      pendingAuctionPayments.delete(stripeSessionId || winnerId);
+      await applyAuctionWarning(winnerId, winnerUsername, winMember);
+      await winMember.send('⏰ Your auction win has been forfeited — payment was not received within 48 hours.').catch(()=>{});
+      if (auction.second_bidder_id) {
+        const ch = await client.channels.fetch(CONFIG.CHANNELS.AUCTION).catch(()=>null);
+        if (ch) {
+          await ch.send({ embeds: [new EmbedBuilder().setColor('#FF4500')
+            .setTitle(`🎨 RUNNER UP CONTACTED — ${auction.title}`)
+            .setDescription(`The original winner did not complete payment. <@${auction.second_bidder_id}> is now being contacted as the runner-up.`)
+            .setFooter({ text: "Bully's World • Second chance!" }).setTimestamp()] });
+        }
+        const runnerUpAuction = { ...auction, current_bidder_id: auction.second_bidder_id, current_bidder_username: auction.second_bidder_username, current_bid: auction.second_bid };
+        await processAuctionWinner(runnerUpAuction, auction.second_bidder_id, auction.second_bidder_username, auction.second_bid);
+      }
+    }, 48 * 60 * 60 * 1000);
+
+    // Store state so the Stripe webhook can pick it up
+    pendingAuctionPayments.set(stripeSessionId || winnerId, { auction, winnerId, winnerUsername, winningBid, winMember, forfeitTimer });
+
+  } catch(e) { console.error('[Auction] Error processing winner:', e); }
+}
+
+// ── Called when Stripe webhook confirms payment ────────────────────────────────
+async function startShippingCollection(auction, winnerId, winnerUsername, winningBid, winMember) {
+  try {
     const owner = await client.users.fetch(CONFIG.OWNER_ID).catch(()=>null);
+    const dmChannel = await winMember.createDM().catch(()=>null);
+    if (!dmChannel) return;
 
-    // Store active auction session for owner confirm flow
+    // Notify winner — payment confirmed, now need shipping info
+    const shippingEmbed = new EmbedBuilder().setColor('#2ecc71')
+      .setTitle('✅ Payment Confirmed — Shipping Info Needed')
+      .setDescription(
+        `Your payment of **$${winningBid.toFixed(2)}** for **${auction.title}** has been received!\n\n` +
+        `─────────────────────\n\n` +
+        `**Please reply to this DM with your shipping info:**\n\n` +
+        `**Full Name:**\n\n` +
+        `**Address Line 1:**\n\n` +
+        `**Address Line 2** *(type N/A if none)*:\n\n` +
+        `**City:**\n\n` +
+        `**State/Province:**\n\n` +
+        `**ZIP/Postal Code:**\n\n` +
+        `**Country:**\n\n` +
+        `**Phone Number:**\n\n` +
+        `─────────────────────\n\n` +
+        `⏳ Please submit within **24 hours**.`
+      )
+      .setFooter({ text: "Bully's Apparel • Almost there!" }).setTimestamp();
+    await winMember.send({ embeds: [shippingEmbed] }).catch(()=>{});
+
+    // Store session for owner !confirm flow
     activeGiveawaySessions.set(CONFIG.OWNER_ID, { winnerMember: winMember, cycle: `auction-${auction.id}` });
 
-    const winnerCollector = dmChannel.createMessageCollector({
+    const shippingCollector = dmChannel.createMessageCollector({
       filter: m => m.author.id === winnerId,
-      time: 48 * 60 * 60 * 1000,
+      time: 24 * 60 * 60 * 1000,
     });
 
-    winnerCollector.on('collect', async(msg) => {
+    shippingCollector.on('collect', async (msg) => {
       if (!owner) return;
       const ownerEmbed = new EmbedBuilder().setColor('#1a1a1a')
-        .setTitle(`📦 Auction Shipping — ${auction.title}`)
+        .setTitle(`📦 Auction Shipping Info — ${auction.title}`)
         .setDescription(
-          `**Winner:** ${winnerUsername} (<@${winnerId}>)
-` +
-          `**Winning bid:** $${winningBid.toFixed(2)}
-
-` +
-          `─────────────────────
-
-` +
-          `${msg.content}
-
-` +
-          `─────────────────────
-
-` +
-          `Type **!confirm** to confirm or reply with what's missing to forward back to the winner.`
+          `**Winner:** ${winnerUsername} (<@${winnerId}>)\n` +
+          `**Winning bid:** $${winningBid.toFixed(2)}\n` +
+          `**Payment:** ✅ Confirmed\n\n` +
+          `─────────────────────\n\n` +
+          `${msg.content}\n\n` +
+          `─────────────────────\n\n` +
+          `Type **!confirm** to confirm or reply with corrections to forward back to the winner.`
         )
-        .setFooter({text:"Bully's World — Auction System"}).setTimestamp();
-      await owner.send({ embeds: [ownerEmbed] });
+        .setFooter({ text: "Bully's World — Auction System" }).setTimestamp();
+      await owner.send({ embeds: [ownerEmbed] }).catch(()=>{});
     });
 
-    winnerCollector.on('end', async(col) => {
+    shippingCollector.on('end', async (col) => {
       if (!col.size) {
-        // Winner didn't respond — apply warning and move to runner up
         await applyAuctionWarning(winnerId, winnerUsername, winMember);
-        await winMember.send("Your auction win has been forfeited due to no response within 48 hours.").catch(()=>{});
+        await winMember.send('⏰ Shipping info was not received within 24 hours — your win has been forfeited.').catch(()=>{});
         activeGiveawaySessions.delete(CONFIG.OWNER_ID);
-
-        // Move to runner up
-        if (auction.second_bidder_id) {
-          const channel = await client.channels.fetch(CONFIG.CHANNELS.AUCTION).catch(()=>null);
-          if (channel) {
-            const embed = new EmbedBuilder().setColor('#FF4500').setTitle(`🎨 RUNNER UP CONTACTED — ${auction.title}`)
-              .setDescription(`The original winner forfeited. <@${auction.second_bidder_id}> is now being contacted as the runner up.`)
-              .setFooter({text:"Bully's World • Second chance!"}).setTimestamp();
-            await channel.send({ embeds: [embed] });
-          }
-          const runnerUpAuction = { ...auction, current_bidder_id: auction.second_bidder_id, current_bidder_username: auction.second_bidder_username, current_bid: auction.second_bid };
-          await processAuctionWinner(runnerUpAuction, auction.second_bidder_id, auction.second_bidder_username, auction.second_bid);
-        }
       }
     });
 
-  } catch(e) { console.error('[Auction] Error processing winner:', e); }
+  } catch(e) { console.error('[Auction] Error starting shipping collection:', e); }
 }
 
 async function applyAuctionWarning(userId, username, member) {
@@ -2958,27 +3006,21 @@ async function updateAuctionEmbed(auction) {
     const msg = await channel.messages.fetch(auction.message_id).catch(()=>null);
     if (!msg) return;
     const endsAt = Math.floor(new Date(auction.ends_at).getTime() / 1000);
+    const currentBid = auction.current_bid ?? auction.starting_bid;
+    const nextBid = (currentBid + 5).toFixed(2);
     const embed = new EmbedBuilder().setColor('#c9a84c').setTitle(`🎨 AUCTION — ${auction.title}`)
       .setDescription(
-        `${auction.description || ''}
-
-` +
-        `**Current Bid:** $${auction.current_bid ? auction.current_bid.toFixed(2) : auction.starting_bid.toFixed(2)}
-` +
-        `**Leading Bidder:** ${auction.current_bidder_username ? `${auction.current_bidder_username}` : 'No bids yet'}
-` +
-        `**Minimum Bid:** $${auction.current_bid ? (auction.current_bid + 1).toFixed(2) : auction.starting_bid.toFixed(2)}
-
-` +
-        `Type **!bid [amount]** to place your bid.
-Example: \`!bid ${auction.current_bid ? (auction.current_bid + 1).toFixed(2) : auction.starting_bid.toFixed(2)}\`
-
-` +
+        `${auction.description || ''}\n\n` +
+        `**Current Bid:** $${currentBid.toFixed(2)}\n` +
+        `**Leading Bidder:** ${auction.current_bidder_username || 'No bids yet'}\n\n` +
         `⏰ Ends <t:${endsAt}:R>`
       )
       .setFooter({text:"Bully's World • Highest bid wins."}).setTimestamp();
     if (auction.image_url) embed.setImage(auction.image_url);
-    await msg.edit({ embeds: [embed] });
+    const bidRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('auction.bid').setLabel(`🔨 Bid $${nextBid}`).setStyle(ButtonStyle.Success)
+    );
+    await msg.edit({ embeds: [embed], components: [bidRow] });
   } catch(e) { console.error('[Auction] Error updating embed:', e); }
 }
 
@@ -3298,12 +3340,70 @@ client.once('ready', async()=>{
   startScheduler();
   dailyQ.init(client, db, addBB);
 
+  // ── Reload persisted scheduled auctions (survives bot restarts) ───────────────
+  const pendingScheduled = db.prepare("SELECT * FROM auctions WHERE status = 'scheduled'").all();
+  for (const auction of pendingScheduled) {
+    const delay = Math.max(0, new Date(auction.scheduled_start).getTime() - Date.now());
+    setTimeout(() => startScheduledAuction(auction.id), delay);
+    console.log(`[Auction] Reloaded scheduled auction #${auction.id} "${auction.title}" — starts in ${Math.round(delay / 60000)} min`);
+  }
+  if (pendingScheduled.length) console.log(`[Auction] ${pendingScheduled.length} scheduled auction(s) reloaded.`);
+
   // Start analytics dashboard (Express) — available at your Railway URL
   try {
     startDashboard(db);
   } catch (e) {
     console.error('[Dashboard] Failed to start:', e.message);
   }
+
+  // ── Register Stripe payment webhook callback ────────────────────────────────
+  // Called by dashboard.js when a checkout.session.completed event is received
+  setStripePaymentCallback(async (session) => {
+    const { auction_id, winner_id } = session.metadata || {};
+    if (!auction_id || !winner_id) return;
+
+    // Update payment record to paid
+    db.prepare(
+      `UPDATE auction_payments SET status = 'paid', paid_at = ? WHERE stripe_session_id = ?`
+    ).run(new Date().toISOString(), session.id);
+
+    // Find the pending state for this session
+    const pending = pendingAuctionPayments.get(session.id) || pendingAuctionPayments.get(winner_id);
+    if (pending) {
+      clearTimeout(pending.forfeitTimer);
+      pendingAuctionPayments.delete(session.id);
+      pendingAuctionPayments.delete(winner_id);
+    }
+
+    const auction = pending?.auction || db.prepare('SELECT * FROM auctions WHERE id = ?').get(parseInt(auction_id));
+    const winMember = pending?.winMember || await (async () => {
+      const guild = await client.guilds.fetch(CONFIG.GUILD_ID);
+      return guild.members.fetch(winner_id).catch(() => null);
+    })();
+    const winnerUsername = pending?.winnerUsername || winner_id;
+    const winningBid = pending?.winningBid || (session.amount_total / 100);
+
+    // Notify admin
+    const owner = await client.users.fetch(CONFIG.OWNER_ID).catch(() => null);
+    if (owner) {
+      await owner.send({ embeds: [new EmbedBuilder().setColor('#2ecc71')
+        .setTitle('💰 Auction Payment Received!')
+        .addFields(
+          { name: '🎨 Item',    value: auction?.title || `Auction #${auction_id}`, inline: true },
+          { name: '👤 Winner',  value: `${winnerUsername} (<@${winner_id}>)`,      inline: true },
+          { name: '💵 Amount',  value: `$${winningBid.toFixed(2)}`,               inline: true },
+        )
+        .setFooter({ text: "Stripe confirmed • Shipping info collection started" }).setTimestamp()]
+      }).catch(() => {});
+    }
+
+    // Notify winner and start shipping collection
+    if (winMember && auction) {
+      await startShippingCollection(auction, winner_id, winnerUsername, winningBid, winMember);
+    } else {
+      console.error('[Auction] Could not start shipping collection — missing member or auction data');
+    }
+  });
 });
 
 
@@ -4204,6 +4304,47 @@ client.on('interactionCreate', async interaction => {
     if (customId === 'menu.raid')    { await interaction.reply({ content: '⚔️ **Raids** coming soon!', ephemeral: true }); return; }
     if (customId === 'menu.boss')    { await interaction.reply({ content: '👹 **Boss Raids** coming soon!', ephemeral: true }); return; }
 
+    // ── AUCTION BID BUTTON ────────────────────────────────────────────────────
+    if (customId === 'auction.bid') {
+      if (!activeAuction) { await interaction.reply({ content: '❌ There is no active auction right now.', ephemeral: true }); return; }
+      const auction = db.prepare('SELECT * FROM auctions WHERE id = ? AND status = ?').get(activeAuction, 'active');
+      if (!auction) { await interaction.reply({ content: '❌ No active auction found.', ephemeral: true }); return; }
+
+      // Check blacklist
+      const warningRow = db.prepare('SELECT * FROM auction_warnings WHERE user_id = ?').get(userId);
+      if (warningRow?.blacklisted) { await interaction.reply({ content: '🚫 You are banned from participating in auctions.', ephemeral: true }); return; }
+
+      // Already leading bidder
+      if (auction.current_bidder_id === userId) { await interaction.reply({ content: "⚠️ You're already the highest bidder!", ephemeral: true }); return; }
+
+      // New bid = current + $5 (or starting bid if no bids yet)
+      const currentBid = auction.current_bid ?? auction.starting_bid;
+      const newBid = parseFloat((currentBid + 5).toFixed(2));
+
+      // Save previous bidder as runner-up
+      const prevBidderId       = auction.current_bidder_id;
+      const prevBidderUsername = auction.current_bidder_username;
+      const prevBid            = auction.current_bid;
+
+      db.prepare('UPDATE auctions SET current_bid = ?, current_bidder_id = ?, current_bidder_username = ?, second_bid = ?, second_bidder_id = ?, second_bidder_username = ? WHERE id = ?')
+        .run(newBid, userId, username, prevBid, prevBidderId, prevBidderUsername, activeAuction);
+      db.prepare('INSERT INTO auction_bids (auction_id, user_id, username, amount) VALUES (?, ?, ?, ?)').run(activeAuction, userId, username, newBid);
+
+      const updatedAuction = db.prepare('SELECT * FROM auctions WHERE id = ?').get(activeAuction);
+      await updateAuctionEmbed(updatedAuction);
+      await interaction.reply({ content: `✅ Bid of **$${newBid.toFixed(2)}** placed! You are now the leading bidder.`, ephemeral: true });
+
+      // Notify previous bidder they were outbid
+      if (prevBidderId) {
+        try {
+          const guild = await client.guilds.fetch(CONFIG.GUILD_ID);
+          const prevMember = await guild.members.fetch(prevBidderId).catch(()=>null);
+          if (prevMember) await prevMember.send(`⚠️ You've been outbid on **${auction.title}**! The new leading bid is **$${newBid.toFixed(2)}**. Head to the auction channel to bid again.`).catch(()=>{});
+        } catch {}
+      }
+      return;
+    }
+
     // HEIST MENU
     if (customId === 'menu.heist') {
       if (activeHeists.size >= 3) { await interaction.reply({ content: '🦹 3 heists are already running! Wait for one to finish.', ephemeral: true }); return; }
@@ -4976,7 +5117,8 @@ Click **BLOCK IT** within **${windowSecs} seconds**!`).setFooter({ text: "Bully'
 // ANNOUNCEMENT SYSTEM
 // ============================================================================
 const ANNOUNCEMENT_CHANNEL_ID = '1353949538393526283';
-const _pendingAnnouncements = new Map(); // userId → { state, text, timer }
+const _pendingAnnouncements  = new Map(); // userId → { state, text, timer }
+const _pendingAuctionSetups  = new Map(); // userId → { state, imageUrl, title, scheduledStart, timer }
 const _announcementQueue = []; // { id, text, postAt, timeoutHandle }
 let _announcementNextId = 1;
 
@@ -5167,6 +5309,119 @@ client.on('messageCreate', async msg => {
       }
       return;
     }
+  }
+
+  // ── Auction setup flow — capture mid-session replies ─────────────────────────
+  if (_pendingAuctionSetups.has(msg.author.id) && !lower.startsWith('!')) {
+    const session = _pendingAuctionSetups.get(msg.author.id);
+    clearTimeout(session.timer);
+    const resetTimer = () => { session.timer = setTimeout(() => _pendingAuctionSetups.delete(msg.author.id), 5 * 60 * 1000); };
+
+    if (lower === 'cancel') {
+      _pendingAuctionSetups.delete(msg.author.id);
+      await msg.reply('❌ Auction setup cancelled.');
+      return;
+    }
+
+    if (session.state === 'awaiting_image') {
+      const attachment = msg.attachments.first();
+      if (!attachment || !attachment.contentType?.startsWith('image')) {
+        resetTimer();
+        await msg.reply('❌ Please upload an image file. Try again or type `cancel` to abort.');
+        return;
+      }
+      session.imageUrl = attachment.url;
+      session.state = 'awaiting_title';
+      resetTimer();
+      await msg.reply('✏️ **Step 2/4** — What\'s the title of this piece?');
+      return;
+    }
+
+    if (session.state === 'awaiting_title') {
+      session.title = msg.content.trim();
+      session.state = 'awaiting_timing';
+      resetTimer();
+      await msg.reply(
+        '📅 **Step 3/4** — When should the auction go live?\n\n' +
+        'Type **`now`** to start immediately, or enter a date and time:\n' +
+        '**`MM/DD/YYYY HH:MM`** *(Central Time)*\n' +
+        'Example: `06/20/2026 18:00`'
+      );
+      return;
+    }
+
+    if (session.state === 'awaiting_timing') {
+      if (lower === 'now') {
+        session.scheduledStart = new Date();
+      } else {
+        const parsed = parseCTString(msg.content.trim());
+        if (!parsed) {
+          resetTimer();
+          await msg.reply('❌ Invalid format. Use `MM/DD/YYYY HH:MM` (CT), type `now`, or type `cancel` to abort.');
+          return;
+        }
+        if (parsed.getTime() <= Date.now()) {
+          resetTimer();
+          await msg.reply('❌ That time is in the past. Enter a future date/time or type `now`.');
+          return;
+        }
+        session.scheduledStart = parsed;
+      }
+      session.timingInput = msg.content.trim();
+      session.state = 'awaiting_duration';
+      resetTimer();
+      await msg.reply('⏱️ **Step 4/4** — How long should the auction run?\nExamples: `4 hours` · `12 hours` · `24 hours` · `2 days`');
+      return;
+    }
+
+    if (session.state === 'awaiting_duration') {
+      const durationMins = parseDuration(msg.content.trim());
+      if (!durationMins) {
+        resetTimer();
+        await msg.reply('❌ Invalid duration. Try `4 hours`, `12 hours`, or `2 days`. Or type `cancel` to abort.');
+        return;
+      }
+      _pendingAuctionSetups.delete(msg.author.id);
+
+      const { imageUrl, title, scheduledStart, timingInput } = session;
+      const isNow = scheduledStart.getTime() <= Date.now() + 5000;
+
+      const insertResult = db.prepare(
+        `INSERT INTO auctions (title, starting_bid, image_url, status, scheduled_start, duration_minutes, ends_at)
+         VALUES (?, 50, ?, 'scheduled', ?, ?, ?)`
+      ).run(title, imageUrl, scheduledStart.toISOString(), durationMins, scheduledStart.toISOString());
+      const newId = insertResult.lastInsertRowid;
+
+      const delay = Math.max(0, scheduledStart.getTime() - Date.now());
+      setTimeout(() => startScheduledAuction(newId), delay);
+
+      if (isNow) {
+        await msg.reply(`✅ **Auction is going live now!** 🎨 **${title}**`);
+      } else {
+        const unix = Math.floor(scheduledStart.getTime() / 1000);
+        await msg.reply(
+          `✅ **Auction scheduled!**\n\n` +
+          `🎨 **${title}**\n` +
+          `📅 Goes live: <t:${unix}:F> (<t:${unix}:R>)\n` +
+          `⏱️ Duration: ${msg.content.trim()}\n` +
+          `🆔 ID: \`#${newId}\``
+        );
+      }
+      return;
+    }
+  }
+
+  // ── !auction ──
+  if (lower === '!auction') {
+    if (_pendingAuctionSetups.has(msg.author.id)) {
+      const old = _pendingAuctionSetups.get(msg.author.id);
+      clearTimeout(old.timer);
+      _pendingAuctionSetups.delete(msg.author.id);
+    }
+    const timer = setTimeout(() => _pendingAuctionSetups.delete(msg.author.id), 5 * 60 * 1000);
+    _pendingAuctionSetups.set(msg.author.id, { state: 'awaiting_image', timer });
+    await msg.reply('📸 **Step 1/4** — Upload the image of the item you\'re auctioning.\n\nType `cancel` at any time to abort.');
+    return;
   }
 
   // ── !announcement ──
