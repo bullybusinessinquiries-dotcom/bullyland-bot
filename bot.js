@@ -13,6 +13,7 @@ const { JWT } = require('google-auth-library');
 const schedule = require('node-schedule');
 
 const { Client, GatewayIntentBits, EmbedBuilder, PermissionsBitField, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType } = require('discord.js');
+const initRadio = require('./radio');
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -21,6 +22,7 @@ const client = new Client({
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.DirectMessages,
     GatewayIntentBits.GuildMessageReactions,
+    GatewayIntentBits.GuildVoiceStates, // required for @discordjs/voice
   ],
   partials: [Partials.Message, Partials.Channel, Partials.Reaction],
 });
@@ -3494,6 +3496,11 @@ client.once('ready', async()=>{
   } catch (e) {
     console.error('[Dashboard] Failed to start:', e.message);
   }
+
+  // ── Bully Radio — 24/7 voice broadcast ────────────────────────────────────
+  initRadio(client).catch(err => {
+    console.error('[Radio] Fatal init error:', err.message);
+  });
 
   // ── Register Stripe payment webhook callback ────────────────────────────────
   // Called by dashboard.js when a checkout.session.completed event is received
