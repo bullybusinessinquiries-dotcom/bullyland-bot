@@ -355,8 +355,8 @@ const dailyQ = {
 
     // Bot came back AFTER post time, BEFORE close time, and nothing was posted today — post now
     if (nowMins >= postMins && nowMins < closeMins && !this.activePost) {
-      // Double-check DB to make sure we didn't already post (covers race conditions)
-      const today = new Date().toISOString().slice(0, 10);
+      // Use CT date to match how _tick queries the DB
+      const today = `${tzNow.getFullYear()}-${String(tzNow.getMonth()+1).padStart(2,'0')}-${String(tzNow.getDate()).padStart(2,'0')}`;
       const alreadyPosted = this.db.prepare(
         "SELECT id FROM dq_posts WHERE posted_at LIKE ? LIMIT 1"
       ).get(`${today}%`);
@@ -373,22 +373,33 @@ const dailyQ = {
 
   // ── Minute ticker — replaces node-schedule for reliability on Railway ────────
   _tick() {
-    const tzNow  = new Date(new Date().toLocaleString('en-US', { timeZone: CFG.postTime.timezone }));
-    const hour   = tzNow.getHours();
-    const minute = tzNow.getMinutes();
-    const today  = tzNow.toISOString().slice(0, 10);
+    const tzNow   = new Date(new Date().toLocaleString('en-US', { timeZone: CFG.postTime.timezone }));
+    const hour    = tzNow.getHours();
+    const minute  = tzNow.getMinutes();
+    const nowMins = hour * 60 + minute;
+    const today   = `${tzNow.getFullYear()}-${String(tzNow.getMonth()+1).padStart(2,'0')}-${String(tzNow.getDate()).padStart(2,'0')}`;
 
-    // Fire post job at configured hour:minute
-    if (hour === CFG.postTime.hour && minute === CFG.postTime.minute && this._lastPostDate !== today) {
-      this._lastPostDate = today;
-      console.log('[DailyQ] Tick: post time reached');
-      this.postDailyQuestion().catch(e => console.error('[DailyQ] Post error:', e.message));
+    const postMins  = CFG.postTime.hour  * 60 + CFG.postTime.minute;
+    const closeMins = CFG.closeTime.hour * 60 + CFG.closeTime.minute;
+
+    // Post: it's past post time today, haven't posted today yet, and not past close time
+    if (nowMins >= postMins && nowMins < closeMins && this._lastPostDate !== today && !this.activePost) {
+      const alreadyPosted = this.db.prepare(
+        "SELECT id FROM dq_posts WHERE posted_at LIKE ? LIMIT 1"
+      ).get(`${today}%`);
+      if (!alreadyPosted) {
+        this._lastPostDate = today;
+        console.log('[DailyQ] Tick: posting daily question');
+        this.postDailyQuestion().catch(e => console.error('[DailyQ] Post error:', e.message));
+      } else {
+        this._lastPostDate = today; // already posted, don't keep checking
+      }
     }
 
-    // Fire close job at configured hour:minute
-    if (hour === CFG.closeTime.hour && minute === CFG.closeTime.minute && this._lastCloseDate !== today) {
+    // Close: it's past close time today and there's an active post
+    if (nowMins >= closeMins && this._lastCloseDate !== today && this.activePost) {
       this._lastCloseDate = today;
-      console.log('[DailyQ] Tick: close time reached');
+      console.log('[DailyQ] Tick: closing daily question');
       this.closeActivePost().catch(e => console.error('[DailyQ] Close error:', e.message));
     }
   },
