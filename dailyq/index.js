@@ -341,22 +341,37 @@ const dailyQ = {
 
   // ── Catch-up: run on every restart to handle missed scheduled events ────────
   _catchUp() {
-    // Get the current time in the configured timezone
-    const tzNow  = new Date(new Date().toLocaleString('en-US', { timeZone: CFG.postTime.timezone }));
-    const hour   = tzNow.getHours();
-    const minute = tzNow.getMinutes();
+    const tzNow   = new Date(new Date().toLocaleString('en-US', { timeZone: CFG.postTime.timezone }));
+    const hour    = tzNow.getHours();
+    const minute  = tzNow.getMinutes();
     const nowMins = hour * 60 + minute;
 
     const postMins  = CFG.postTime.hour  * 60 + CFG.postTime.minute;
     const closeMins = CFG.closeTime.hour * 60 + CFG.closeTime.minute;
 
-    // Bot came back AFTER close time and there's still an open post — close it now
+    // Bot came back AFTER close time with an open post — close it now
     if (nowMins >= closeMins && this.activePost) {
       console.log('[DailyQ] Catch-up: bot missed close window — closing now');
       this.closeActivePost().catch(e => console.error('[DailyQ] Catch-up close error:', e.message));
       return;
     }
 
+    // Bot came back AFTER post time, BEFORE close time, and nothing was posted today — post now
+    if (nowMins >= postMins && nowMins < closeMins && !this.activePost) {
+      // Double-check DB to make sure we didn't already post (covers race conditions)
+      const today = new Date().toISOString().slice(0, 10);
+      const alreadyPosted = this.db.prepare(
+        "SELECT id FROM dq_posts WHERE posted_at LIKE ? LIMIT 1"
+      ).get(`${today}%`);
+
+      if (!alreadyPosted) {
+        console.log('[DailyQ] Catch-up: bot missed post window — posting now');
+        this.postDailyQuestion().catch(e => console.error('[DailyQ] Catch-up post error:', e.message));
+      } else {
+        console.log('[DailyQ] Catch-up: post already exists for today — skipping');
+      }
+      return;
+    }
   },
 
   _restoreActive() {

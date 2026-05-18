@@ -2760,17 +2760,53 @@ function parseDuration(str) {
 }
 
 // ── Start a scheduled auction (used both for scheduled and immediate launches) ─
+async function setAuctionChannelVisible(visible) {
+  try {
+    const channel = await client.channels.fetch(CONFIG.CHANNELS.AUCTION).catch(() => null);
+    if (!channel) return;
+    const everyoneRole = channel.guild.roles.everyone;
+    await channel.permissionOverwrites.edit(everyoneRole, { ViewChannel: visible });
+    console.log(`[Auction] Channel ${visible ? 'revealed' : 'hidden'}.`);
+  } catch (e) { console.error('[Auction] Failed to set channel visibility:', e.message); }
+}
+
+async function purgeAuctionChannel() {
+  try {
+    const channel = await client.channels.fetch(CONFIG.CHANNELS.AUCTION).catch(() => null);
+    if (!channel) return;
+    let deleted = 0;
+    // Bulk delete in batches (only works for messages < 14 days old)
+    let fetched;
+    do {
+      fetched = await channel.messages.fetch({ limit: 100 });
+      if (fetched.size === 0) break;
+      const deletable = fetched.filter(m => Date.now() - m.createdTimestamp < 14 * 24 * 60 * 60 * 1000);
+      if (deletable.size > 0) {
+        await channel.bulkDelete(deletable, true).catch(() => {});
+        deleted += deletable.size;
+      }
+      // Delete any older messages one by one
+      const older = fetched.filter(m => Date.now() - m.createdTimestamp >= 14 * 24 * 60 * 60 * 1000);
+      for (const m of older.values()) { await m.delete().catch(() => {}); deleted++; }
+    } while (fetched.size >= 100);
+    console.log(`[Auction] Purged ${deleted} messages from auction channel.`);
+  } catch (e) { console.error('[Auction] Failed to purge channel:', e.message); }
+}
+
 async function startScheduledAuction(auctionId) {
   const auction = db.prepare('SELECT * FROM auctions WHERE id = ?').get(auctionId);
   if (!auction || auction.status !== 'scheduled') return;
   if (activeAuction) {
-    // Another auction is already live — reschedule this one for 30 min from now
     console.warn(`[Auction] Cannot start #${auctionId} — another auction is active. Retrying in 30 min.`);
     setTimeout(() => startScheduledAuction(auctionId), 30 * 60 * 1000);
     return;
   }
   const channel = await client.channels.fetch(CONFIG.CHANNELS.AUCTION).catch(() => null);
   if (!channel) { console.error('[Auction] Auction channel not found for scheduled auction.'); return; }
+
+  // Reveal the channel 15 seconds before posting so the @everyone ping notification fires
+  await setAuctionChannelVisible(true);
+  await new Promise(r => setTimeout(r, 15000));
 
   const durationMs  = (auction.duration_minutes || 240) * 60 * 1000;
   const endsAt      = new Date(Date.now() + durationMs).toISOString();
@@ -2791,7 +2827,7 @@ async function startScheduledAuction(auctionId) {
   const bidRow = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('auction.bid').setLabel(`🔨 Place Bid — $${(auction.starting_bid || 50).toFixed(2)}`).setStyle(ButtonStyle.Success)
   );
-  const auctionMsg = await channel.send({ content: '@everyone', embeds: [embed], components: [bidRow] });
+  const auctionMsg = await channel.send({ content: `@everyone 🎨 A new auction is live — **${auction.title}**! Place your bids below.`, embeds: [embed], components: [bidRow] });
   db.prepare('UPDATE auctions SET message_id = ? WHERE id = ?').run(auctionMsg.id, auctionId);
   auctionTimer = setTimeout(() => endAuction(auctionId, true), durationMs);
   console.log(`[Auction] Scheduled auction #${auctionId} "${auction.title}" is now live.`);
@@ -2813,7 +2849,28 @@ No bids were placed. The auction has ended.`)
         .setFooter({text:"Bully's World • Better luck next time."}).setTimestamp();
       await channel.send({ embeds: [embed] });
     }
+    // DM the owner with full auction details since channel gets purged
+    try {
+      const owner = await client.users.fetch(CONFIG.OWNER_ID);
+      const startedAt = auction.scheduled_start ? `<t:${Math.floor(new Date(auction.scheduled_start).getTime()/1000)}:F>` : 'N/A';
+      const endsAt = `<t:${Math.floor(new Date(auction.ends_at).getTime()/1000)}:F>`;
+      const ownerEmbed = new EmbedBuilder().setColor('#ff4444')
+        .setTitle(`🔔 Auction Ended With No Bids`)
+        .addFields(
+          { name: 'Item', value: auction.title, inline: true },
+          { name: 'Starting Bid', value: `$${(auction.starting_bid || 50).toFixed(2)}`, inline: true },
+          { name: 'Duration', value: `${auction.duration_minutes || 240} minutes`, inline: true },
+          { name: 'Started', value: startedAt, inline: true },
+          { name: 'Ended', value: endsAt, inline: true },
+          { name: 'Auction ID', value: `#${auction.id}`, inline: true },
+        )
+        .setFooter({ text: 'No action needed — channel has been cleared.' }).setTimestamp();
+      if (auction.image_url) ownerEmbed.setImage(auction.image_url);
+      await owner.send({ embeds: [ownerEmbed] });
+    } catch(e) { console.error('[Auction] Failed to DM owner about no-bid auction:', e.message); }
     activeAuction = null;
+    await setAuctionChannelVisible(false);
+    await purgeAuctionChannel();
     return;
   }
 
@@ -2829,6 +2886,8 @@ Check your DMs to complete your purchase.`)
 
   await processAuctionWinner(auction, auction.current_bidder_id, auction.current_bidder_username, auction.current_bid);
   activeAuction = null;
+  await setAuctionChannelVisible(false);
+  await purgeAuctionChannel();
 }
 
 // Holds state for winners waiting on payment confirmation { stripeSessionId → { auction, winnerId, winnerUsername, winningBid, forfeitTimer } }
@@ -2888,6 +2947,7 @@ async function processAuctionWinner(auction, winnerId, winnerUsername, winningBi
         `⏳ You have **48 hours** to complete payment or your win will be forfeited and the next highest bidder will be contacted.`
       )
       .setFooter({ text: "Bully's Apparel • You earned this." }).setTimestamp();
+    if (auction.image_url) paymentEmbed.setImage(auction.image_url);
     await winMember.send({ embeds: [paymentEmbed] }).catch(()=>{});
 
     // ── Set 48-hour forfeit timer for non-payment ──────────────────────────────
@@ -3007,7 +3067,9 @@ async function updateAuctionEmbed(auction) {
     if (!msg) return;
     const endsAt = Math.floor(new Date(auction.ends_at).getTime() / 1000);
     const currentBid = auction.current_bid ?? auction.starting_bid;
-    const nextBid = (currentBid + 5).toFixed(2);
+    const nextBid = auction.current_bid === null || auction.current_bid === undefined
+      ? (auction.starting_bid || 50).toFixed(2)
+      : (auction.current_bid + 5).toFixed(2);
     const embed = new EmbedBuilder().setColor('#c9a84c').setTitle(`🎨 AUCTION — ${auction.title}`)
       .setDescription(
         `${auction.description || ''}\n\n` +
@@ -4317,9 +4379,10 @@ client.on('interactionCreate', async interaction => {
       // Already leading bidder
       if (auction.current_bidder_id === userId) { await interaction.reply({ content: "⚠️ You're already the highest bidder!", ephemeral: true }); return; }
 
-      // New bid = current + $5 (or starting bid if no bids yet)
-      const currentBid = auction.current_bid ?? auction.starting_bid;
-      const newBid = parseFloat((currentBid + 5).toFixed(2));
+      // First bid = starting bid exactly; subsequent bids = current + $5
+      const newBid = auction.current_bid === null || auction.current_bid === undefined
+        ? parseFloat((auction.starting_bid || 50).toFixed(2))
+        : parseFloat((auction.current_bid + 5).toFixed(2));
 
       // Save previous bidder as runner-up
       const prevBidderId       = auction.current_bidder_id;
@@ -5116,7 +5179,7 @@ Click **BLOCK IT** within **${windowSecs} seconds**!`).setFooter({ text: "Bully'
 // ============================================================================
 // ANNOUNCEMENT SYSTEM
 // ============================================================================
-const ANNOUNCEMENT_CHANNEL_ID = '1353949538393526283';
+const ANNOUNCEMENT_CHANNEL_ID = process.env.CHANNEL_ANNOUNCEMENTS || '1353949538393526283';
 const _pendingAnnouncements  = new Map(); // userId → { state, text, timer }
 const _pendingAuctionSetups  = new Map(); // userId → { state, imageUrl, title, scheduledStart, timer }
 const _announcementQueue = []; // { id, text, postAt, timeoutHandle }
@@ -5391,6 +5454,9 @@ client.on('messageCreate', async msg => {
          VALUES (?, 50, ?, 'scheduled', ?, ?, ?)`
       ).run(title, imageUrl, scheduledStart.toISOString(), durationMins, scheduledStart.toISOString());
       const newId = insertResult.lastInsertRowid;
+
+      // Hide the auction channel until the auction goes live
+      await setAuctionChannelVisible(false);
 
       const delay = Math.max(0, scheduledStart.getTime() - Date.now());
       setTimeout(() => startScheduledAuction(newId), delay);
