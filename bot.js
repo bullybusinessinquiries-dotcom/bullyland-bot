@@ -208,6 +208,24 @@ db.exec(`
 try { db.exec('ALTER TABLE auctions ADD COLUMN scheduled_start TEXT'); }   catch(_) {}
 try { db.exec('ALTER TABLE auctions ADD COLUMN duration_minutes INTEGER DEFAULT 240'); } catch(_) {}
 
+// ── Shop state persistence — survives bot restarts ────────────────────────────
+db.exec(`
+  CREATE TABLE IF NOT EXISTS shop_state (
+    id           INTEGER PRIMARY KEY CHECK (id = 1),
+    roles_json   TEXT NOT NULL,
+    expires_at   TEXT NOT NULL
+  );
+`);
+
+// ── DM preferences — users can opt out of non-critical DMs ───────────────────
+db.exec(`
+  CREATE TABLE IF NOT EXISTS dm_preferences (
+    user_id    TEXT PRIMARY KEY,
+    opted_out  INTEGER DEFAULT 0,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+`);
+
 // ── SQLite durability settings (must come before any writes) ──────────────────
 // WAL mode: writes don't block reads, survives crashes mid-write.
 // NORMAL sync: safe without a full fsync on every commit (much faster on Railway).
@@ -327,6 +345,18 @@ const _pendingDMUse  = new Map(); // userId   → { itemId, guildId }
 const activeTrivia   = new Map(); // channelId → trivia game state
 const activeHangman  = new Map(); // channelId → hangman game state
 const gameCooldowns  = new Map(); // `${type}.${channelId}` → timestamp
+
+// ─── DM PREFERENCE HELPERS ─────────────────────────────────────────────────
+function dmAllowed(userId) {
+  const row = db.prepare('SELECT opted_out FROM dm_preferences WHERE user_id = ?').get(userId);
+  return !row || row.opted_out === 0;
+}
+function setDmOptOut(userId, optOut) {
+  db.prepare(`
+    INSERT INTO dm_preferences (user_id, opted_out, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(user_id) DO UPDATE SET opted_out = excluded.opted_out, updated_at = excluded.updated_at
+  `).run(userId, optOut ? 1 : 0);
+}
 
 // ─── DB HELPERS ────────────────────────────────────────────────────────────
 function getUser(userId, username) {
@@ -908,6 +938,11 @@ async function postMysteryDrop() {
     .setDescription(`A mystery drop just landed.\n\nType **!claim** in this channel.\n**First to claim it gets it. No second chances.**`)
     .addFields({name:'Expires',value:`<t:${Math.floor(expiresAt/1000)}:R>`,inline:true})
     .setFooter({text:"Bully's World • You snooze, you lose."}).setTimestamp();
+  // Purge old messages before posting new drop
+  try {
+    const old = await channel.messages.fetch({ limit: 100 });
+    if (old.size > 0) await channel.bulkDelete(old).catch(async () => { for (const [,m] of old) await m.delete().catch(()=>{}); });
+  } catch (_) {}
   const msg = await channel.send({ content: '@everyone', embeds: [embed] });
   activeDrop = { tier, claimed: false, expiresAt, messageId: msg.id };
   setTimeout(async () => {
@@ -1028,9 +1063,31 @@ async function purgeShopChannel(channel) {
   } catch (_) {}
 }
 
-async function refreshShop() {
+async function refreshShop(forceNew = false) {
   SHOP_ROLES = await loadRolesFromSheet();
-  activeShopRoles = pickShopRoles(SHOP_ROLES);
+
+  // Restore persisted shop if still valid (survives bot restarts/updates)
+  if (!forceNew) {
+    const saved = db.prepare('SELECT * FROM shop_state WHERE id = 1').get();
+    if (saved && new Date(saved.expires_at) > new Date()) {
+      try {
+        activeShopRoles = JSON.parse(saved.roles_json);
+        shopRefreshTime = new Date(saved.expires_at);
+        console.log('[Shop] Restored persisted shop lineup — still valid until', saved.expires_at);
+      } catch (_) { /* fall through to re-pick */ }
+    }
+  }
+
+  // Pick new roles if nothing valid in DB
+  if (!activeShopRoles.length || forceNew) {
+    activeShopRoles = pickShopRoles(SHOP_ROLES);
+    shopRefreshTime = new Date(Date.now() + 12 * 60 * 60 * 1000);
+    db.prepare(`
+      INSERT INTO shop_state (id, roles_json, expires_at) VALUES (1, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET roles_json = excluded.roles_json, expires_at = excluded.expires_at
+    `).run(JSON.stringify(activeShopRoles), shopRefreshTime.toISOString());
+  }
+
   const channel = await client.channels.fetch(CONFIG.CHANNELS.SHOP).catch(() => null);
   if (!channel) return;
   await purgeShopChannel(channel);
@@ -1129,7 +1186,7 @@ function buildLeaderboardEmbed() {
 
   const king = db.prepare('SELECT balance, COALESCE(bank_balance, 0) as bank FROM balances WHERE user_id = ?').get(CONFIG.OWNER_ID);
   const kingTotal = king ? (king.balance + king.bank) : 0;
-  const kingSection = `👑 **The King** — **${kingTotal.toLocaleString()} BB** *(untouchable)*\n​\n`;
+  const kingSection = `👑 **The King** — **${kingTotal.toLocaleString()} BB**\n​\n`;
   const topSection = top.length
     ? top.map((u, i) => `**${i + 1}.** ${u.username}`).join('\n')
     : '_No one has any BB yet._';
@@ -1811,6 +1868,32 @@ client.on('messageCreate', async(message) => {
     return;
   }
 
+  // ── !notifications ──
+  if (content === '!notifications') {
+    const current = dmAllowed(userId);
+    const embed = new EmbedBuilder().setColor('#2b2d31')
+      .setTitle('🔔 Notification Settings')
+      .setDescription(
+        `Your bot DMs are currently **${current ? 'on' : 'off'}**.\n\n` +
+        (current
+          ? `To turn them off, type **\`!notifications off\`**`
+          : `To turn them back on, type **\`!notifications on\`**`)
+      )
+      .setFooter({ text: "Bully's World" }).setTimestamp();
+    await message.reply({ embeds: [embed] });
+    return;
+  }
+  if (content === '!notifications off') {
+    setDmOptOut(userId, true);
+    await message.reply({ embeds: [new EmbedBuilder().setColor('#2b2d31').setDescription('🔕 Got it — bot DMs turned off.').setFooter({ text: "Bully's World" })] });
+    return;
+  }
+  if (content === '!notifications on') {
+    setDmOptOut(userId, false);
+    await message.reply({ embeds: [new EmbedBuilder().setColor('#2b2d31').setDescription('🔔 Bot DMs turned back on.').setFooter({ text: "Bully's World" })] });
+    return;
+  }
+
   // ── !balance ──
   if (content === '!balance') {
     const u = getUser(userId, username);
@@ -2380,23 +2463,17 @@ This challenge expires in 60 seconds.`)
     db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(userId, -amount, `sent to ${mention.username}`);
     addBB(mention.id, mention.username, amount, `received from ${username}`);
     const embed = new EmbedBuilder().setColor('#c9a84c').setTitle('💸 Bully Bucks Sent!')
-      .setDescription(`**${username}** sent **${amount} BB** to **${mention.username}**!
-
-That's love right there.`)
-      .addFields(
-        {name:`${username}'s new balance`, value:`${u.balance - amount} BB`, inline:true},
-        {name:`${mention.username}'s new balance`, value:`${getUser(mention.id, mention.username).balance} BB`, inline:true}
-      )
+      .setDescription(`**${username}** sent **${amount} BB** to **${mention.username}**!\n\nThat's love right there. 🙏`)
       .setFooter({text:"Bully's World • Spread the wealth."}).setTimestamp();
     await message.reply({ embeds: [embed] });
-    try {
-      const dmEmbed = new EmbedBuilder().setColor('#c9a84c').setTitle('💸 You received Bully Bucks!')
-        .setDescription(`**${username}** just sent you **${amount} BB**!
-
-Check your balance with !balance.`)
-        .setFooter({text:"Bully's World • Someone's feeling generous."}).setTimestamp();
-      await mention.send({ embeds: [dmEmbed] });
-    } catch {}
+    if (dmAllowed(mention.id)) {
+      try {
+        const dmEmbed = new EmbedBuilder().setColor('#c9a84c').setTitle('💸 You received Bully Bucks!')
+          .setDescription(`**${username}** just sent you **${amount} BB**!\n\nCheck your balance with \`!balance\`.`)
+          .setFooter({text:"Bully's World • Someone's feeling generous."}).setTimestamp();
+        await mention.send({ embeds: [dmEmbed] });
+      } catch {}
+    }
     return;
   }
 
@@ -3361,7 +3438,7 @@ function startScheduler() {
     setTimeout(()=>postCheckin(), delay*60*1000);
     console.log(`[Check-in] Scheduled in ${delay} minutes`);
   });
-  schedule.scheduleJob('0 */12 * * *', ()=>refreshShop());
+  schedule.scheduleJob('0 */12 * * *', ()=>refreshShop(true));
   schedule.scheduleJob({ rule:'0 0 1 * *', tz:CONFIG.TIMEZONE }, ()=>doMonthlyReset());
   schedule.scheduleJob('0 */6 * * *', ()=>postDailyLeaderboard());
   // Weekly lottery draw — Sunday at 8pm CT
