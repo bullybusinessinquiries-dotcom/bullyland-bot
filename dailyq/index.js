@@ -328,15 +328,12 @@ const dailyQ = {
     // Small delay so the Discord client is fully ready before we try to post/close
     setTimeout(() => this._catchUp(), 5000);
 
-    // Schedule daily post (9:00 AM Chicago)
-    const { hour, minute, timezone } = CFG.postTime;
-    schedule.scheduleJob({ hour, minute, tz: timezone }, () => this.postDailyQuestion());
+    // Poll every minute — more reliable than node-schedule on Railway containers
+    this._lastPostDate  = null;
+    this._lastCloseDate = null;
+    setInterval(() => this._tick(), 60 * 1000);
 
-    // Schedule daily close (9:00 PM Chicago)
-    const c = CFG.closeTime;
-    schedule.scheduleJob({ hour: c.hour, minute: c.minute, tz: c.timezone }, () => this.closeActivePost());
-
-    console.log('[DailyQ] Initialized — posts scheduled 8am / closes 9pm Chicago');
+    console.log(`[DailyQ] Initialized — polling every minute. Post: ${CFG.postTime.hour}:${String(CFG.postTime.minute).padStart(2,'0')} CT · Close: ${CFG.closeTime.hour}:${String(CFG.closeTime.minute).padStart(2,'0')} CT`);
   },
 
   // ── Catch-up: run on every restart to handle missed scheduled events ────────
@@ -371,6 +368,28 @@ const dailyQ = {
         console.log('[DailyQ] Catch-up: post already exists for today — skipping');
       }
       return;
+    }
+  },
+
+  // ── Minute ticker — replaces node-schedule for reliability on Railway ────────
+  _tick() {
+    const tzNow  = new Date(new Date().toLocaleString('en-US', { timeZone: CFG.postTime.timezone }));
+    const hour   = tzNow.getHours();
+    const minute = tzNow.getMinutes();
+    const today  = tzNow.toISOString().slice(0, 10);
+
+    // Fire post job at configured hour:minute
+    if (hour === CFG.postTime.hour && minute === CFG.postTime.minute && this._lastPostDate !== today) {
+      this._lastPostDate = today;
+      console.log('[DailyQ] Tick: post time reached');
+      this.postDailyQuestion().catch(e => console.error('[DailyQ] Post error:', e.message));
+    }
+
+    // Fire close job at configured hour:minute
+    if (hour === CFG.closeTime.hour && minute === CFG.closeTime.minute && this._lastCloseDate !== today) {
+      this._lastCloseDate = today;
+      console.log('[DailyQ] Tick: close time reached');
+      this.closeActivePost().catch(e => console.error('[DailyQ] Close error:', e.message));
     }
   },
 
