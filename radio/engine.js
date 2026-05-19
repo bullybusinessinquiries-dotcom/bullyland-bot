@@ -50,6 +50,16 @@ class RadioEngine {
       if (!this._paused) this._advance();
     });
 
+    // AutoPaused means Discord wasn't ready when playback started — resume it
+    this._player.on(AudioPlayerStatus.AutoPaused, () => {
+      console.warn('[Radio] AudioPlayer AutoPaused — connection not ready yet, will retry...');
+      setTimeout(() => {
+        if (this._player.state.status === AudioPlayerStatus.AutoPaused) {
+          this._player.unpause();
+        }
+      }, 2_000);
+    });
+
     // Broken stream — skip to next after a brief pause
     this._player.on('error', err => {
       console.error('[Radio] Playback error:', err.message, '— skipping track');
@@ -80,7 +90,11 @@ class RadioEngine {
     this._connection.subscribe(this._player);
     this._watchConnection();
 
-    console.log('[Radio] Joined voice channel.');
+    // Wait for the connection to be fully ready before returning.
+    // Without this, playback starts before Discord handshake completes,
+    // putting the AudioPlayer into AutoPaused where it silently does nothing.
+    await entersState(this._connection, VoiceConnectionStatus.Ready, 30_000);
+    console.log('[Radio] Joined voice channel and connection is ready.');
   }
 
   // ── Monitor the voice connection and reconnect if it drops ────────────────
