@@ -49,14 +49,12 @@ class RadioEngine {
       if (!this._paused) this._advance();
     });
 
-    // AutoPaused means Discord wasn't ready when playback started — resume it
+    // AutoPaused means the voice connection isn't ready yet.
+    // Keep retrying unpause every 2 seconds — the player will resume
+    // automatically once the connection reaches Ready state.
     this._player.on(AudioPlayerStatus.AutoPaused, () => {
-      console.warn('[Radio] AudioPlayer AutoPaused — connection not ready yet, will retry...');
-      setTimeout(() => {
-        if (this._player.state.status === AudioPlayerStatus.AutoPaused) {
-          this._player.unpause();
-        }
-      }, 2_000);
+      console.warn('[Radio] AudioPlayer AutoPaused — will keep retrying until connection is ready...');
+      this._startAutoPausedRetry();
     });
 
     // Broken stream — skip to next after a brief pause
@@ -67,8 +65,27 @@ class RadioEngine {
   }
 
   init(client) {
-    this._client  = client;
-    this._started = false; // tracks whether first playback has begun
+    this._client        = client;
+    this._started       = false;
+    this._autoPauseTimer = null;
+  }
+
+  // ── Keep retrying unpause while AutoPaused ────────────────────────────────
+  // @discordjs/voice will transition the player from AutoPaused → Playing
+  // automatically when the voice connection reaches Ready. This just prods
+  // it every 2 seconds in case that automatic transition doesn't fire.
+  _startAutoPausedRetry() {
+    if (this._autoPauseTimer) return; // already retrying
+    this._autoPauseTimer = setInterval(() => {
+      const status = this._player.state.status;
+      if (status !== AudioPlayerStatus.AutoPaused) {
+        clearInterval(this._autoPauseTimer);
+        this._autoPauseTimer = null;
+        console.log('[Radio] AutoPaused resolved — broadcast resuming.');
+        return;
+      }
+      this._player.unpause();
+    }, 2_000);
   }
 
   // ── Join the configured voice channel ────────────────────────────────────
@@ -102,12 +119,9 @@ class RadioEngine {
 
   // ── Monitor the voice connection ──────────────────────────────────────────
   _watchConnection() {
-    // Only start playback once the connection is truly Ready.
-    // This fires both on first connect and after a reconnect.
     this._connection.on(VoiceConnectionStatus.Ready, () => {
       this._reconnecting = false;
-      console.log('[Radio] Voice connection ready — starting broadcast.');
-      if (!this._paused) this._advance();
+      console.log('[Radio] Voice connection ready.');
     });
 
     this._connection.on(VoiceConnectionStatus.Disconnected, async () => {
