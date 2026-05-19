@@ -67,10 +67,14 @@ class RadioEngine {
   }
 
   init(client) {
-    this._client = client;
+    this._client  = client;
+    this._started = false; // tracks whether first playback has begun
   }
 
-  // ── Join the configured voice channel and start the reconnect watcher ──────
+  // ── Join the configured voice channel ────────────────────────────────────
+  // Playback does NOT start here — it starts when the Ready event fires
+  // in _watchConnection(). This prevents AutoPaused caused by playing
+  // before the Discord voice handshake is fully complete.
   async connect() {
     if (!config.VOICE_CHANNEL_ID) {
       console.error('[Radio] RADIO_VOICE_CHANNEL_ID is not set in .env — radio disabled.');
@@ -83,42 +87,38 @@ class RadioEngine {
       channelId:      config.VOICE_CHANNEL_ID,
       guildId:        config.GUILD_ID,
       adapterCreator: guild.voiceAdapterCreator,
-      selfDeaf:       true,  // radio doesn't need to hear users
+      selfDeaf:       true,
     });
 
     this._connection.subscribe(this._player);
     this._watchConnection();
-
-    // Wait for the connection to be fully ready before returning.
-    // Without this, playback starts before Discord handshake completes,
-    // putting the AudioPlayer into AutoPaused where it silently does nothing.
-    try {
-      await entersState(this._connection, VoiceConnectionStatus.Ready, 60_000);
-      console.log('[Radio] Joined voice channel and connection is ready.');
-    } catch {
-      // Timed out waiting for Ready — proceed anyway and let the reconnect
-      // watcher handle any instability
-      console.warn('[Radio] Voice connection slow to ready — proceeding anyway.');
-    }
+    console.log('[Radio] Joining voice channel — waiting for Ready...');
   }
 
-  // ── Monitor the voice connection and reconnect if it drops ────────────────
+  // ── Monitor the voice connection ──────────────────────────────────────────
   _watchConnection() {
+    // Only start playback once the connection is truly Ready.
+    // This fires both on first connect and after a reconnect.
+    this._connection.on(VoiceConnectionStatus.Ready, () => {
+      this._reconnecting = false;
+      console.log('[Radio] Voice connection ready — starting broadcast.');
+      if (!this._paused) this._advance();
+    });
+
     this._connection.on(VoiceConnectionStatus.Disconnected, async () => {
       if (this._reconnecting) return;
       this._reconnecting = true;
-      console.log('[Radio] Disconnected from voice — attempting to reconnect...');
+      console.log('[Radio] Disconnected — attempting to reconnect...');
 
       try {
-        // Discord sometimes re-establishes the connection automatically
+        // Discord sometimes re-establishes automatically
         await Promise.race([
-          entersState(this._connection, VoiceConnectionStatus.Signalling,  5_000),
-          entersState(this._connection, VoiceConnectionStatus.Connecting,  5_000),
+          entersState(this._connection, VoiceConnectionStatus.Signalling, 5_000),
+          entersState(this._connection, VoiceConnectionStatus.Connecting, 5_000),
         ]);
-        // If we reach here, connection is coming back on its own
         this._reconnecting = false;
       } catch {
-        // Connection didn't recover — destroy it and rejoin from scratch
+        // Didn't recover — destroy and rejoin
         try { this._connection.destroy(); } catch (_) {}
         this._reconnecting = false;
 
@@ -126,19 +126,13 @@ class RadioEngine {
           console.log('[Radio] Rejoining voice channel...');
           try {
             await this.connect();
-            if (!this._paused) this._advance();
+            // Playback resumes automatically when Ready fires above
           } catch (err) {
-            console.error('[Radio] Reconnect failed:', err.message, '— will retry in 30s');
-            setTimeout(() => this._watchConnection(), 30_000);
+            console.error('[Radio] Reconnect failed:', err.message, '— retrying in 30s');
+            setTimeout(() => this.connect(), 30_000);
           }
         }, config.RECONNECT_DELAY_MS);
       }
-    });
-
-    // Log when fully connected for diagnostics
-    this._connection.on(VoiceConnectionStatus.Ready, () => {
-      this._reconnecting = false;
-      console.log('[Radio] Voice connection ready.');
     });
   }
 

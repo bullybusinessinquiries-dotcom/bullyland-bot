@@ -46,21 +46,14 @@ async function initRadio(client) {
   const engine = new RadioEngine({ queue, intermissions, nowPlaying });
   engine.init(client);
 
+  // connect() joins the channel — playback starts automatically when
+  // VoiceConnectionStatus.Ready fires inside the engine's _watchConnection()
   try {
     await engine.connect();
-    engine._advance(); // kick off the first track
   } catch (err) {
     console.error('[Radio] Could not connect to voice channel:', err.message);
     console.error('[Radio]    Check RADIO_VOICE_CHANNEL_ID and that the bot has Connect + Speak permissions.');
-    // Retry after 30 seconds in case of a transient startup issue
-    setTimeout(async () => {
-      try {
-        await engine.connect();
-        engine._advance();
-      } catch (retryErr) {
-        console.error('[Radio] Retry failed:', retryErr.message);
-      }
-    }, 30_000);
+    setTimeout(() => engine.connect().catch(e => console.error('[Radio] Retry failed:', e.message)), 30_000);
   }
 
   // ── Periodic rescan — new files enter rotation without restart ───────────
