@@ -18,18 +18,17 @@ const {
 const path   = require('path');
 const config = require('./config');
 
-// Inject ffmpeg-static binary into PATH so @discordjs/voice (prism-media) can find it.
-// Falls back to system ffmpeg if ffmpeg-static is not installed.
+// Tell prism-media (used internally by @discordjs/voice) where FFmpeg is.
+// On Railway, nixpacks.toml installs FFmpeg system-wide so it's in PATH automatically.
+// Locally, ffmpeg-static provides a bundled binary as a fallback.
 try {
   const ffmpegPath = require('ffmpeg-static');
   if (ffmpegPath) {
-    const dir = path.dirname(ffmpegPath);
-    if (!process.env.PATH.includes(dir)) {
-      process.env.PATH = dir + path.delimiter + process.env.PATH;
-    }
+    process.env.FFMPEG_PATH = ffmpegPath; // prism-media reads this env var directly
+    console.log('[Radio] FFmpeg (ffmpeg-static):', ffmpegPath);
   }
 } catch (_) {
-  // ffmpeg-static not installed — rely on system ffmpeg in PATH
+  console.log('[Radio] ffmpeg-static not found — using system FFmpeg from PATH');
 }
 
 class RadioEngine {
