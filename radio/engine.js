@@ -93,8 +93,14 @@ class RadioEngine {
     // Wait for the connection to be fully ready before returning.
     // Without this, playback starts before Discord handshake completes,
     // putting the AudioPlayer into AutoPaused where it silently does nothing.
-    await entersState(this._connection, VoiceConnectionStatus.Ready, 30_000);
-    console.log('[Radio] Joined voice channel and connection is ready.');
+    try {
+      await entersState(this._connection, VoiceConnectionStatus.Ready, 60_000);
+      console.log('[Radio] Joined voice channel and connection is ready.');
+    } catch {
+      // Timed out waiting for Ready — proceed anyway and let the reconnect
+      // watcher handle any instability
+      console.warn('[Radio] Voice connection slow to ready — proceeding anyway.');
+    }
   }
 
   // ── Monitor the voice connection and reconnect if it drops ────────────────
