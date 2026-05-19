@@ -93,6 +93,11 @@ class RadioEngine {
     this._connection.subscribe(this._player);
     this._watchConnection();
     console.log('[Radio] Joining voice channel — waiting for Ready...');
+
+    // Log every state transition so we can see exactly where it gets stuck
+    this._connection.on('stateChange', (oldState, newState) => {
+      console.log(`[Radio] Connection: ${oldState.status} → ${newState.status}`);
+    });
   }
 
   // ── Monitor the voice connection ──────────────────────────────────────────
