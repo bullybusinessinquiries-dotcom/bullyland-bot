@@ -31,6 +31,28 @@ async function initRadio(client) {
   const nowPlaying   = new NowPlayingManager();
   const presence     = new PresenceManager();
 
+  // ── UDP connectivity check ────────────────────────────────────────────────
+  // @discordjs/voice requires outbound UDP for voice IP discovery.
+  // This confirms whether Railway's container can create UDP sockets at all.
+  await new Promise(resolve => {
+    const dgram = require('dgram');
+    try {
+      const sock = dgram.createSocket('udp4');
+      sock.bind(0, '0.0.0.0', () => {
+        console.log('[Radio] UDP socket test PASSED — port', sock.address().port);
+        sock.close();
+        resolve();
+      });
+      sock.on('error', err => {
+        console.error('[Radio] UDP socket test FAILED:', err.message);
+        resolve();
+      });
+    } catch (err) {
+      console.error('[Radio] Cannot create UDP socket:', err.message);
+      resolve();
+    }
+  });
+
   // ── Initial file scans ───────────────────────────────────────────────────
   queue.scan();
   intermissions.scan();

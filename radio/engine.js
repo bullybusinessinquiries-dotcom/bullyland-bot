@@ -126,16 +126,14 @@ class RadioEngine {
     this._watchConnection();
     console.log('[Radio] Joining voice channel — waiting for Ready...');
 
-    // Log every state transition and raw voice WebSocket messages
+    // Log every state transition
     this._connection.on('stateChange', (oldState, newState) => {
       console.log(`[Radio] Connection: ${oldState.status} → ${newState.status}`);
-      // Log networking debug info when entering connecting state
-      if (newState.status === VoiceConnectionStatus.Connecting) {
+      if (newState.status === VoiceConnectionStatus.Connecting && newState.networking) {
         const net = newState.networking;
-        if (net) {
-          net.on('debug', msg => console.log('[Radio/WS]', msg.substring(0, 400)));
-          net.on('error', err => console.error('[Radio/WS Error]', err.message));
-        }
+        net.on('debug',  msg => console.log('[Radio/Net]', String(msg).substring(0, 300)));
+        net.on('error',  err => console.error('[Radio/Net Error]', err.message));
+        net.on('stateChange', (o, n) => console.log(`[Radio/Net State] ${o?.code ?? o?.status ?? '?'} → ${n?.code ?? n?.status ?? '?'}`));
       }
     });
   }
