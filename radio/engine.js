@@ -100,6 +100,21 @@ class RadioEngine {
 
     const guild = await this._client.guilds.fetch(config.GUILD_ID);
 
+    // Log the bot's actual permissions in the voice channel before joining
+    try {
+      const channel = await guild.channels.fetch(config.VOICE_CHANNEL_ID);
+      const me = await guild.members.fetchMe();
+      const perms = channel.permissionsFor(me);
+      console.log('[Radio] Voice channel permissions →', {
+        viewChannel: perms.has('ViewChannel'),
+        connect:     perms.has('Connect'),
+        speak:       perms.has('Speak'),
+        stream:      perms.has('Stream'),
+      });
+    } catch (e) {
+      console.warn('[Radio] Could not check channel permissions:', e.message);
+    }
+
     this._connection = joinVoiceChannel({
       channelId:      config.VOICE_CHANNEL_ID,
       guildId:        config.GUILD_ID,
