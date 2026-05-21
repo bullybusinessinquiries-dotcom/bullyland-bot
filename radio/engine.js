@@ -98,21 +98,25 @@ class RadioEngine {
       return;
     }
 
+    const { getVoiceConnection } = require('@discordjs/voice');
     const guild = await this._client.guilds.fetch(config.GUILD_ID);
 
-    // Log the bot's actual permissions in the voice channel before joining
-    try {
-      const channel = await guild.channels.fetch(config.VOICE_CHANNEL_ID);
-      const me = await guild.members.fetchMe();
-      const perms = channel.permissionsFor(me);
-      console.log('[Radio] Voice channel permissions →', {
-        viewChannel: perms.has('ViewChannel'),
-        connect:     perms.has('Connect'),
-        speak:       perms.has('Speak'),
-        stream:      perms.has('Stream'),
-      });
-    } catch (e) {
-      console.warn('[Radio] Could not check channel permissions:', e.message);
+    // Destroy any stale connection left over from a previous deployment.
+    // A lingering session_id causes Discord to immediately close the voice
+    // WebSocket (state 1→6) on every IDENTIFY attempt, creating an endless cycle.
+    const stale = getVoiceConnection(config.GUILD_ID);
+    if (stale) {
+      console.log('[Radio] Destroying stale voice connection from previous session...');
+      stale.destroy();
+      await new Promise(r => setTimeout(r, 2_000));
+    }
+
+    // Also clear any cached voice state the bot is registered as being in
+    const me = guild.members.me ?? await guild.members.fetchMe();
+    if (me?.voice?.channelId) {
+      console.log('[Radio] Clearing stale cached voice state...');
+      await me.voice.disconnect().catch(() => {});
+      await new Promise(r => setTimeout(r, 2_000));
     }
 
     this._connection = joinVoiceChannel({
@@ -133,7 +137,10 @@ class RadioEngine {
         const net = newState.networking;
         net.on('debug',  msg => console.log('[Radio/Net]', String(msg).substring(0, 300)));
         net.on('error',  err => console.error('[Radio/Net Error]', err.message));
-        net.on('stateChange', (o, n) => console.log(`[Radio/Net State] ${o?.code ?? o?.status ?? '?'} → ${n?.code ?? n?.status ?? '?'}`));
+        net.on('stateChange', (o, n) => {
+          const closeInfo = (n?.code === 6 && n?.closeCode) ? ` closeCode=${n.closeCode}` : '';
+          console.log(`[Radio/Net State] ${o?.code ?? '?'} → ${n?.code ?? '?'}${closeInfo}`);
+        });
       }
     });
   }
