@@ -111,108 +111,20 @@ class RadioEngine {
       await new Promise(r => setTimeout(r, 2_000));
     }
 
-    // Also clear any cached voice state the bot is registered as being in
-    const me = guild.members.me ?? await guild.members.fetchMe();
-    if (me?.voice?.channelId) {
-      console.log('[Radio] Clearing stale cached voice state...');
-      await me.voice.disconnect().catch(() => {});
-      await new Promise(r => setTimeout(r, 2_000));
-    }
-
-    // ── Raw gateway diagnostic ────────────────────────────────────────────
-    // Intercept the raw VOICE_STATE_UPDATE and VOICE_SERVER_UPDATE events
-    // from the Discord gateway to capture session_id, token, and endpoint.
-    // Then do a MANUAL WebSocket connection to the voice server to get the
-    // exact response/close code — completely independent of @discordjs/voice.
-    let capturedSessionId = null;
-
-    const onRawVoiceState = (data) => {
-      if (data.user_id !== this._client.user?.id) return;
-      if (data.guild_id !== config.GUILD_ID) return;
-      capturedSessionId = data.session_id;
-      console.log('[Radio/Diag] VOICE_STATE_UPDATE → session_id:', data.session_id, '| channel_id:', data.channel_id);
-    };
-
-    const onRawVoiceServer = (data) => {
-      if (data.guild_id !== config.GUILD_ID) return;
-      console.log('[Radio/Diag] VOICE_SERVER_UPDATE → endpoint:', data.endpoint, '| token prefix:', data.token?.slice(0, 12));
-
-      // Manual WebSocket test — completely bypasses @discordjs/voice
-      // This shows us exactly what Discord's voice server says to our IDENTIFY
-      if (!capturedSessionId) {
-        console.warn('[Radio/Diag] No session_id yet — skipping manual WS test');
-        return;
-      }
-      const WS = require('ws');
-      const wsUrl = `wss://${data.endpoint}/?v=4`;
-      console.log('[Radio/Diag] Manual voice WS connecting to:', wsUrl);
-      const testWs = new WS(wsUrl);
-
-      testWs.on('open', () => {
-        console.log('[Radio/Diag] Manual voice WS OPEN ✓ — sending IDENTIFY...');
-        testWs.send(JSON.stringify({
-          op: 0,
-          d: {
-            server_id:  data.guild_id,
-            user_id:    this._client.user.id,
-            session_id: capturedSessionId,
-            token:      data.token,
-          },
-        }));
-      });
-      testWs.on('message', (raw) => {
-        const msg = JSON.parse(String(raw));
-        console.log(`[Radio/Diag] Voice WS OP ${msg.op}:`, JSON.stringify(msg.d ?? msg.code ?? '').substring(0, 200));
-      });
-      testWs.on('close', (code, reason) => {
-        console.log(`[Radio/Diag] Voice WS CLOSED — code: ${code} reason: ${String(reason)}`);
-        testWs.terminate();
-      });
-      testWs.on('error', (err) => {
-        console.error('[Radio/Diag] Voice WS ERROR:', err.message);
-      });
-    };
-
-    this._client.ws.on('VOICE_STATE_UPDATE',  onRawVoiceState);
-    this._client.ws.on('VOICE_SERVER_UPDATE', onRawVoiceServer);
-    // Clean up diagnostic listeners after 60s
-    setTimeout(() => {
-      this._client.ws.off('VOICE_STATE_UPDATE',  onRawVoiceState);
-      this._client.ws.off('VOICE_SERVER_UPDATE', onRawVoiceServer);
-    }, 60_000);
-
     this._connection = joinVoiceChannel({
       channelId:      config.VOICE_CHANNEL_ID,
       guildId:        config.GUILD_ID,
       adapterCreator: guild.voiceAdapterCreator,
       selfDeaf:       true,
-      debug:          true,   // enable packet-level debug events
     });
 
     this._connection.subscribe(this._player);
     this._watchConnection();
     console.log('[Radio] Joining voice channel...');
 
-    // Pipe VoiceConnection debug events (packets sent/received, DAVE, UDP)
-    this._connection.on('debug', msg => {
-      console.log('[Radio/Conn]', String(msg).substring(0, 500));
-    });
-
-    // Log every VoiceConnection state transition + actual networking close code
+    // Log connection state transitions for diagnostics
     this._connection.on('stateChange', (oldState, newState) => {
       console.log(`[Radio] Connection: ${oldState.status} → ${newState.status}`);
-      if (newState.status === VoiceConnectionStatus.Connecting && newState.networking) {
-        const net = newState.networking;
-        // Guard against attaching duplicate listeners when connecting→connecting fires
-        if (net._bullyRadioMonitored) return;
-        net._bullyRadioMonitored = true;
-        net.on('error', err => console.error('[Radio/Net Error]', err.message));
-        // Capture the ACTUAL WebSocket close code (number) emitted by networking
-        net.on('close', code => console.log('[Radio/Net Close]', code));
-        net.on('stateChange', (o, n) => {
-          console.log(`[Radio/Net State] ${o?.code ?? '?'} → ${n?.code ?? '?'}`);
-        });
-      }
     });
   }
 
