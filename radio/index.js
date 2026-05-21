@@ -17,6 +17,20 @@ const { registerCommands, handleInteraction } = require('./commands');
 
 async function initRadio(client) {
   console.log('[Radio] Initialising Bully Radio...');
+  console.log('[Radio] Node.js:', process.version);
+
+  // Verify @snazzah/davey (DAVE/E2EE protocol) loaded correctly.
+  // @discordjs/voice 0.19.2 requires this for Discord voice to work.
+  try {
+    const davey = require('@snazzah/davey');
+    console.log('[Radio] @snazzah/davey loaded OK — DAVE protocol available.');
+    // Log available exports so we can confirm the expected API surface exists
+    const exports = Object.keys(davey);
+    if (exports.length) console.log('[Radio] davey exports:', exports.join(', '));
+  } catch (err) {
+    console.error('[Radio] ⚠  @snazzah/davey FAILED to load:', err.message);
+    console.error('[Radio]    DAVE/E2EE support is missing — voice connection will fail with close code 4017.');
+  }
 
   // ── Validate required env vars ───────────────────────────────────────────
   if (!config.VOICE_CHANNEL_ID) {
