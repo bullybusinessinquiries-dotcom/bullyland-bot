@@ -3,9 +3,15 @@
 // Strategy: send one message on first play, then edit it every track.
 // If the message was deleted (manually or by Discord), it creates a new one.
 // Intermissions get a minimal, atmospheric embed so they don't look like songs.
+//
+// On every song change, all other messages in the channel are deleted
+// EXCEPT the pinned branding banner (RADIO_BANNER_ID).
 
 const { EmbedBuilder } = require('discord.js');
 const path = require('path');
+
+// The branding banner at the top of the radio channel — never deleted
+const RADIO_BANNER_ID = '1506875960233037895';
 
 // ── Title cleaner ──────────────────────────────────────────────────────────
 // "bully_song_demo_v2.mp3"  →  "Bully Song Demo V2"
@@ -48,6 +54,8 @@ class NowPlayingManager {
         const msg = await channel.messages.fetch(this._messageId).catch(() => null);
         if (msg) {
           await msg.edit({ embeds: [embed] });
+          // Sweep any stray messages (keep banner + now-playing only)
+          await this._sweepChannel(channel);
           return;
         }
         // Message was deleted — fall through and send a new one
@@ -56,8 +64,28 @@ class NowPlayingManager {
 
       const sent = await channel.send({ embeds: [embed] });
       this._messageId = sent.id;
+      // Sweep any stray messages (keep banner + now-playing only)
+      await this._sweepChannel(channel);
     } catch (err) {
       console.error('[Radio] Could not update now-playing message:', err.message);
+    }
+  }
+
+  // ── Delete everything in the radio channel except the banner and the embed ──
+  async _sweepChannel(channel) {
+    try {
+      const messages = await channel.messages.fetch({ limit: 100 });
+      const toDelete = messages.filter(m =>
+        m.id !== RADIO_BANNER_ID &&
+        m.id !== this._messageId
+      );
+      if (toDelete.size === 0) return;
+      // bulkDelete only works for messages < 14 days old; fall back one-by-one
+      await channel.bulkDelete(toDelete).catch(async () => {
+        for (const [, m] of toDelete) await m.delete().catch(() => {});
+      });
+    } catch (_) {
+      // Non-fatal — sweep will retry next song
     }
   }
 

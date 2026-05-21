@@ -242,6 +242,17 @@ try { db.exec('ALTER TABLE balances ADD COLUMN garnish_debt INTEGER NOT NULL DEF
 // Integrity check — runs after tables are guaranteed to exist
 { const count = db.prepare('SELECT COUNT(*) as c FROM balances').get()?.c ?? 0; console.log(`[DB] Users in database: ${count}${count === 0 ? ' ⚠️  (empty — check DB_PATH if this is unexpected on a live server)' : ''}`); }
 
+// ─── PROTECTED BANNER MESSAGES ────────────────────────────────────────────
+// These message IDs are branding banners pinned at the top of each channel.
+// Every purge/refresh function must skip these so they are never deleted.
+const BANNER_MESSAGE_IDS = new Set([
+  '1506875770918801531', // 🎉win-bully-apparrel🎉 (giveaway channel)
+  '1506875861373030413', // auction-house
+  '1506875960233037895', // BULLY Radio
+  '1506876074078900284', // 📊leaderboards
+  '1506876134510428280', // 🏪bullys-store
+]);
+
 // ─── CONFIG ────────────────────────────────────────────────────────────────
 const CONFIG = {
   GUILD_ID: process.env.GUILD_ID,
@@ -940,10 +951,11 @@ async function postMysteryDrop() {
     .setDescription(`A mystery drop just landed.\n\nType **!claim** in this channel.\n**First to claim it gets it. No second chances.**`)
     .addFields({name:'Expires',value:`<t:${Math.floor(expiresAt/1000)}:R>`,inline:true})
     .setFooter({text:"Bully's World • You snooze, you lose."}).setTimestamp();
-  // Purge old messages before posting new drop
+  // Purge old messages before posting new drop (preserve banner)
   try {
     const old = await channel.messages.fetch({ limit: 100 });
-    if (old.size > 0) await channel.bulkDelete(old).catch(async () => { for (const [,m] of old) await m.delete().catch(()=>{}); });
+    const toDelete = old.filter(m => !BANNER_MESSAGE_IDS.has(m.id));
+    if (toDelete.size > 0) await channel.bulkDelete(toDelete).catch(async () => { for (const [,m] of toDelete) await m.delete().catch(()=>{}); });
   } catch (_) {}
   const msg = await channel.send({ content: '@everyone', embeds: [embed] });
   activeDrop = { tier, claimed: false, expiresAt, messageId: msg.id };
@@ -1057,9 +1069,10 @@ function pickShopRoles(allRoles) {
 async function purgeShopChannel(channel) {
   try {
     const messages = await channel.messages.fetch({ limit: 100 });
-    if (messages.size > 0) {
-      await channel.bulkDelete(messages).catch(async () => {
-        for (const [, m] of messages) await m.delete().catch(() => {});
+    const toDelete = messages.filter(m => !BANNER_MESSAGE_IDS.has(m.id));
+    if (toDelete.size > 0) {
+      await channel.bulkDelete(toDelete).catch(async () => {
+        for (const [, m] of toDelete) await m.delete().catch(() => {});
       });
     }
   } catch (_) {}
@@ -1204,9 +1217,10 @@ function buildLeaderboardEmbed() {
 async function purgeLeaderboardChannel(channel) {
   try {
     const messages = await channel.messages.fetch({ limit: 100 });
-    if (messages.size > 0) {
-      await channel.bulkDelete(messages).catch(async () => {
-        for (const [, m] of messages) await m.delete().catch(() => {});
+    const toDelete = messages.filter(m => !BANNER_MESSAGE_IDS.has(m.id));
+    if (toDelete.size > 0) {
+      await channel.bulkDelete(toDelete).catch(async () => {
+        for (const [, m] of toDelete) await m.delete().catch(() => {});
       });
     }
   } catch (_) {}
@@ -2859,13 +2873,14 @@ async function purgeAuctionChannel() {
     do {
       fetched = await channel.messages.fetch({ limit: 100 });
       if (fetched.size === 0) break;
-      const deletable = fetched.filter(m => Date.now() - m.createdTimestamp < 14 * 24 * 60 * 60 * 1000);
+      const eligible = fetched.filter(m => !BANNER_MESSAGE_IDS.has(m.id));
+      const deletable = eligible.filter(m => Date.now() - m.createdTimestamp < 14 * 24 * 60 * 60 * 1000);
       if (deletable.size > 0) {
         await channel.bulkDelete(deletable, true).catch(() => {});
         deleted += deletable.size;
       }
       // Delete any older messages one by one
-      const older = fetched.filter(m => Date.now() - m.createdTimestamp >= 14 * 24 * 60 * 60 * 1000);
+      const older = eligible.filter(m => Date.now() - m.createdTimestamp >= 14 * 24 * 60 * 60 * 1000);
       for (const m of older.values()) { await m.delete().catch(() => {}); deleted++; }
     } while (fetched.size >= 100);
     console.log(`[Auction] Purged ${deleted} messages from auction channel.`);
