@@ -4093,7 +4093,7 @@ client.on('interactionCreate', async interaction => {
         embed = new EmbedBuilder().setColor('#9b59b6').setTitle('📣 Comms')
           .addFields(
             { name: '📢 Announcements', value:
-              '`!announcement` — guided flow: write text → pick mention → set time → queued\n' +
+              '`!announcement` — guided flow: write text → pick channel → pick format → pick mention → set time → queued\n' +
               '`!announcementqueue` — view all queued announcements with IDs\n' +
               '`!cancelannouncement [id]` — cancel a queued announcement by ID', inline: false },
             { name: '✉️ DM Blasts', value:
@@ -5285,17 +5285,21 @@ const _pendingAuctionSetups  = new Map(); // userId → { state, imageUrl, title
 const _announcementQueue = []; // { id, text, postAt, timeoutHandle }
 let _announcementNextId = 1;
 
-function scheduleAnnouncement(text, postAt, mention) {
+function scheduleAnnouncement(text, postAt, mention, channelId = ANNOUNCEMENT_CHANNEL_ID, format = 'embed') {
   const id = _announcementNextId++;
   const buildEmbed = (t) => new EmbedBuilder().setColor('#c9a84c').setTitle('📢 Announcement')
     .setDescription(t).setFooter({ text: "Bully's World" }).setTimestamp();
   const handle = setTimeout(async () => {
     const idx = _announcementQueue.findIndex(a => a.id === id);
     if (idx !== -1) _announcementQueue.splice(idx, 1);
-    const ch = await client.channels.fetch(ANNOUNCEMENT_CHANNEL_ID).catch(() => null);
-    if (ch) await ch.send({ content: mention || '', embeds: [buildEmbed(text)] });
+    const ch = await client.channels.fetch(channelId).catch(() => null);
+    if (!ch) return;
+    const payload = format === 'embed'
+      ? { content: mention || null, embeds: [buildEmbed(text)] }
+      : { content: mention ? `${mention}\n\n${text}` : text };
+    await ch.send(payload);
   }, postAt - Date.now());
-  _announcementQueue.push({ id, text, postAt, mention, timeoutHandle: handle });
+  _announcementQueue.push({ id, text, postAt, mention, channelId, format, timeoutHandle: handle });
   return id;
 }
 
@@ -5371,53 +5375,132 @@ client.on('messageCreate', async msg => {
     const session = _pendingAnnouncements.get(msg.author.id);
     clearTimeout(session.timer);
 
-    if (session.state === 'awaiting_text') {
-      session.text = msg.content.trim(); // preserve original casing
-      session.state = 'awaiting_mention';
+    const resetTimer = () => {
       session.timer = setTimeout(() => _pendingAnnouncements.delete(msg.author.id), 5 * 60 * 1000);
-      await msg.reply('🔔 Who should be mentioned?\n\nReply **`@everyone`**, **`@here`**, a role mention, or **`none`** for no ping.\n\nType **`cancel`** to abort.');
+    };
+    const cancel = async () => {
+      _pendingAnnouncements.delete(msg.author.id);
+      await msg.reply('❌ Announcement cancelled.');
+    };
+
+    // Step 1 — collect the message text
+    if (session.state === 'awaiting_text') {
+      session.text = msg.content.trim();
+      session.state = 'awaiting_channel';
+      resetTimer();
+      await msg.reply(
+        '📡 **Which channel?**\n\n' +
+        'Mention a channel (e.g. **`#announcements`**) or type **`default`** to use the default announcements channel.\n\n' +
+        'Type **`cancel`** to abort.'
+      );
       return;
     }
 
-    if (session.state === 'awaiting_mention') {
-      if (lower === 'cancel') {
-        _pendingAnnouncements.delete(msg.author.id);
-        await msg.reply('❌ Announcement cancelled.');
+    // Step 2 — pick the target channel
+    if (session.state === 'awaiting_channel') {
+      if (lower === 'cancel') { await cancel(); return; }
+
+      let targetChannel = null;
+      if (lower === 'default') {
+        targetChannel = await client.channels.fetch(ANNOUNCEMENT_CHANNEL_ID).catch(() => null);
+      } else {
+        // Accept a channel mention (#channel) or a raw ID
+        targetChannel = msg.mentions.channels.first()
+          ?? await client.channels.fetch(msg.content.trim().replace(/[<#>]/g, '')).catch(() => null);
+      }
+
+      if (!targetChannel?.isTextBased()) {
+        resetTimer();
+        await msg.reply("❌ Couldn't find that channel. Mention a channel (e.g. **`#general`**) or type **`default`**.");
         return;
       }
+
+      session.channelId = targetChannel.id;
+      session.channelName = targetChannel.name;
+      session.state = 'awaiting_format';
+      resetTimer();
+      await msg.reply(
+        '🎨 **What format?**\n\n' +
+        '**`embed`** — styled card with gold border and Bully\'s World footer\n' +
+        '**`plain`** — raw text, exactly as you typed it\n\n' +
+        'Type **`cancel`** to abort.'
+      );
+      return;
+    }
+
+    // Step 3 — pick embed or plain text
+    if (session.state === 'awaiting_format') {
+      if (lower === 'cancel') { await cancel(); return; }
+
+      if (!['embed', 'e', 'plain', 'p', 'text'].includes(lower)) {
+        resetTimer();
+        await msg.reply('❌ Reply **`embed`** or **`plain`**. Type **`cancel`** to abort.');
+        return;
+      }
+
+      session.format = ['embed', 'e'].includes(lower) ? 'embed' : 'plain';
+      session.state = 'awaiting_mention';
+      resetTimer();
+      await msg.reply(
+        '🔔 **Who should be mentioned?**\n\n' +
+        'Reply **`@everyone`**, **`@here`**, a role mention, or **`none`** for no ping.\n\n' +
+        'Type **`cancel`** to abort.'
+      );
+      return;
+    }
+
+    // Step 4 — mention / ping
+    if (session.state === 'awaiting_mention') {
+      if (lower === 'cancel') { await cancel(); return; }
       session.mention = lower === 'none' ? '' : msg.content.trim();
       session.state = 'awaiting_time';
-      session.timer = setTimeout(() => _pendingAnnouncements.delete(msg.author.id), 5 * 60 * 1000);
-      await msg.reply('⏰ When should this be posted?\n\nReply **`now`** to post immediately, or a time like **`6:00pm`** or **`8:30am`** (CT).\n\nType **`cancel`** to abort.');
+      resetTimer();
+      await msg.reply(
+        '⏰ **When should this post?**\n\n' +
+        'Reply **`now`** to post immediately, or a time like **`6:00pm`** or **`8:30am`** (CT).\n\n' +
+        'Type **`cancel`** to abort.'
+      );
       return;
     }
 
+    // Step 5 — schedule or post now
     if (session.state === 'awaiting_time') {
-      if (lower === 'cancel') {
+      if (lower === 'cancel') { await cancel(); return; }
+
+      const announceCh = await client.channels.fetch(session.channelId).catch(() => null);
+      if (!announceCh) {
         _pendingAnnouncements.delete(msg.author.id);
-        await msg.reply('❌ Announcement cancelled.');
+        await msg.reply('❌ Could not fetch the target channel. Announcement aborted.');
         return;
       }
-      const announceCh = await client.channels.fetch(ANNOUNCEMENT_CHANNEL_ID).catch(() => null);
-      if (!announceCh) { _pendingAnnouncements.delete(msg.author.id); await msg.reply('❌ Could not find the announcements channel.'); return; }
-      const buildEmbed = (text) => new EmbedBuilder().setColor('#c9a84c').setTitle('📢 Announcement')
+
+      const buildEmbed = (text) => new EmbedBuilder()
+        .setColor('#c9a84c').setTitle('📢 Announcement')
         .setDescription(text).setFooter({ text: "Bully's World" }).setTimestamp();
-      const mention = session.mention || '';
+
+      const mention  = session.mention || '';
+      const payload  = session.format === 'embed'
+        ? { content: mention || null, embeds: [buildEmbed(session.text)] }
+        : { content: mention ? `${mention}\n\n${session.text}` : session.text };
+
       if (lower === 'now') {
         _pendingAnnouncements.delete(msg.author.id);
-        await announceCh.send({ content: mention, embeds: [buildEmbed(session.text)] });
-        await msg.reply('✅ Announcement posted!');
+        await announceCh.send(payload);
+        await msg.reply(`✅ Announcement posted in <#${session.channelId}>!`);
       } else {
         const postAt = parseShutdownTime(lower);
         if (!postAt) {
-          session.timer = setTimeout(() => _pendingAnnouncements.delete(msg.author.id), 5 * 60 * 1000);
+          resetTimer();
           await msg.reply("❌ Couldn't parse that time. Try **`now`**, **`6:00pm`**, or **`14:30`**. Or type **`cancel`** to abort.");
           return;
         }
-        _pendingAnnouncements.delete(msg.author.id); // clear session immediately so user can queue another
+        _pendingAnnouncements.delete(msg.author.id);
         const unix = Math.floor(postAt.getTime() / 1000);
-        const queuedId = scheduleAnnouncement(session.text, postAt, mention);
-        await msg.reply(`✅ Announcement **#${queuedId}** queued for <t:${unix}:F> (<t:${unix}:R>).\nUse \`!announcementqueue\` to view all queued, or \`!cancelannouncement ${queuedId}\` to remove it.`);
+        const queuedId = scheduleAnnouncement(session.text, postAt, mention, session.channelId, session.format);
+        await msg.reply(
+          `✅ Announcement **#${queuedId}** queued for <t:${unix}:F> (<t:${unix}:R>) in <#${session.channelId}>.\n` +
+          `Use \`!announcementqueue\` to view all queued, or \`!cancelannouncement ${queuedId}\` to remove it.`
+        );
       }
       return;
     }
@@ -5614,7 +5697,9 @@ client.on('messageCreate', async msg => {
     const lines = _announcementQueue.map(a => {
       const unix = Math.floor(a.postAt / 1000);
       const preview = a.text.length > 80 ? a.text.slice(0, 80) + '…' : a.text;
-      return `**#${a.id}** — <t:${unix}:F> (<t:${unix}:R>)\n> ${preview}`;
+      const chTag = a.channelId ? `<#${a.channelId}>` : '#announcements';
+      const fmt   = a.format === 'plain' ? 'plain text' : 'embed';
+      return `**#${a.id}** — <t:${unix}:F> (<t:${unix}:R>) · ${chTag} · ${fmt}\n> ${preview}`;
     });
     const embed = new EmbedBuilder().setColor('#c9a84c').setTitle(`📢 Announcement Queue (${_announcementQueue.length})`)
       .setDescription(lines.join('\n\n'))
