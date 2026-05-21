@@ -12,7 +12,7 @@ const { GoogleSpreadsheet } = require('google-spreadsheet');
 const { JWT } = require('google-auth-library');
 const schedule = require('node-schedule');
 
-const { Client, GatewayIntentBits, EmbedBuilder, PermissionsBitField, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, PermissionsBitField, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType, StringSelectMenuBuilder } = require('discord.js');
 const initRadio = require('./radio');
 const client = new Client({
   intents: [
@@ -3906,6 +3906,101 @@ async function endTriviaGame(channel, state) {
 }
 
 // ============================================================================
+// SELF-ROLES
+// ============================================================================
+
+const SELF_ROLE_CHANNEL_ID = '1357645830462505080'; // 👀-introduce-yourself
+
+const INTEREST_ROLES = [
+  { id: '1497978868093419730', label: '🎮 Gamer',   value: 'gamer'   },
+  { id: '1497978841082237110', label: '🍳 Cooking',  value: 'cooking' },
+  { id: '1497978802477727905', label: '🖌️ Artist',   value: 'artist'  },
+  { id: '1497978706042425574', label: '🍥 Anime',    value: 'anime'   },
+  { id: '1497978671816773782', label: '🎵 Music',    value: 'music'   },
+  { id: '1498193590332166185', label: '🍿 Movies',   value: 'movies'  },
+];
+const WATCH_ROLE_ID = '1494499384618909716'; // 👮 Neighborhood Watch
+
+function buildSelfRolePanel() {
+  const embed = new EmbedBuilder()
+    .setColor('#c9a84c')
+    .setTitle("🎭  Make Yourself at Home")
+    .setDescription(
+      "Grab the roles that fit you — they show up on your profile and help us tailor the server to your interests.\n\n" +
+      "**👇 Choose Your Interests** — pick as many as you like.\n" +
+      "**👮 Neighborhood Watch** — opt in to help keep the server safe and welcoming."
+    )
+    .setFooter({ text: "Bully's World • roles update instantly • you can change these any time" });
+
+  const interestMenu = new StringSelectMenuBuilder()
+    .setCustomId('selfrole_interests')
+    .setPlaceholder('Choose Your Interests…')
+    .setMinValues(0)
+    .setMaxValues(INTEREST_ROLES.length)
+    .addOptions(INTEREST_ROLES.map(r => ({ label: r.label, value: r.value })));
+
+  const watchBtn = new ButtonBuilder()
+    .setCustomId('selfrole_watch')
+    .setLabel('👮 Join the Neighborhood Watch')
+    .setStyle(ButtonStyle.Secondary);
+
+  return {
+    embeds: [embed],
+    components: [
+      new ActionRowBuilder().addComponents(interestMenu),
+      new ActionRowBuilder().addComponents(watchBtn),
+    ],
+  };
+}
+
+// Separate interactionCreate listener so self-role logic is isolated
+client.on('interactionCreate', async interaction => {
+  // ── Neighborhood Watch button ─────────────────────────────────────────────
+  if (interaction.isButton() && interaction.customId === 'selfrole_watch') {
+    const member = interaction.member;
+    const has = member.roles.cache.has(WATCH_ROLE_ID);
+    try {
+      if (has) {
+        await member.roles.remove(WATCH_ROLE_ID);
+        await interaction.reply({ content: '✅ Removed your **👮 Neighborhood Watch** role.', flags: 64 });
+      } else {
+        await member.roles.add(WATCH_ROLE_ID);
+        await interaction.reply({ content: "✅ Welcome to the **👮 Neighborhood Watch**! Thanks for helping keep Bully's World safe.", flags: 64 });
+      }
+    } catch {
+      await interaction.reply({ content: '❌ Could not update your role — make sure the bot has **Manage Roles** permission and the bot\'s role is above the roles it assigns.', flags: 64 });
+    }
+    return;
+  }
+
+  // ── Interests dropdown ─────────────────────────────────────────────────────
+  if (interaction.isStringSelectMenu() && interaction.customId === 'selfrole_interests') {
+    const member = await interaction.member.fetch(); // fresh cache
+    const selected = new Set(interaction.values);
+
+    const toAdd    = INTEREST_ROLES.filter(r => selected.has(r.value)  && !member.roles.cache.has(r.id));
+    const toRemove = INTEREST_ROLES.filter(r => !selected.has(r.value) &&  member.roles.cache.has(r.id));
+
+    try {
+      if (toAdd.length)    await member.roles.add(toAdd.map(r => r.id));
+      if (toRemove.length) await member.roles.remove(toRemove.map(r => r.id));
+
+      if (!toAdd.length && !toRemove.length) {
+        await interaction.reply({ content: '✅ Your interest roles are already up to date!', flags: 64 });
+      } else {
+        const lines = [];
+        if (toAdd.length)    lines.push(`➕ Added: ${toAdd.map(r => r.label).join('  ')}`);
+        if (toRemove.length) lines.push(`➖ Removed: ${toRemove.map(r => r.label).join('  ')}`);
+        await interaction.reply({ content: `✅ Roles updated!\n${lines.join('\n')}`, flags: 64 });
+      }
+    } catch {
+      await interaction.reply({ content: '❌ Could not update your roles — please let an admin know.', flags: 64 });
+    }
+    return;
+  }
+});
+
+// ============================================================================
 // INTERACTION HANDLER
 // ============================================================================
 client.on('interactionCreate', async interaction => {
@@ -5670,6 +5765,15 @@ client.on('messageCreate', async msg => {
     const timer = setTimeout(() => _pendingAuctionSetups.delete(msg.author.id), 5 * 60 * 1000);
     _pendingAuctionSetups.set(msg.author.id, { state: 'awaiting_image', timer });
     await msg.reply('📸 **Step 1/4** — Upload the image of the item you\'re auctioning.\n\nType `cancel` at any time to abort.');
+    return;
+  }
+
+  // ── !selfroles — post or refresh the self-role panel ──
+  if (lower === '!selfroles') {
+    const ch = await client.channels.fetch(SELF_ROLE_CHANNEL_ID).catch(() => null);
+    if (!ch) { await msg.reply('❌ Could not find the self-roles channel.'); return; }
+    await ch.send(buildSelfRolePanel());
+    await msg.reply(`✅ Self-role panel posted in <#${SELF_ROLE_CHANNEL_ID}>!`);
     return;
   }
 
