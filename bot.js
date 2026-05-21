@@ -3921,16 +3921,18 @@ const INTEREST_ROLES = [
 ];
 const WATCH_ROLE_ID = '1494499384618909716'; // 👮 Neighborhood Watch
 
-function buildSelfRolePanel() {
+// Image files live in /assets — committed to the repo so Railway can serve them
+const ASSET_DIR = path.join(__dirname, 'assets');
+
+// Message 1 — Introduce Yourself banner + interests dropdown
+function buildInterestsPanel() {
   const embed = new EmbedBuilder()
     .setColor('#c9a84c')
-    .setTitle("🎭  Make Yourself at Home")
+    .setImage('attachment://banner-introduce-yourself.png')
     .setDescription(
-      "Grab the roles that fit you — they show up on your profile and help us tailor the server to your interests.\n\n" +
-      "**👇 Choose Your Interests** — pick as many as you like.\n" +
-      "**👮 Neighborhood Watch** — opt in to help keep the server safe and welcoming."
+      "Tell us who you are — grab the roles that match your vibe.\nPick as many as you like. You can change them any time."
     )
-    .setFooter({ text: "Bully's World • roles update instantly • you can change these any time" });
+    .setFooter({ text: "Bully's World • roles update instantly" });
 
   const interestMenu = new StringSelectMenuBuilder()
     .setCustomId('selfrole_interests')
@@ -3939,6 +3941,23 @@ function buildSelfRolePanel() {
     .setMaxValues(INTEREST_ROLES.length)
     .addOptions(INTEREST_ROLES.map(r => ({ label: r.label, value: r.value })));
 
+  return {
+    embeds: [embed],
+    files: [{ attachment: path.join(ASSET_DIR, 'banner-introduce-yourself.png'), name: 'banner-introduce-yourself.png' }],
+    components: [new ActionRowBuilder().addComponents(interestMenu)],
+  };
+}
+
+// Message 2 — Neighborhood Watch banner + toggle button
+function buildWatchPanel() {
+  const embed = new EmbedBuilder()
+    .setColor('#c9a84c')
+    .setImage('attachment://banner-neighborhood-watch.png')
+    .setDescription(
+      "See something, say something. Join the Neighborhood Watch and help keep Bully's World safe and welcoming for everyone."
+    )
+    .setFooter({ text: "Bully's World • click the button below to join or leave" });
+
   const watchBtn = new ButtonBuilder()
     .setCustomId('selfrole_watch')
     .setLabel('👮 Join the Neighborhood Watch')
@@ -3946,10 +3965,8 @@ function buildSelfRolePanel() {
 
   return {
     embeds: [embed],
-    components: [
-      new ActionRowBuilder().addComponents(interestMenu),
-      new ActionRowBuilder().addComponents(watchBtn),
-    ],
+    files: [{ attachment: path.join(ASSET_DIR, 'banner-neighborhood-watch.png'), name: 'banner-neighborhood-watch.png' }],
+    components: [new ActionRowBuilder().addComponents(watchBtn)],
   };
 }
 
@@ -5768,12 +5785,13 @@ client.on('messageCreate', async msg => {
     return;
   }
 
-  // ── !selfroles — post or refresh the self-role panel ──
+  // ── !selfroles — post or refresh the self-role panels ──
   if (lower === '!selfroles') {
     const ch = await client.channels.fetch(SELF_ROLE_CHANNEL_ID).catch(() => null);
     if (!ch) { await msg.reply('❌ Could not find the self-roles channel.'); return; }
-    await ch.send(buildSelfRolePanel());
-    await msg.reply(`✅ Self-role panel posted in <#${SELF_ROLE_CHANNEL_ID}>!`);
+    await ch.send(buildInterestsPanel());
+    await ch.send(buildWatchPanel());
+    await msg.reply(`✅ Self-role panels posted in <#${SELF_ROLE_CHANNEL_ID}>!`);
     return;
   }
 
