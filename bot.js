@@ -3458,6 +3458,7 @@ function startScheduler() {
   schedule.scheduleJob('0 */12 * * *', ()=>refreshShop(true));
   schedule.scheduleJob({ rule:'0 0 1 * *', tz:CONFIG.TIMEZONE }, ()=>doMonthlyReset());
   schedule.scheduleJob('0 */6 * * *', ()=>postDailyLeaderboard());
+  postDailyLeaderboard(); // also post immediately on startup so it's never blank after a restart
   // Weekly lottery draw — Sunday at 8pm CT
   schedule.scheduleJob({ rule: '0 20 * * 0', tz: CONFIG.TIMEZONE }, () => runLottery());
 
