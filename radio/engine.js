@@ -186,22 +186,31 @@ class RadioEngine {
       guildId:        config.GUILD_ID,
       adapterCreator: guild.voiceAdapterCreator,
       selfDeaf:       true,
+      debug:          true,   // enable packet-level debug events
     });
 
     this._connection.subscribe(this._player);
     this._watchConnection();
     console.log('[Radio] Joining voice channel...');
 
-    // Log every VoiceConnection state transition + networking close codes
+    // Pipe VoiceConnection debug events (packets sent/received, DAVE, UDP)
+    this._connection.on('debug', msg => {
+      console.log('[Radio/Conn]', String(msg).substring(0, 500));
+    });
+
+    // Log every VoiceConnection state transition + actual networking close code
     this._connection.on('stateChange', (oldState, newState) => {
       console.log(`[Radio] Connection: ${oldState.status} → ${newState.status}`);
       if (newState.status === VoiceConnectionStatus.Connecting && newState.networking) {
         const net = newState.networking;
-        net.on('debug', msg => console.log('[Radio/Net]', String(msg).substring(0, 300)));
+        // Guard against attaching duplicate listeners when connecting→connecting fires
+        if (net._bullyRadioMonitored) return;
+        net._bullyRadioMonitored = true;
         net.on('error', err => console.error('[Radio/Net Error]', err.message));
+        // Capture the ACTUAL WebSocket close code (number) emitted by networking
+        net.on('close', code => console.log('[Radio/Net Close]', code));
         net.on('stateChange', (o, n) => {
-          const extra = n?.code === 6 ? ` closeCode=${n?.closeCode ?? 'none'}` : '';
-          console.log(`[Radio/Net State] ${o?.code ?? '?'} → ${n?.code ?? '?'}${extra}`);
+          console.log(`[Radio/Net State] ${o?.code ?? '?'} → ${n?.code ?? '?'}`);
         });
       }
     });
