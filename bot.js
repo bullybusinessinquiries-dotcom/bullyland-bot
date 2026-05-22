@@ -3975,9 +3975,11 @@ function buildWatchPanel() {
     )
     .setFooter({ text: "Bully's World  •  Neighborhood Watch" });
 
+  // Neutral entry point — everyone sees the same button on the shared panel.
+  // Clicking it sends an ephemeral with the correct green/red button for that user.
   const watchBtn = new ButtonBuilder()
-    .setCustomId('selfrole_watch')
-    .setLabel('👮 Join the Neighborhood Watch')
+    .setCustomId('selfrole_watch_check')
+    .setLabel('👮 Neighborhood Watch')
     .setStyle(ButtonStyle.Secondary);
 
   return {
@@ -3988,20 +3990,67 @@ function buildWatchPanel() {
 
 // Separate interactionCreate listener so self-role logic is isolated
 client.on('interactionCreate', async interaction => {
-  // ── Neighborhood Watch button ─────────────────────────────────────────────
-  if (interaction.isButton() && interaction.customId === 'selfrole_watch') {
-    const member = interaction.member;
-    const has = member.roles.cache.has(WATCH_ROLE_ID);
+
+  // ── Neighborhood Watch — panel entry button (shows personalised ephemeral) ──
+  if (interaction.isButton() && interaction.customId === 'selfrole_watch_check') {
+    const has = interaction.member.roles.cache.has(WATCH_ROLE_ID);
+
+    const actionBtn = has
+      ? new ButtonBuilder()
+          .setCustomId('selfrole_watch_leave')
+          .setLabel('🚪 Leave the Neighborhood Watch')
+          .setStyle(ButtonStyle.Danger)
+      : new ButtonBuilder()
+          .setCustomId('selfrole_watch_join')
+          .setLabel('👮 Join the Neighborhood Watch')
+          .setStyle(ButtonStyle.Success);
+
+    const statusLine = has
+      ? "You're currently in the **Neighborhood Watch**."
+      : "You're not in the **Neighborhood Watch** yet.";
+
+    await interaction.reply({
+      content: statusLine,
+      components: [new ActionRowBuilder().addComponents(actionBtn)],
+      flags: 64,
+    });
+    return;
+  }
+
+  // ── Neighborhood Watch — join ─────────────────────────────────────────────
+  if (interaction.isButton() && interaction.customId === 'selfrole_watch_join') {
     try {
-      if (has) {
-        await member.roles.remove(WATCH_ROLE_ID);
-        await interaction.reply({ content: '✅ Removed your **👮 Neighborhood Watch** role.', flags: 64 });
-      } else {
-        await member.roles.add(WATCH_ROLE_ID);
-        await interaction.reply({ content: "✅ Welcome to the **👮 Neighborhood Watch**! Thanks for helping keep Bully's World safe.", flags: 64 });
-      }
+      await interaction.member.roles.add(WATCH_ROLE_ID);
+      await interaction.update({
+        content: "✅ You've joined the **Neighborhood Watch**! Thanks for helping keep Bully's World safe.",
+        components: [new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId('selfrole_watch_leave')
+            .setLabel('🚪 Leave the Neighborhood Watch')
+            .setStyle(ButtonStyle.Danger)
+        )],
+      });
     } catch {
-      await interaction.reply({ content: '❌ Could not update your role — make sure the bot has **Manage Roles** permission and the bot\'s role is above the roles it assigns.', flags: 64 });
+      await interaction.reply({ content: '❌ Could not add role — please let an admin know.', flags: 64 });
+    }
+    return;
+  }
+
+  // ── Neighborhood Watch — leave ────────────────────────────────────────────
+  if (interaction.isButton() && interaction.customId === 'selfrole_watch_leave') {
+    try {
+      await interaction.member.roles.remove(WATCH_ROLE_ID);
+      await interaction.update({
+        content: "👋 You've left the **Neighborhood Watch**.",
+        components: [new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId('selfrole_watch_join')
+            .setLabel('👮 Join the Neighborhood Watch')
+            .setStyle(ButtonStyle.Success)
+        )],
+      });
+    } catch {
+      await interaction.reply({ content: '❌ Could not remove role — please let an admin know.', flags: 64 });
     }
     return;
   }
