@@ -272,6 +272,7 @@ const CONFIG = {
     GENERAL:          process.env.CHANNEL_GENERAL,
     GAMES:            process.env.CHANNEL_GAMES,
     GAMES_2:          process.env.CHANNEL_GAMES_2,
+    TESTING:          '1492228049272438834',
   },
 
   ROLES: {
@@ -3755,7 +3756,7 @@ client.on('messageCreate', async msg => {
   if (TESTING_MODE && !hasAccess(msg.member)) return;
   if (msg.content.trim().toLowerCase() !== '!bullygames') return;
   const _isAdmin = msg.member?.permissions.has(PermissionsBitField.Flags.Administrator);
-  const GAME_CHANNELS = [CONFIG.CHANNELS.GAMES, CONFIG.CHANNELS.GAMES_2];
+  const GAME_CHANNELS = [CONFIG.CHANNELS.GAMES, CONFIG.CHANNELS.GAMES_2, CONFIG.CHANNELS.TESTING];
   if (!_isAdmin && !GAME_CHANNELS.includes(msg.channelId)) {
     const r = await msg.reply(`🎮 Games only run in <#${CONFIG.CHANNELS.GAMES}> or <#${CONFIG.CHANNELS.GAMES_2}>. Head over there!`);
     setTimeout(() => r.delete().catch(() => {}), 6000);
@@ -4053,7 +4054,7 @@ client.on('interactionCreate', async interaction => {
     customId.startsWith('lottery.') || customId.startsWith('slots.') ||
     customId.startsWith('bj.') || customId.startsWith('roulette.') || customId.startsWith('race.') ||
     customId.startsWith('trivia.') || customId.startsWith('hangman.');
-  const ALLOWED_GAME_CHANNELS = [CONFIG.CHANNELS.GAMES, CONFIG.CHANNELS.GAMES_2];
+  const ALLOWED_GAME_CHANNELS = [CONFIG.CHANNELS.GAMES, CONFIG.CHANNELS.GAMES_2, CONFIG.CHANNELS.TESTING];
   if (isGameInteraction && !ALLOWED_GAME_CHANNELS.includes(interaction.channelId)) {
     await interaction.reply({ content: `🎮 Games only run in <#${CONFIG.CHANNELS.GAMES}> or <#${CONFIG.CHANNELS.GAMES_2}>.`, ephemeral: true }); return;
   }
