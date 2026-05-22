@@ -264,19 +264,29 @@ function pickImage() {
   const files = loadImageFiles();
   if (!files.length) return null;
 
+  // State stores basenames only — full paths differ between Windows dev and Railway (Linux).
+  // On load, we map basenames back to full paths so the state survives cross-platform deploys.
+  const basenames = files.map(f => path.basename(f));
+  const byBasename = Object.fromEntries(files.map(f => [path.basename(f), f]));
+
   let state = { order: [], index: 0 };
   try { state = JSON.parse(fs.readFileSync(IMG_STATE, 'utf8')); } catch (_) {}
 
-  // Reshuffle when exhausted or pool size changed (new images added/removed)
-  if (!state.order.length || state.index >= state.order.length || state.order.length !== files.length) {
-    state.order = fisherYates(files);
+  // Detect stale state: full paths from a different OS are present → force reshuffle
+  const stateHasFullPaths = state.order.length > 0 && state.order[0].includes(path.sep === '/' ? '\\' : '/');
+  const poolChanged = state.order.length !== basenames.length;
+
+  if (!state.order.length || state.index >= state.order.length || poolChanged || stateHasFullPaths) {
+    state.order = fisherYates(basenames); // store basenames only
     state.index = 0;
     console.log('[DailyQ] Image pool reshuffled');
   }
 
-  const chosen = state.order[state.index++];
+  const chosenBasename = state.order[state.index++];
   try { fs.writeFileSync(IMG_STATE, JSON.stringify(state), 'utf8'); } catch (_) {}
-  return chosen;
+
+  // Resolve basename back to full path for this environment
+  return byBasename[chosenBasename] ?? files[0];
 }
 
 // ─── QUOTE FETCHER ────────────────────────────────────────────────────────────
