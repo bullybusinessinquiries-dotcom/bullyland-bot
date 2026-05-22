@@ -665,7 +665,16 @@ const dailyQ = {
         .setFooter({ text: `Test closes in 2 minutes • Category: ${q.category} • Tone: ${toneEmoji} ${q.tone}` })
         .setTimestamp();
 
-      const testMsg = await message.channel.send({ embeds: [embed] });
+      const sendOpts = { embeds: [embed] };
+      const imagePath = pickImage();
+      if (imagePath) {
+        const { AttachmentBuilder } = require('discord.js');
+        const attachment = new AttachmentBuilder(imagePath, { name: 'morning.png' });
+        embed.setImage('attachment://morning.png');
+        sendOpts.files = [attachment];
+      }
+
+      const testMsg = await message.channel.send(sendOpts);
 
       // Collect responses in memory for the test summary (no DB writes, no BB)
       const testResponses = new Map(); // userId → { username, text, ts }
