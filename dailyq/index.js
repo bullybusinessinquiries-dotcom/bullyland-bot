@@ -500,9 +500,13 @@ const dailyQ = {
 
   // ── Handle incoming message (called from bot.js messageCreate) ──────────────
   async handleMessage(message) {
-    if (!this.activePost)                              return;
+    if (!this.activePost)                                return;
     if (message.channelId !== this.activePost.channelId) return;
-    if (message.author.bot)                            return;
+    if (message.author.bot)                              return;
+
+    // Must be a direct reply to the questionnaire message — random channel
+    // messages don't count, users have to hit Reply on the question embed.
+    if (message.reference?.messageId !== this.activePost.messageId) return;
 
     const userId   = message.author.id;
     const username = message.author.username;
@@ -679,7 +683,11 @@ const dailyQ = {
       // Collect responses in memory for the test summary (no DB writes, no BB)
       const testResponses = new Map(); // userId → { username, text, ts }
       const collector = message.channel.createMessageCollector({
-        filter: m => !m.author.bot && !m.content.startsWith('!') && m.content.trim().length >= CFG.rewards.minResponseLength,
+        filter: m =>
+          !m.author.bot &&
+          !m.content.startsWith('!') &&
+          m.content.trim().length >= CFG.rewards.minResponseLength &&
+          m.reference?.messageId === testMsg.id, // must Reply to the question
         time: 2 * 60 * 1000, // 2 minutes
       });
 
