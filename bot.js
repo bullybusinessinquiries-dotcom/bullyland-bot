@@ -84,13 +84,6 @@ db.exec(`
     user_id TEXT, username TEXT, tickets INTEGER DEFAULT 0, week TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
   );
-  CREATE TABLE IF NOT EXISTS bounties (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    placer_id TEXT, placer_username TEXT,
-    target_id TEXT, target_username TEXT,
-    amount INTEGER, claimed INTEGER DEFAULT 0,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
-  );
   CREATE TABLE IF NOT EXISTS shields (
     user_id TEXT PRIMARY KEY, expires_at TEXT
   );
@@ -2838,30 +2831,6 @@ Expires <t:${Math.floor(new Date(expires).getTime()/1000)}:R>`)
     return;
   }
 
-  // ── !bounty ──
-  if (content.startsWith('!bounty ')) {
-    const target = message.mentions.users.first();
-    const amount = parseInt(message.content.trim().split(' ')[2]);
-    if (!target) { await message.reply('Usage: `!bounty @user amount`'); return; }
-    if (target.id === userId) { await message.reply("You can't put a bounty on yourself."); return; }
-    if (target.bot) { await message.reply("You can't put a bounty on a bot."); return; }
-    if (isNaN(amount) || amount < 250) { await message.reply('Minimum bounty is **250 BB**. Usage: `!bounty @user 250`'); return; }
-    const u = getUser(userId, username);
-    if (u.balance < amount) { await message.reply(`Not enough BB. You have **${u.balance} BB**.`); return; }
-    spendBB(userId, amount);
-    db.prepare('INSERT INTO bounties (placer_id, placer_username, target_id, target_username, amount) VALUES (?, ?, ?, ?, ?)').run(userId, username, target.id, target.username, amount);
-    const embed = new EmbedBuilder().setColor('#FF4500').setTitle('🎯 BOUNTY POSTED!')
-      .setDescription(`**${username}** has placed a **${amount} BB** bounty on <@${target.id}>!
-
-First person to successfully steal from **${target.username}** collects the bounty on top of what they steal.
-
-Type **!steal @${target.username}** to try your luck.`)
-      .setFooter({ text: "Bully's World • Someone's got a target on their back." }).setTimestamp();
-    await message.channel.send({ embeds: [embed] });
-    try { await target.send(`🎯 **${username}** just put a **${amount} BB** bounty on you in Bully's World. Watch your back!`); } catch {}
-    return;
-  }
-
   // ── !rain ──
   if (content.startsWith('!rain ')) {
     if (!isEnabled('rain')) { await message.reply('🌧️ BB Rain is currently **disabled**. Check back later.'); return; }
@@ -4129,10 +4098,6 @@ function hasShield(userId) {
   if (!row) return false;
   return new Date(row.expires_at) > new Date();
 }
-function getActiveBounties(targetId) {
-  return db.prepare('SELECT * FROM bounties WHERE target_id = ? AND claimed = 0').all(targetId);
-}
-
 // ─── BULLY'S CASINO ───────────────────────────────────────────────────────
 async function openCasino() {
   const channel = await client.channels.fetch(CONFIG.CHANNELS.GENERAL).catch(()=>null);
@@ -5132,7 +5097,7 @@ client.on('interactionCreate', async interaction => {
               '• Steal too many times and you may get caught (penalty up to 50% of the steal amount)',
               inline: false },
             { name: '⚠️ Risks',        value: '• Target can block it — you lose up to 50% of the attempt as penalty\n• Attempt against low-balance users = instant -10 BB fine\n• Going below -50 BB freezes your steal ability', inline: false },
-            { name: '📌 Other Crime',  value: '`!bounty @user [amount]` — put a price on someone\'s head\n`!heist` (via `!bullygames`) — organized crew robbery', inline: false }
+            { name: '📌 Other Crime',  value: '`!heist` (via `!bullygames`) — organized crew robbery', inline: false }
           )
           .setFooter({ text: "Bully's World • Crime doesn't always pay." }).setTimestamp();
       } else if (topic === 'shop') {
@@ -6521,13 +6486,6 @@ Click **BLOCK IT** within **${windowSecs} seconds**!`).setFooter({ text: "Bully'
     addBB(userId, username, actualStolen, `stolen from ${target.username}`);
     await msg.channel.send({ embeds: [new EmbedBuilder().setColor('#3B6D11').setTitle('🤫 Successful Steal!').setDescription(`**${username}** got away with **${actualStolen} BB** from **${target.username}**!
 *${target.username} didn't defend in time.*`).addFields({ name: `${username}'s balance`, value: `${getUser(userId, username).balance} BB`, inline: true }, { name: `${target.username}'s balance`, value: `${targetUser.balance - actualStolen} BB`, inline: true }).setFooter({ text: "Bully's World • Watch your pockets." }).setTimestamp()] });
-    const bounties = getActiveBounties(target.id);
-    if (bounties.length) {
-      const totalBounty = bounties.reduce((sum, b) => sum + b.amount, 0);
-      bounties.forEach(b => db.prepare('UPDATE bounties SET claimed = 1 WHERE id = ?').run(b.id));
-      addBB(userId, username, totalBounty, `bounty on ${target.username}`);
-      await msg.channel.send(`🎯 **${username}** also collected a **${totalBounty} BB** bounty!`);
-    }
     try { await target.send(`🚨 **${username}** stole **${actualStolen} BB** from you!`); } catch (_) {}
   }
 
