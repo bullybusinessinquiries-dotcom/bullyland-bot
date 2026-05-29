@@ -3553,6 +3553,167 @@ This challenge expires in 60 seconds.`)
     return;
   }
 
+  // ── !ecorollback YYYY-MM-DD [confirm] ───────────────────────────────────────────────────────────────────
+  if (content.startsWith('!ecorollback')) {
+    const ercParts = content.split(/\s+/);
+    const ercDate = ercParts[1];
+    const ercConfirm = ercParts[2] === 'confirm';
+    if (!ercDate || !/^\d{4}-\d{2}-\d{2}$/.test(ercDate)) {
+      await message.reply('`!ecorollback YYYY-MM-DD` (preview) or `!ecorollback YYYY-MM-DD confirm` (execute)');
+      return;
+    }
+    const ercCutoff = ercDate + 'T00:00:00.000Z';
+    const ercRows = db.prepare(`
+      SELECT user_id, SUM(amount) as earned
+      FROM transactions
+      WHERE amount > 0 AND created_at >= ?
+      GROUP BY user_id
+      HAVING earned > 0
+    `).all(ercCutoff);
+    if (ercRows.length === 0) {
+      await message.reply(`No positive transactions found since **${ercDate}**. Nothing to rollback.`);
+      return;
+    }
+    const ercTotal = ercRows.reduce((s, r) => s + r.earned, 0);
+    if (!ercConfirm) {
+      const ercLines = ercRows.slice(0, 20).map(r => {
+        const cur = db.prepare('SELECT balance FROM balances WHERE user_id = ?').get(r.user_id)?.balance ?? 0;
+        const deduct = Math.min(r.earned, Math.max(0, cur));
+        return `<@${r.user_id}> earned **${r.earned.toLocaleString()} BB** → confiscate **${deduct.toLocaleString()} BB** (has ${cur.toLocaleString()} BB)`;
+      }).join('\n');
+      const ercMore = ercRows.length > 20 ? `\n_...and ${ercRows.length - 20} more users_` : '';
+      await message.reply({ embeds: [new EmbedBuilder()
+        .setColor('#FF6600')
+        .setTitle(`💸 Economy Rollback Preview — Since ${ercDate}`)
+        .setDescription(
+          `**${ercRows.length} users** earned BB since this date.\n` +
+          `**Total earned (to confiscate):** ${ercTotal.toLocaleString()} BB\n\n` +
+          ercLines + ercMore + `\n\n` +
+          `⚠️ Run \`!ecorollback ${ercDate} confirm\` to execute. This cannot be undone.`
+        )
+        .setFooter({ text: "Bully's World Admin • Preview Only" })
+        .setTimestamp()] });
+      return;
+    }
+    // Execute
+    let ercConfiscated = 0;
+    const ercConfStmt = db.prepare('UPDATE balances SET balance = balance - ? WHERE user_id = ?');
+    const ercTxStmt   = db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)');
+    db.transaction(() => {
+      for (const row of ercRows) {
+        const cur = db.prepare('SELECT balance FROM balances WHERE user_id = ?').get(row.user_id)?.balance ?? 0;
+        const deduct = Math.min(row.earned, Math.max(0, cur));
+        if (deduct > 0) {
+          ercConfStmt.run(deduct, row.user_id);
+          ercTxStmt.run(row.user_id, -deduct, `economy rollback — BB earned since ${ercDate} confiscated`);
+          ercConfiscated += deduct;
+        }
+      }
+    })();
+    await message.reply({ embeds: [new EmbedBuilder()
+      .setColor('#8B0000')
+      .setTitle(`🔥 Economy Rollback Executed — Since ${ercDate}`)
+      .setDescription(
+        `**${ercRows.length} users** processed.\n` +
+        `**Total confiscated:** ${ercConfiscated.toLocaleString()} BB removed from circulation.\n\n` +
+        `_Transaction records updated. The books are balanced._`
+      )
+      .setFooter({ text: "Bully's World Admin • Rollback Complete" })
+      .setTimestamp()] });
+    return;
+  }
+
+  // ── !rolerollback YYYY-MM-DD [confirm] ──────────────────────────────────────────────────────────────────
+  if (content.startsWith('!rolerollback')) {
+    const rrbParts = content.split(/\s+/);
+    const rrbDate = rrbParts[1];
+    const rrbConfirm = rrbParts[2] === 'confirm';
+    if (!rrbDate || !/^\d{4}-\d{2}-\d{2}$/.test(rrbDate)) {
+      await message.reply('`!rolerollback YYYY-MM-DD` (preview) or `!rolerollback YYYY-MM-DD confirm` (execute)');
+      return;
+    }
+    const rrbCutoff = rrbDate + 'T00:00:00.000Z';
+    const rrbRows = db.prepare(`
+      SELECT id, user_id, item_name, cost, created_at
+      FROM shop_purchases
+      WHERE created_at >= ?
+      ORDER BY created_at ASC
+    `).all(rrbCutoff);
+    if (rrbRows.length === 0) {
+      await message.reply(`No shop purchases found since **${rrbDate}**. Nothing to rollback.`);
+      return;
+    }
+    const rrbTotalCost = rrbRows.reduce((s, r) => s + r.cost, 0);
+    if (!rrbConfirm) {
+      const rrbLines = rrbRows.slice(0, 20).map(p =>
+        `<@${p.user_id}> — **${p.item_name}** (${p.cost.toLocaleString()} BB) on ${p.created_at.slice(0, 10)}`
+      ).join('\n');
+      const rrbMore = rrbRows.length > 20 ? `\n_...and ${rrbRows.length - 20} more_` : '';
+      await message.reply({ embeds: [new EmbedBuilder()
+        .setColor('#FF6600')
+        .setTitle(`🎭 Role Rollback Preview — Since ${rrbDate}`)
+        .setDescription(
+          `**${rrbRows.length} purchases** found since this date.\n` +
+          `**Total to refund:** ${rrbTotalCost.toLocaleString()} BB\n\n` +
+          rrbLines + rrbMore + `\n\n` +
+          `This will:\n` +
+          `• Remove roles from members' Discord profiles (if equipped)\n` +
+          `• Delete all matching entries from role inventories\n` +
+          `• Refund the BB cost to each account\n\n` +
+          `⚠️ Run \`!rolerollback ${rrbDate} confirm\` to execute. This cannot be undone.`
+        )
+        .setFooter({ text: "Bully's World Admin • Preview Only" })
+        .setTimestamp()] });
+      return;
+    }
+    // Execute
+    const rrbGuild = message.guild;
+    let rrbRemoved = 0, rrbFailed = 0, rrbRefunded = 0;
+    const rrbDelInv   = db.prepare('DELETE FROM role_inventory WHERE user_id = ? AND role_name = ?');
+    const rrbDelPurch = db.prepare('DELETE FROM shop_purchases WHERE id = ?');
+    const rrbRefund   = db.prepare('UPDATE balances SET balance = balance + ? WHERE user_id = ?');
+    const rrbTxStmt   = db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)');
+    for (const p of rrbRows) {
+      try {
+        // 1. Wipe inventory entry (both equipped and unequipped)
+        rrbDelInv.run(p.user_id, p.item_name);
+        // 2. Remove purchase record
+        rrbDelPurch.run(p.id);
+        // 3. Refund BB
+        rrbRefund.run(p.cost, p.user_id);
+        rrbTxStmt.run(p.user_id, p.cost, `role rollback refund — ${p.item_name} (purchased ${p.created_at.slice(0, 10)})`);
+        rrbRefunded += p.cost;
+        // 4. Strip the Discord role if the member has it equipped
+        try {
+          const member = await rrbGuild.members.fetch(p.user_id).catch(() => null);
+          if (member) {
+            // Match by role name (shop item_name == Discord role name)
+            const discordRole = rrbGuild.roles.cache.find(r => r.name === p.item_name);
+            if (discordRole && member.roles.cache.has(discordRole.id)) {
+              await member.roles.remove(discordRole, `role rollback — purchased ${p.created_at.slice(0, 10)}`);
+            }
+          }
+        } catch (_) { /* member left guild or role not found — skip */ }
+        rrbRemoved++;
+      } catch (e) {
+        console.error('[rolerollback] Failed for purchase ' + p.id + ':', e.message);
+        rrbFailed++;
+      }
+    }
+    await message.reply({ embeds: [new EmbedBuilder()
+      .setColor('#8B0000')
+      .setTitle(`🎭 Role Rollback Executed — Since ${rrbDate}`)
+      .setDescription(
+        `**${rrbRemoved} entries** purged from inventories.\n` +
+        (rrbFailed > 0 ? `⚠️ **${rrbFailed} failures** — check console logs.\n` : '') +
+        `**Total refunded:** ${rrbRefunded.toLocaleString()} BB returned to members.\n\n` +
+        `_Inventory records purged, purchase history cleared, Discord roles stripped from equipped profiles._`
+      )
+      .setFooter({ text: "Bully's World Admin • Rollback Complete" })
+      .setTimestamp()] });
+    return;
+  }
+
   // Test commands
   if (content==='!testspotlight') {
     await postMemberSpotlight();
@@ -3719,6 +3880,7 @@ const heistSelectionPending = new Map(); // userId → { username, channel, avai
 let _heistIdCounter = 0;
 const heistChallengeState        = new Map(); // heistId → challenge phase state
 const heistDistractionListeners  = new Map(); // `channelId.userId` → listener
+const activeStealTargets         = new Set(); // target user IDs currently being stolen from (mutex)
 let shopSelectionPending = new Map(); // userId -> waiting for shop item number
 let lotterySelectionPending = new Map(); // userId -> waiting for ticket count
 let activeDuels = new Map(); // challenged_id -> duel info
@@ -6427,6 +6589,13 @@ client.on('messageCreate', async msg => {
     return;
   }
   if (targetUser.balance < stealAmount) { await msg.reply(`**${target.username}** only has **${targetUser.balance} BB**.`); return; }
+  // ── RACE CONDITION LOCK — one steal per target at a time ──
+  if (activeStealTargets.has(target.id)) {
+    await msg.reply(`⚠️ A steal against **${target.username}** is already in progress. Wait for it to resolve.`);
+    return;
+  }
+  activeStealTargets.add(target.id);
+
   db.prepare('INSERT OR REPLACE INTO steal_cooldown (user_id, last_steal) VALUES (?, ?)').run(userId, new Date().toISOString());
   db.prepare('INSERT INTO steal_log (stealer_id, target_id) VALUES (?, ?)').run(userId, target.id);
   const defendWindowMs = stealAmount <= 25 ? 15000 : stealAmount <= 100 ? 20000 : 30000;
@@ -6480,13 +6649,19 @@ Click **BLOCK IT** within **${windowSecs} seconds**!`).setFooter({ text: "Bully'
       await msg.channel.send({ embeds: [new EmbedBuilder().setColor('#8B0000').setTitle('🛡️ Steal Blocked!').setDescription(`**${target.username}** blocked it in time!\n\n**${username}** loses **${actualPenalty} BB** as a penalty.`).addFields({ name: `${username}'s balance`, value: `${u.balance - actualPenalty} BB`, inline: true }, { name: `${target.username}'s balance`, value: `${targetUser.balance} BB`, inline: true }).setFooter({ text: "Bully's World • Crime doesn't pay." }).setTimestamp()] });
     }
   } else {
-    const actualStolen = Math.min(stealAmount, targetUser.balance);
-    db.prepare('UPDATE balances SET balance = balance - ? WHERE user_id = ?').run(actualStolen, target.id);
-    db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(target.id, -actualStolen, `stolen by ${username}`);
-    addBB(userId, username, actualStolen, `stolen from ${target.username}`);
-    await msg.channel.send({ embeds: [new EmbedBuilder().setColor('#3B6D11').setTitle('🤫 Successful Steal!').setDescription(`**${username}** got away with **${actualStolen} BB** from **${target.username}**!
-*${target.username} didn't defend in time.*`).addFields({ name: `${username}'s balance`, value: `${getUser(userId, username).balance} BB`, inline: true }, { name: `${target.username}'s balance`, value: `${targetUser.balance - actualStolen} BB`, inline: true }).setFooter({ text: "Bully's World • Watch your pockets." }).setTimestamp()] });
-    try { await target.send(`🚨 **${username}** stole **${actualStolen} BB** from you!`); } catch (_) {}
+    // Re-read balance inside lock — concurrent steals can't double-dip
+    const freshBal = db.prepare('SELECT balance FROM balances WHERE user_id = ?').get(target.id)?.balance ?? 0;
+    const actualStolen = Math.min(stealAmount, freshBal);
+    if (actualStolen <= 0) {
+      await msg.channel.send(`😬 **${target.username}** had nothing left by the time this steal resolved.`);
+    } else {
+      db.prepare('UPDATE balances SET balance = balance - ? WHERE user_id = ?').run(actualStolen, target.id);
+      db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(target.id, -actualStolen, `stolen by ${username}`);
+      addBB(userId, username, actualStolen, `stolen from ${target.username}`);
+      await msg.channel.send({ embeds: [new EmbedBuilder().setColor('#3B6D11').setTitle('🤫 Successful Steal!').setDescription(`**${username}** got away with **${actualStolen} BB** from **${target.username}**!
+*${target.username} didn't defend in time.*`).addFields({ name: `${username}'s balance`, value: `${getUser(userId, username).balance} BB`, inline: true }, { name: `${target.username}'s balance`, value: `${freshBal - actualStolen} BB`, inline: true }).setFooter({ text: "Bully's World • Watch your pockets." }).setTimestamp()] });
+      try { await target.send(`🚨 **${username}** stole **${actualStolen} BB** from you!`); } catch (_) {}
+    }
   }
 
   // Notify stealer how many attempts they have left today (only visible to them)
@@ -6496,6 +6671,8 @@ Click **BLOCK IT** within **${windowSecs} seconds**!`).setFooter({ text: "Bully'
     const left = Math.max(0, 8 - used);
     try { await msg.author.send(`🕵️ You have **${left} steal attempt${left !== 1 ? 's' : ''}** left this 8-hour window.`); } catch (_) {}
   }
+
+  activeStealTargets.delete(target.id); // Release lock
 });
 
 // ============================================================================
