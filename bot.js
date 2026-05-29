@@ -3666,48 +3666,69 @@ This challenge expires in 60 seconds.`)
         .setTimestamp()] });
       return;
     }
-    // Execute
+    // Execute — send immediate ack so it doesn't look frozen
     const rrbGuild = message.guild;
-    let rrbRemoved = 0, rrbFailed = 0, rrbRefunded = 0;
-    const rrbDelInv   = db.prepare('DELETE FROM role_inventory WHERE user_id = ? AND role_name = ?');
-    const rrbDelPurch = db.prepare('DELETE FROM shop_purchases WHERE id = ?');
-    const rrbRefund   = db.prepare('UPDATE balances SET balance = balance + ? WHERE user_id = ?');
-    const rrbTxStmt   = db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)');
+    const rrbAck = await message.reply(`⏳ Processing **${rrbRows.length} purchases**... stripping roles and refunding BB.`);
+    let rrbRemoved = 0, rrbDiscordStripped = 0, rrbFailed = 0, rrbRefunded = 0;
+
+    // ── Step 1: all DB work in one atomic transaction ──
+    try {
+      const rrbDelInv   = db.prepare('DELETE FROM role_inventory WHERE user_id = ? AND role_name = ?');
+      const rrbDelPurch = db.prepare('DELETE FROM shop_purchases WHERE id = ?');
+      const rrbRefund   = db.prepare('UPDATE balances SET balance = balance + ? WHERE user_id = ?');
+      const rrbTxStmt   = db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)');
+      db.transaction(() => {
+        for (const p of rrbRows) {
+          rrbDelInv.run(p.user_id, p.item_name);   // wipe inventory entry (equipped or not)
+          rrbDelPurch.run(p.id);                    // remove purchase record
+          rrbRefund.run(p.cost, p.user_id);         // refund BB
+          rrbTxStmt.run(p.user_id, p.cost, `role rollback refund — ${p.item_name} (purchased ${p.created_at.slice(0, 10)})`);
+          rrbRefunded += p.cost;
+          rrbRemoved++;
+        }
+      })();
+    } catch (e) {
+      console.error('[rolerollback] DB transaction failed:', e.message);
+      rrbFailed++;
+    }
+
+    // ── Step 2: batch-fetch all unique members + refresh role cache in parallel ──
+    const rrbUniqueIds = [...new Set(rrbRows.map(p => p.user_id))];
+    let rrbMemberMap = new Map(); // userId → GuildMember
+    try {
+      // Fetch all members in one API call; falls back gracefully if intent missing
+      const fetched = await rrbGuild.members.fetch({ user: rrbUniqueIds }).catch(() => null);
+      if (fetched) fetched.forEach(m => rrbMemberMap.set(m.id, m));
+    } catch (_) {}
+
+    // Refresh role cache with one API call so we don't rely on stale data
+    try { await rrbGuild.roles.fetch(); } catch (_) {}
+
+    // ── Step 3: strip Discord roles from equipped members ──
     for (const p of rrbRows) {
       try {
-        // 1. Wipe inventory entry (both equipped and unequipped)
-        rrbDelInv.run(p.user_id, p.item_name);
-        // 2. Remove purchase record
-        rrbDelPurch.run(p.id);
-        // 3. Refund BB
-        rrbRefund.run(p.cost, p.user_id);
-        rrbTxStmt.run(p.user_id, p.cost, `role rollback refund — ${p.item_name} (purchased ${p.created_at.slice(0, 10)})`);
-        rrbRefunded += p.cost;
-        // 4. Strip the Discord role if the member has it equipped
-        try {
-          const member = await rrbGuild.members.fetch(p.user_id).catch(() => null);
-          if (member) {
-            // Match by role name (shop item_name == Discord role name)
-            const discordRole = rrbGuild.roles.cache.find(r => r.name === p.item_name);
-            if (discordRole && member.roles.cache.has(discordRole.id)) {
-              await member.roles.remove(discordRole, `role rollback — purchased ${p.created_at.slice(0, 10)}`);
-            }
-          }
-        } catch (_) { /* member left guild or role not found — skip */ }
-        rrbRemoved++;
+        const member = rrbMemberMap.get(p.user_id);
+        if (!member) continue; // left the server
+        // Match role by exact name (shop item_name == Discord role name)
+        const discordRole = rrbGuild.roles.cache.find(r => r.name === p.item_name);
+        if (discordRole && member.roles.cache.has(discordRole.id)) {
+          await member.roles.remove(discordRole, `role rollback — purchased ${p.created_at.slice(0, 10)}`);
+          rrbDiscordStripped++;
+        }
       } catch (e) {
-        console.error('[rolerollback] Failed for purchase ' + p.id + ':', e.message);
-        rrbFailed++;
+        console.error(`[rolerollback] Could not strip role for ${p.user_id}/${p.item_name}:`, e.message);
       }
     }
-    await message.reply({ embeds: [new EmbedBuilder()
+
+    await rrbAck.edit({ content: '', embeds: [new EmbedBuilder()
       .setColor('#8B0000')
       .setTitle(`🎭 Role Rollback Executed — Since ${rrbDate}`)
       .setDescription(
-        `**${rrbRemoved} entries** purged from inventories.\n` +
-        (rrbFailed > 0 ? `⚠️ **${rrbFailed} failures** — check console logs.\n` : '') +
+        `**${rrbRemoved} inventory entries** purged from the database.\n` +
+        `**${rrbDiscordStripped} Discord roles** stripped from equipped profiles.\n` +
+        (rrbFailed > 0 ? `⚠️ **${rrbFailed} DB failures** — check console logs.\n` : '') +
         `**Total refunded:** ${rrbRefunded.toLocaleString()} BB returned to members.\n\n` +
-        `_Inventory records purged, purchase history cleared, Discord roles stripped from equipped profiles._`
+        `_Purchase history cleared, inventories wiped, Discord roles removed._`
       )
       .setFooter({ text: "Bully's World Admin • Rollback Complete" })
       .setTimestamp()] });
