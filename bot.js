@@ -432,6 +432,7 @@ const FEATURE_FLAGS = {
   heist:   true,
   casino:  true,
   lottery: true,
+  shop:    true,
   trivia:  true,
   hangman: true,
   steal:   true,
@@ -459,6 +460,7 @@ const GC_FEATURES = [
   { key: 'gift',    label: '💸 Gifts'  },
   { key: 'rain',    label: '🌧️ BB Rain' },
   { key: 'duel',    label: '⚔️ Duels'  },
+  { key: 'shop',    label: '🛍️ Shop'   },
 ];
 
 function buildGameController() {
@@ -1245,11 +1247,25 @@ async function refreshShop(forceNew = false) {
 
 async function postShopEmbed(channel) {
   const nextRefresh = shopRefreshTime || new Date(Date.now() + 12 * 60 * 60 * 1000);
+
+  // ── Shop closed state ────────────────────────────────────────────────────────
+  if (!isEnabled('shop')) {
+    const closedEmbed = new EmbedBuilder()
+      .setColor('#1a1a1a')
+      .setTitle("🛍️ BULLY'S STORE")
+      .setDescription('🔒 **The shop is currently closed.**\n\nCheck back later!')
+      .setFooter({ text: "Bully's World" })
+      .setTimestamp();
+    return channel.send({ embeds: [closedEmbed], components: [] });
+  }
+
   const roles = activeShopRoles;
 
-  const desc = roles.map(r =>
-    `${RARITY_EMOJI[r.rarity] || '⬜'} **${r.name}** [${r.rarity}] — **${r.cost} BB**`
-  ).join('\n');
+  // Always derive price from CONFIG so stale DB cache never shows wrong price
+  const desc = roles.map(r => {
+    const price = CONFIG.ROLE_PRICES[r.rarity] || CONFIG.ROLE_PRICES['Common'];
+    return `${RARITY_EMOJI[r.rarity] || '⬜'} **${r.name}** [${r.rarity}] — **${price} BB**`;
+  }).join('\n');
 
   const embed = new EmbedBuilder()
     .setColor('#c9a84c')
@@ -4509,6 +4525,8 @@ client.on('interactionCreate', async interaction => {
     if (!(feature in FEATURE_FLAGS)) { await interaction.reply({ content: '❌ Unknown feature.', ephemeral: true }); return; }
     setFeature(feature, !FEATURE_FLAGS[feature]);
     await interaction.update(buildGameController());
+    // Refresh shop channel immediately so the embed reflects the new state
+    if (feature === 'shop') refreshShop().catch(console.error);
     return;
   }
 
@@ -5025,10 +5043,12 @@ client.on('interactionCreate', async interaction => {
 
     // ── SHOP: role buy button ─────────────────────────────────────────────────
     if (customId.startsWith('shopbuy_role.')) {
+      if (!isEnabled('shop')) { await interaction.reply({ content: '🔒 The shop is currently closed.', ephemeral: true }); return; }
       const idx = parseInt(customId.split('.')[1]);
       const role = activeShopRoles[idx];
       if (!role) { await interaction.reply({ content: '❌ Role not found. The shop may have just refreshed — try **!shop** again.', ephemeral: true }); return; }
-      await fulfillRolePurchase(interaction, userId, username, role.name, role.rarity, role.cost);
+      const price = CONFIG.ROLE_PRICES[role.rarity] || CONFIG.ROLE_PRICES['Common'];
+      await fulfillRolePurchase(interaction, userId, username, role.name, role.rarity, price);
       return;
     }
 
