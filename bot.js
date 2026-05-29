@@ -4715,19 +4715,30 @@ client.on('messageCreate', async msg => {
     await msg.delete().catch(() => {});
     return;
   }
+  // Build game menu — disabled games show as greyed out for everyone
+  const gmBtn = (id, label, style, flag) => {
+    const off = flag && !isEnabled(flag);
+    return new ButtonBuilder()
+      .setCustomId(id)
+      .setLabel(off ? `🔴 ${label.replace(/^\S+\s/, '')}` : label)
+      .setStyle(off ? ButtonStyle.Secondary : style)
+      .setDisabled(off);
+  };
+  const disabledList = ['heist','casino','lottery','trivia','hangman'].filter(f => !isEnabled(f));
+  const statusNote  = disabledList.length ? `\n\n🔴 Currently unavailable: ${disabledList.map(f => f[0].toUpperCase() + f.slice(1)).join(', ')}` : '';
   const embed = new EmbedBuilder().setColor('#c9a84c').setTitle('🎮 BULLYLAND Games')
-    .setDescription('**Welcome to the game room.** Pick a game below.\n\n⚔️ **Raid** — Team battles\n👹 **Boss Raid** — Legendary bosses\n🦹 **Heist** — Crew heists for BB\n🎰 **Casino** — Slots, Blackjack, Roulette, Horse Racing\n🎟️ **Lottery** — Weekly jackpot draw\n🧠 **Trivia** — Answer fast, earn BB\n🔤 **Hangman** — Guess the word together\n\n*Type `!help` for a full guide to earning, banking, and stealing.*')
+    .setDescription('**Welcome to the game room.** Pick a game below.\n\n⚔️ **Raid** — Team battles\n👹 **Boss Raid** — Legendary bosses\n🦹 **Heist** — Crew heists for BB\n🎰 **Casino** — Slots, Blackjack, Roulette, Horse Racing\n🎟️ **Lottery** — Weekly jackpot draw\n🧠 **Trivia** — Answer fast, earn BB\n🔤 **Hangman** — Guess the word together\n\n*Type `!help` for a full guide to earning, banking, and stealing.*' + statusNote)
     .setFooter({ text: "Bully's World" }).setTimestamp();
   const row1 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('menu.raid').setLabel('⚔️ Raid').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('menu.boss').setLabel('👹 Boss Raid').setStyle(ButtonStyle.Danger),
-    new ButtonBuilder().setCustomId('menu.heist').setLabel('🦹 Heist').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('menu.casino').setLabel('🎰 Casino').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('menu.lottery').setLabel('🎟️ Lottery').setStyle(ButtonStyle.Primary),
+    gmBtn('menu.raid',    '⚔️ Raid',     ButtonStyle.Primary,   null),
+    gmBtn('menu.boss',    '👹 Boss Raid', ButtonStyle.Danger,    null),
+    gmBtn('menu.heist',   '🦹 Heist',    ButtonStyle.Secondary, 'heist'),
+    gmBtn('menu.casino',  '🎰 Casino',   ButtonStyle.Primary,   'casino'),
+    gmBtn('menu.lottery', '🎟️ Lottery',  ButtonStyle.Primary,   'lottery'),
   );
   const row2 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('menu.trivia').setLabel('🧠 Trivia').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId('menu.hangman').setLabel('🔤 Hangman').setStyle(ButtonStyle.Success),
+    gmBtn('menu.trivia',  '🧠 Trivia',   ButtonStyle.Success,   'trivia'),
+    gmBtn('menu.hangman', '🔤 Hangman',  ButtonStyle.Success,   'hangman'),
   );
   await msg.reply({ embeds: [embed], components: [row1, row2] });
 });
@@ -5322,7 +5333,7 @@ client.on('interactionCreate', async interaction => {
     // ── TRIVIA: start ────────────────────────────────────────────────────────
     // ── TRIVIA: category picker ───────────────────────────────────────────────
     if (customId === 'menu.trivia') {
-      if (!isEnabled('trivia') && !isAdmin) { await interaction.reply({ content: '🧠 Trivia is currently **disabled**. Check back later.', ephemeral: true }); return; }
+      if (!isEnabled('trivia')) { await interaction.reply({ content: '🧠 Trivia is currently **disabled**. Check back later.', ephemeral: true }); return; }
       const cid = interaction.channelId;
       if (activeTrivia.has(cid)) { await interaction.reply({ content: '🧠 A trivia game is already running in this channel!', ephemeral: true }); return; }
       if (getActiveGameCount(cid) >= MAX_GAMES_PER_CHANNEL) { await interaction.reply({ content: `⏳ **2 games are already running in this channel.** Wait for one to finish before starting another!`, ephemeral: true }); return; }
@@ -5407,7 +5418,7 @@ client.on('interactionCreate', async interaction => {
 
     // ── HANGMAN: category picker ──────────────────────────────────────────────
     if (customId === 'menu.hangman') {
-      if (!isEnabled('hangman') && !isAdmin) { await interaction.reply({ content: '🔤 Hangman is currently **disabled**. Check back later.', ephemeral: true }); return; }
+      if (!isEnabled('hangman')) { await interaction.reply({ content: '🔤 Hangman is currently **disabled**. Check back later.', ephemeral: true }); return; }
       const cid = interaction.channelId;
       if (activeHangman.has(cid)) { await interaction.reply({ content: '🔤 A hangman game is already running in this channel!', ephemeral: true }); return; }
       if (getActiveGameCount(cid) >= MAX_GAMES_PER_CHANNEL) { await interaction.reply({ content: `⏳ **2 games are already running in this channel.** Wait for one to finish before starting another!`, ephemeral: true }); return; }
@@ -5560,7 +5571,7 @@ client.on('interactionCreate', async interaction => {
 
     // MAIN MENU
     if (customId === 'menu.lottery') {
-      if (!isEnabled('lottery') && !isAdmin) { await interaction.reply({ content: '🎟️ The lottery is currently **disabled**. Check back later.', ephemeral: true }); return; }
+      if (!isEnabled('lottery')) { await interaction.reply({ content: '🎟️ The lottery is currently **disabled**. Check back later.', ephemeral: true }); return; }
       const week = getCurrentLotteryWeek();
       const ex = db.prepare('SELECT * FROM lottery_tickets WHERE user_id = ? AND week = ?').get(userId, week);
       const owned = ex ? ex.tickets : 0;
@@ -5650,7 +5661,7 @@ client.on('interactionCreate', async interaction => {
 
     // HEIST MENU
     if (customId === 'menu.heist') {
-      if (!isEnabled('heist') && !isAdmin) { await interaction.reply({ content: '🦹 Heists are currently **disabled**. Check back later.', ephemeral: true }); return; }
+      if (!isEnabled('heist')) { await interaction.reply({ content: '🦹 Heists are currently **disabled**. Check back later.', ephemeral: true }); return; }
       if (activeHeists.size >= 3) { await interaction.reply({ content: '🦹 3 heists are already running! Wait for one to finish.', ephemeral: true }); return; }
       if (getActiveGameCount(interaction.channelId) >= MAX_GAMES_PER_CHANNEL) { await interaction.reply({ content: `⏳ **2 games are already running in this channel.** Wait for one to finish before starting another!`, ephemeral: true }); return; }
       if (heistSelectionPending.has(userId)) { await interaction.reply({ content: 'You already have a heist menu open!', ephemeral: true }); return; }
@@ -5896,7 +5907,7 @@ Launches <t:${endsAt}:R> — click **Join** to pick your role!`)
 
     // CASINO
     if (customId === 'menu.casino') {
-      if (!isEnabled('casino') && !isAdmin) { await interaction.reply({ content: '🎰 The casino is currently **disabled**. Check back later.', ephemeral: true }); return; }
+      if (!isEnabled('casino')) { await interaction.reply({ content: '🎰 The casino is currently **disabled**. Check back later.', ephemeral: true }); return; }
       if (!casinoOpen(isAdmin)) { await interaction.reply({ content: "🎰 **Bully's Casino is closed right now.** Watch #general for the opening announcement!", ephemeral: true }); return; }
       const bal = getBal();
       const r1 = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('cas.slots').setLabel('🎰 Slots').setStyle(ButtonStyle.Primary), new ButtonBuilder().setCustomId('cas.blackjack').setLabel('🃏 Blackjack').setStyle(ButtonStyle.Success));
@@ -6364,7 +6375,7 @@ client.on('messageCreate', async msg => {
   if (target.id === userId) { await msg.reply("You can't steal from yourself."); return; }
   if (target.bot) { await msg.reply("You can't steal from a bot."); return; }
   const isAdminSteal = msg.member?.permissions.has(PermissionsBitField.Flags.Administrator) || userId === process.env.OWNER_ID;
-  if (!isEnabled('steal') && !isAdminSteal) { await msg.reply('🕵️ Steals are currently **disabled**. Check back later.'); return; }
+  if (!isEnabled('steal')) { await msg.reply('🕵️ Steals are currently **disabled**. Check back later.'); return; }
   if (!isAdminSteal) {
     // Jail check — jailed users cannot steal
     const jailRowSteal = getJail(userId);
