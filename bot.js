@@ -1762,6 +1762,474 @@ client.on('guildMemberUpdate', async (oldMember, newMember) => {
   }
 });
 
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ─── HEIST ROLE CHALLENGE SYSTEM ───────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function getHeistDifficulty(entry) {
+  if (entry <= 8)  return 'easy';
+  if (entry <= 15) return 'medium';
+  return 'hard';
+}
+
+function getOutcomeTier(totalScore, crewCount) {
+  const maxScore = crewCount * 2;
+  const pct = maxScore > 0 ? totalScore / maxScore : 0;
+  if (totalScore < 0) return 'arrest';
+  if (pct >= 0.80)    return 'major';
+  if (pct >= 0.60)    return 'success';
+  if (pct >= 0.35)    return 'partial';
+  return 'failure';
+}
+
+function hcScoreLabel(score) {
+  if (score >= 2)  return '\u2705 **+2 pts** \u2014 Perfect!';
+  if (score === 1) return '\u26a0\ufe0f **+1 pt** \u2014 Success';
+  if (score === 0) return '\u274c **0 pts** \u2014 Failed';
+  return '\ud83d\udca5 **\u22121 pt** \u2014 Critical Failure';
+}
+function hcScoreColor(score) {
+  if (score >= 2)  return '#3B6D11';
+  if (score === 1) return '#FFD700';
+  if (score === 0) return '#888888';
+  return '#8B0000';
+}
+
+// ── Content pools ─────────────────────────────────────────────────────────────
+
+const MASTERMIND_SCENARIOS = {
+  easy: [
+    { situation: 'A guard just changed patrol route and is heading toward the crew.',
+      choices: [
+        { label: 'A) Hide and wait for them to pass',       score: 2,  feedback: 'Smart call. The guard walked right past.' },
+        { label: 'B) Keep moving quickly through the area', score: 1,  feedback: 'Barely avoided detection. Risky but fine.' },
+        { label: 'C) Fall back and abort the objective',    score: -1, feedback: 'Unnecessary abort. The crew lost their window for nothing.' },
+      ]
+    },
+    { situation: 'An alarm starts beeping in an adjacent room.',
+      choices: [
+        { label: 'A) Send the Distraction to investigate', score: 2,  feedback: 'False alarm. Distraction neutralized it perfectly.' },
+        { label: 'B) Ignore it and push forward',          score: 1,  feedback: 'It was nothing \u2014 but that was a gamble.' },
+        { label: 'C) Abort immediately',                   score: -1, feedback: 'False alarm. You pulled the crew for nothing.' },
+      ]
+    },
+    { situation: 'Your entry window is closing faster than expected.',
+      choices: [
+        { label: 'A) Prioritize the main target only',              score: 2,  feedback: 'Focused the crew. In, grabbed it, out.' },
+        { label: 'B) Rush through and grab everything possible',    score: 0,  feedback: 'Rushing caused noise. Barely escaped.' },
+        { label: 'C) Abort and wait for a better window',           score: -1, feedback: 'Needless retreat. The opportunity is gone.' },
+      ]
+    },
+    { situation: 'A staff member walks into the room next to your position.',
+      choices: [
+        { label: 'A) Hold position and let them pass',              score: 2, feedback: 'They left after two minutes. Clean.' },
+        { label: 'B) Push forward quietly and fast',                score: 1, feedback: 'Tight. They heard something but dismissed it.' },
+        { label: 'C) Create a loud distraction to draw them away',  score: 0, feedback: 'It worked but attracted two more staff.' },
+      ]
+    },
+  ],
+  medium: [
+    { situation: 'Security has doubled near the vault. One guard is watching a separate camera feed.',
+      choices: [
+        { label: 'A) Push forward \u2014 hit them fast',                     score: -1, feedback: 'Walked straight into the patrol. Busted.' },
+        { label: 'B) Lookout handles camera, rest push through',       score: 2,  feedback: 'Camera blind spot exploited. Textbook.' },
+        { label: 'C) Wait 10 minutes for the shift change',            score: 1,  feedback: 'Safe call, but the delay cost the crew time.' },
+        { label: 'D) Take the loading dock detour around security',    score: 0,  feedback: 'Long route. Window had already shrunk.' },
+      ]
+    },
+    { situation: 'The Driller is running 3 minutes over schedule. Everyone is exposed.',
+      choices: [
+        { label: 'A) Hold \u2014 give the Driller 2 more minutes',         score: 2,  feedback: 'They got through. Trust in your crew paid off.' },
+        { label: 'B) Send Getaway ahead to scout the exit early',    score: 1,  feedback: 'Solid thinking. Exit confirmed clear when needed.' },
+        { label: 'C) Pull the Driller and switch to secondary entry', score: 0,  feedback: 'Secondary entry was slower. Lost even more time.' },
+        { label: 'D) Trigger a fire alarm to buy time',              score: -1, feedback: 'Fire alarm locked down the entire building.' },
+      ]
+    },
+    { situation: 'Motion sensors activated in the target room. You have 90 seconds.',
+      choices: [
+        { label: 'A) Abort \u2014 sensor activation means exposure',       score: 0,  feedback: 'Sensor was a glitch. Mission aborted for nothing.' },
+        { label: 'B) Go now \u2014 move through before security verifies', score: 2,  feedback: 'Made it through before they confirmed. Razor thin.' },
+        { label: 'C) Send one person while rest hold the perimeter', score: 1,  feedback: 'Worked. Solo entry was slower but undetected.' },
+        { label: 'D) Have Distraction pull fire alarm to reset sensors', score: -1, feedback: 'Full lockdown triggered. Every exit sealed.' },
+      ]
+    },
+  ],
+  hard: [
+    { situation: 'Biometric scanner on the vault door. Your bypass device is malfunctioning.',
+      choices: [
+        { label: 'A) Force entry before security responds',             score: -1, feedback: 'Silent alarm triggered. Surrounded in 40 seconds.' },
+        { label: 'B) Have Driller access the secondary hardwire panel', score: 2,  feedback: 'Driller found the bypass. Clean entry. No alarm.' },
+        { label: 'C) Bluff through as maintenance staff',               score: 1,  feedback: 'They were suspicious. You talked your way in.' },
+        { label: 'D) Abort \u2014 equipment failure means mission failure', score: 0, feedback: 'Smart retreat but the objective was abandoned.' },
+      ]
+    },
+    { situation: 'One guard has eyes on your Distraction and is radioing for backup.',
+      choices: [
+        { label: 'A) Distraction runs \u2014 draw security away',          score: 2,  feedback: 'Sacrificial play worked. Crew secured the objective.' },
+        { label: 'B) Complete objective fast, leave Distraction behind', score: 1,  feedback: 'Cold. Effective. Objective secured before lockdown.' },
+        { label: 'C) Everyone freeze and hope the guard loses interest', score: -1, feedback: 'Guard radioed in. Backup arrived in 90 seconds.' },
+        { label: 'D) Attempt to quietly neutralize the guard',          score: 0,  feedback: 'Too risky. Guard got a partial radio call out.' },
+      ]
+    },
+    { situation: 'Silent countdown \u2014 60 seconds to enter the final code or vault locks for 24 hours.',
+      choices: [
+        { label: 'A) Take full time to verify every digit',           score: 2,  feedback: 'Entered with 4 seconds to spare. Vault open.' },
+        { label: 'B) Enter best guess with 20 seconds remaining',     score: 1,  feedback: 'Got it right. You\'ll take the luck.' },
+        { label: 'C) Have crew buy more time outside',                score: 0,  feedback: 'Crew couldn\'t hold long enough. Time ran out.' },
+        { label: 'D) Try the backup code from the leaked intel',      score: -1, feedback: 'Backup code was a honeypot. Alarm triggered instantly.' },
+      ]
+    },
+  ],
+};
+
+const GETAWAY_SCENARIOS = {
+  easy: [
+    { situation: '\ud83d\ude93 A police cruiser just turned onto your street.',
+      choices: [
+        { label: 'A) Cut through the alley',                      score: 2,  feedback: 'Back streets were clear. Clean escape.' },
+        { label: 'B) Stay on main road and act casual',           score: 1,  feedback: 'Drove right past. Nerve-wracking but fine.' },
+        { label: 'C) Double back to the target building',         score: -1, feedback: 'Walked back into the scene. Caught.' },
+      ]
+    },
+    { situation: '\ud83d\udd26 A flashlight beam is sweeping toward your position.',
+      choices: [
+        { label: 'A) Drop behind the nearest cover immediately',  score: 2, feedback: 'Beam passed directly over where you were standing.' },
+        { label: 'B) Sprint to the corner before it reaches you', score: 1, feedback: 'Made it to cover. That was close.' },
+        { label: 'C) Freeze and hope they don\'t look directly',  score: 0, feedback: 'They scanned right past you. Just barely.' },
+      ]
+    },
+    { situation: '\ud83d\udc15 A guard dog starts barking in your direction.',
+      choices: [
+        { label: 'A) Throw a distraction in the opposite direction', score: 2, feedback: 'Dog chased the decoy. Textbook.' },
+        { label: 'B) Stay completely still until it stops',          score: 1, feedback: 'Dog lost interest after a long minute.' },
+        { label: 'C) Run for it now',                               score: 0, feedback: 'Dog gave chase but couldn\'t keep up. Drew attention.' },
+      ]
+    },
+    { situation: '\ud83d\udea7 Construction has blocked your planned exit route.',
+      choices: [
+        { label: 'A) Take the back river path',                  score: 2, feedback: 'River path completely clear. Smooth exit.' },
+        { label: 'B) Wait for a gap in traffic on the main road', score: 1, feedback: 'Waited 3 minutes. Got through clean.' },
+        { label: 'C) Push through the construction site',        score: 0, feedback: 'Workers spotted you but didn\'t call it in.' },
+      ]
+    },
+  ],
+  medium: [
+    { situation: '\ud83d\ude93 Police scanner active. Two patrol routes converging on your area.',
+      choices: [
+        { label: 'A) Storm drain route',                              score: 2,  feedback: 'Storm drain bypassed both patrols. Vanished.' },
+        { label: 'B) Rooftop crossing',                               score: 1,  feedback: 'Patrols passed below. Made it across.' },
+        { label: 'C) Highway on-ramp',                                score: -1, feedback: 'Highway checkpoint. Plates flagged.' },
+        { label: 'D) Double back through warehouse district',         score: 0,  feedback: 'Secondary patrol there. Narrow escape.' },
+      ]
+    },
+    { situation: '\ud83d\ude81 A helicopter spotlight is sweeping the block.',
+      choices: [
+        { label: 'A) Underground parking garage',               score: 2,  feedback: 'Spotlight can\'t reach underground. Disappeared.' },
+        { label: 'B) Keep moving using building shadows',       score: 1,  feedback: 'Stayed ahead of the beam. Made it.' },
+        { label: 'C) Abandon vehicle and go on foot',           score: 0,  feedback: 'On foot was slow but undetected.' },
+        { label: 'D) Head to the crowded city center',          score: -1, feedback: 'More eyes in the city center. Got IDed.' },
+      ]
+    },
+    { situation: '\ud83d\udea8 Undercover unit spotted the crew. Radio call went out.',
+      choices: [
+        { label: 'A) Split up \u2014 meet at the secondary point', score: 2, feedback: 'Splitting made you impossible to track. All clear.' },
+        { label: 'B) Switch vehicles at the parking structure',  score: 1, feedback: 'Clean swap. Officers followed the wrong car.' },
+        { label: 'C) Take the industrial back roads',            score: 1, feedback: 'Long way round but the roads were empty.' },
+        { label: 'D) Stick together and push for the main exit', score: 0, feedback: 'Backup was waiting. Barely slipped through.' },
+      ]
+    },
+  ],
+  hard: [
+    { situation: '\ud83d\ude93 Full lockdown. Roadblock on main route, helicopter overhead, K9 units sweeping.',
+      choices: [
+        { label: 'A) Storm Drain (on foot)',          score: 2,  feedback: 'Storm drain was off all patrol routes. Clean vanish.' },
+        { label: 'B) Freeway at speed',              score: -1, feedback: 'Roadblock caught every vehicle. Arrested.' },
+        { label: 'C) Industrial Park back roads',    score: 1,  feedback: 'Industrial park mostly clear. Made it.' },
+        { label: 'D) Warehouse District',            score: 0,  feedback: 'K9 picked up a scent. Handler was slow. Barely got out.' },
+        { label: 'E) River Route by boat',           score: 0,  feedback: 'Boat patrols active. Stopped, talked your way out.' },
+      ]
+    },
+    { situation: '\ud83d\ude81 Three tactical units responding. Every major route monitored.',
+      choices: [
+        { label: 'A) Commuter rail tunnel on foot',                  score: 2,  feedback: 'Tunnel not on any patrol route. Clean escape.' },
+        { label: 'B) Disguised as food delivery on main street',     score: 1,  feedback: 'Nervous stop. Badge check was light. Released.' },
+        { label: 'C) Steal a vehicle and outrun them',               score: -1, feedback: 'Chase ended in a crash. Everyone arrested.' },
+        { label: 'D) Hide in place until the lockdown lifts',        score: 0,  feedback: 'Three hours in hiding. Slipped out when patrols thinned.' },
+        { label: 'E) Emergency services route with stolen uniforms', score: 1,  feedback: 'Light ID check. Uniforms held up. Made it through.' },
+      ]
+    },
+    { situation: '\ud83d\udea8 An undercover officer is following your getaway vehicle.',
+      choices: [
+        { label: 'A) Lead them on a chase to lose them',          score: -1, feedback: 'Chase attracted backup. Swarmed within 3 minutes.' },
+        { label: 'B) Pull into a parking garage, abandon vehicle', score: 2,  feedback: 'Officer lost you in the garage. Split up on foot.' },
+        { label: 'C) Swap vehicles at the predetermined drop point', score: 2, feedback: 'Officer followed the wrong car for 12 minutes. Gone.' },
+        { label: 'D) Drive normally and hope they break off',     score: 0,  feedback: 'They called backup first. Barely lost the tail.' },
+        { label: 'E) Speed for the county line',                  score: -1, feedback: 'State troopers radioed ahead. Roadblock waiting.' },
+      ]
+    },
+  ],
+};
+
+const LOOKOUT_EMOJI_POOL = ['\ud83d\ude93','\ud83d\udcb0','\ud83d\udd27','\ud83c\udfad','\ud83d\ude97','\ud83d\udcbc','\ud83e\udde8','\ud83d\udd12','\ud83d\udea8','\ud83d\udc6e','\ud83d\uddf3\ufe0f','\ud83d\udcf1','\ud83d\udd26','\u231a','\ud83d\udc5c','\ud83c\udfaf','\ud83e\uddf2','\ud83d\udcf7','\ud83d\udd10','\ud83c\udfb2','\ud83d\uddc3\ufe0f','\ud83d\udcdf','\ud83d\udd11','\ud83c\udf92','\ud83d\udd75\ufe0f'];
+const LOOKOUT_CONFIG = {
+  easy:   { count: 4, viewMs: 6000, type: 'position' },
+  medium: { count: 6, viewMs: 5000, type: 'position' },
+  hard:   { count: 8, viewMs: 4000, type: 'missing'  },
+};
+
+const DISTRACTION_PHRASES = {
+  easy:   ['COFFEE', 'FIRE EXIT', 'MOVE OUT', 'CODE RED', 'STAY DOWN', 'CLEAR OUT'],
+  medium: ['FIRE ALARM', 'CLEAR THE AREA', 'LOCK IT DOWN', 'SECURITY CHECK', 'STAND BACK NOW'],
+  hard:   ['SECURITY BREACH IN PROGRESS', 'ALL UNITS RESPOND IMMEDIATELY', 'EMERGENCY EVACUATION REQUIRED', 'CONTAINMENT PROTOCOL ACTIVATED'],
+};
+const DISTRACTION_TIMERS = { easy: 28, medium: 20, hard: 14 };
+
+const DRILLER_CONFIG = {
+  easy:   { barWidth: 21, targetStart: 8,  targetEnd: 12, period: 4200, updateMs: 1400, timeLimit: 16 },
+  medium: { barWidth: 21, targetStart: 9,  targetEnd: 11, period: 3600, updateMs: 1300, timeLimit: 14 },
+  hard:   { barWidth: 21, targetStart: 10, targetEnd: 11, period: 3000, updateMs: 1200, timeLimit: 12 },
+};
+
+function calcDrillerPos(elapsedMs, periodMs, barWidth) {
+  const t = (elapsedMs % periodMs) / periodMs;
+  const bounce = t < 0.5 ? t * 2 : (1 - t) * 2;
+  return Math.round(bounce * (barWidth - 1));
+}
+
+function renderDrillerBar(pos, tStart, tEnd, barWidth) {
+  let out = '';
+  for (let i = 0; i < barWidth; i++) {
+    if (i === pos && i >= tStart && i <= tEnd) out += '\u2605'; // ★ in zone
+    else if (i === pos) out += '\u25cf';  // ● indicator
+    else if (i >= tStart && i <= tEnd) out += '\u2593'; // ▓ target
+    else out += '\u2591'; // ░ empty
+  }
+  return '\x60|' + out + '|\x60';
+}
+
+function scoreDrillerShot(pos, tStart, tEnd) {
+  if (pos >= tStart && pos <= tEnd) return 2;
+  const dist = pos < tStart ? tStart - pos : pos - tEnd;
+  if (dist <= 2) return 1;
+  if (dist <= 5) return 0;
+  return -1;
+}
+
+// ── Challenge runners ─────────────────────────────────────────────────────────
+
+async function runMastermindChallenge(member, heistId, difficulty, channel) {
+  return new Promise(async (resolve) => {
+    const pool = MASTERMIND_SCENARIOS[difficulty];
+    const scenario = pool[Math.floor(Math.random() * pool.length)];
+    const timeLimit = { easy: 30, medium: 22, hard: 15 }[difficulty];
+    const buttons = scenario.choices.map((c, i) =>
+      new ButtonBuilder()
+        .setCustomId(`hc_mm.${heistId}.${member.id}.${i}`)
+        .setLabel(c.label.length > 80 ? c.label.slice(0, 79) + '\u2026' : c.label)
+        .setStyle(ButtonStyle.Primary)
+    );
+    const rows = [];
+    for (let i = 0; i < buttons.length; i += 3)
+      rows.push(new ActionRowBuilder().addComponents(buttons.slice(i, i + 3)));
+    const embed = new EmbedBuilder()
+      .setColor('#c9a84c').setTitle('\ud83d\udcbc MASTERMIND CHALLENGE')
+      .setDescription(`<@${member.id}> \u2014 **${timeLimit}s** to make the call!\n\n> **${scenario.situation}**`)
+      .setFooter({ text: 'Choose wisely \u2014 your crew is counting on you.' });
+    const msg = await channel.send({ embeds: [embed], components: rows });
+    const state = heistChallengeState.get(heistId);
+    if (!state) { resolve(0); return; }
+    const timer = setTimeout(async () => {
+      if (!heistChallengeState.get(heistId)?.challenges.has(member.id)) return;
+      heistChallengeState.get(heistId)?.challenges.delete(member.id);
+      await msg.edit({ embeds: [new EmbedBuilder().setColor('#888888').setTitle('\ud83d\udcbc MASTERMIND \u2014 TIME\'S UP').setDescription(`<@${member.id}> didn't respond in time.\n\n\u274c **0 pts** \u2014 Failed`)], components: [] }).catch(() => {});
+      resolve(0);
+    }, timeLimit * 1000);
+    state.challenges.set(member.id, { role: 'mastermind', resolve, timer, msg, data: { scenario } });
+  });
+}
+
+async function runDrillerChallenge(member, heistId, difficulty, channel) {
+  return new Promise(async (resolve) => {
+    const cfg = DRILLER_CONFIG[difficulty];
+    const startTime = Date.now();
+    const drillBtn = new ButtonBuilder()
+      .setCustomId(`hc_drill.${heistId}.${member.id}`)
+      .setLabel('\ud83d\udd27 DRILL!')
+      .setStyle(ButtonStyle.Danger);
+    const row = new ActionRowBuilder().addComponents(drillBtn);
+    const buildEmbed = (pos, remaining) => new EmbedBuilder()
+      .setColor('#c9a84c').setTitle('\ud83d\udd27 DRILLER CHALLENGE')
+      .setDescription(
+        `<@${member.id}> \u2014 Stop the indicator inside the target zone!\n\n` +
+        `${renderDrillerBar(pos, cfg.targetStart, cfg.targetEnd, cfg.barWidth)}\n` +
+        `*\u25cf = indicator \u2503 \u2593\u2593\u2593 = target zone \u2503 \u2605 = in zone!*\n\n` +
+        `\u23f1\ufe0f **${remaining}s remaining**`
+      )
+      .setFooter({ text: 'Press DRILL! when \u25cf is inside the \u2593\u2593\u2593 zone.' });
+    const initPos = calcDrillerPos(0, cfg.period, cfg.barWidth);
+    const msg = await channel.send({ embeds: [buildEmbed(initPos, cfg.timeLimit)], components: [row] });
+    const state = heistChallengeState.get(heistId);
+    if (!state) { resolve(0); return; }
+    const interval = setInterval(async () => {
+      if (!heistChallengeState.get(heistId)?.challenges.has(member.id)) { clearInterval(interval); return; }
+      const elapsed = Date.now() - startTime;
+      const remaining = Math.max(0, Math.ceil((cfg.timeLimit * 1000 - elapsed) / 1000));
+      const pos = calcDrillerPos(elapsed, cfg.period, cfg.barWidth);
+      await msg.edit({ embeds: [buildEmbed(pos, remaining)], components: [row] }).catch(() => {});
+    }, cfg.updateMs);
+    const timer = setTimeout(async () => {
+      clearInterval(interval);
+      if (!heistChallengeState.get(heistId)?.challenges.has(member.id)) return;
+      heistChallengeState.get(heistId)?.challenges.delete(member.id);
+      await msg.edit({ embeds: [new EmbedBuilder().setColor('#888888').setTitle('\ud83d\udd27 DRILLER \u2014 TIME\'S UP').setDescription(`<@${member.id}> missed the window.\n\n\u274c **0 pts** \u2014 Failed`)], components: [] }).catch(() => {});
+      resolve(0);
+    }, cfg.timeLimit * 1000);
+    state.challenges.set(member.id, { role: 'driller', resolve, timer, msg, data: { startTime, interval, cfg } });
+  });
+}
+
+async function runLookoutChallenge(member, heistId, difficulty, channel) {
+  return new Promise(async (resolve) => {
+    const cfg = LOOKOUT_CONFIG[difficulty];
+    const answerTimeLimitMs = 18000;
+    const shuffled = [...LOOKOUT_EMOJI_POOL].sort(() => Math.random() - 0.5);
+    const emojis = shuffled.slice(0, cfg.count);
+    const showEmbed = new EmbedBuilder()
+      .setColor('#c9a84c').setTitle('\ud83d\udc40 LOOKOUT CHALLENGE')
+      .setDescription(`<@${member.id}> \u2014 **Memorize this sequence!**\n\n${emojis.join('  ')}\n\n*Disappears in ${Math.round(cfg.viewMs / 1000)} seconds...*`)
+      .setFooter({ text: 'Watch carefully!' });
+    const msg = await channel.send({ embeds: [showEmbed] });
+    const state = heistChallengeState.get(heistId);
+    if (!state) { resolve(0); return; }
+    await new Promise(r => setTimeout(r, cfg.viewMs));
+    if (!heistChallengeState.get(heistId)) { resolve(0); return; }
+    let correctAnswer, questionText;
+    if (cfg.type === 'position') {
+      const posIdx = Math.floor(Math.random() * emojis.length);
+      correctAnswer = emojis[posIdx];
+      const wrong = shuffled.slice(cfg.count, cfg.count + 3);
+      const choices = [correctAnswer, ...wrong].sort(() => Math.random() - 0.5);
+      questionText = `Which emoji was in **position ${posIdx + 1}**?`;
+      const buttons = choices.map(e => new ButtonBuilder()
+        .setCustomId(`hc_look.${heistId}.${member.id}.${e === correctAnswer ? '1' : '0'}`)
+        .setLabel(e).setStyle(ButtonStyle.Secondary));
+      const row = new ActionRowBuilder().addComponents(buttons);
+      const qEmbed = new EmbedBuilder().setColor('#4169E1').setTitle('\ud83d\udc40 LOOKOUT \u2014 IDENTIFY')
+        .setDescription(`<@${member.id}>\n\n*[SEQUENCE HIDDEN]*\n\n**${questionText}**\n\n\u23f1\ufe0f **18s to answer**`)
+        .setFooter({ text: 'What did you see?' });
+      await msg.edit({ embeds: [qEmbed], components: [row] });
+    } else {
+      const missingIdx = Math.floor(Math.random() * emojis.length);
+      correctAnswer = emojis[missingIdx];
+      const remaining = emojis.filter((_, i) => i !== missingIdx);
+      const wrong = shuffled.slice(cfg.count, cfg.count + 3);
+      const choices = [correctAnswer, ...wrong].sort(() => Math.random() - 0.5);
+      questionText = 'Which emoji **disappeared**?';
+      const buttons = choices.map(e => new ButtonBuilder()
+        .setCustomId(`hc_look.${heistId}.${member.id}.${e === correctAnswer ? '1' : '0'}`)
+        .setLabel(e).setStyle(ButtonStyle.Secondary));
+      const row = new ActionRowBuilder().addComponents(buttons);
+      const qEmbed = new EmbedBuilder().setColor('#4169E1').setTitle('\ud83d\udc40 LOOKOUT \u2014 IDENTIFY')
+        .setDescription(`<@${member.id}>\n\n*Remaining:* ${remaining.join('  ')}\n\n**${questionText}**\n\n\u23f1\ufe0f **18s to answer**`)
+        .setFooter({ text: 'One emoji is missing from the original sequence.' });
+      await msg.edit({ embeds: [qEmbed], components: [row] });
+    }
+    const timer = setTimeout(async () => {
+      if (!heistChallengeState.get(heistId)?.challenges.has(member.id)) return;
+      heistChallengeState.get(heistId)?.challenges.delete(member.id);
+      await msg.edit({ embeds: [new EmbedBuilder().setColor('#888888').setTitle('\ud83d\udc40 LOOKOUT \u2014 TIME\'S UP').setDescription(`<@${member.id}> didn't identify the emoji in time.\n\n\u274c **0 pts** \u2014 Failed`)], components: [] }).catch(() => {});
+      resolve(0);
+    }, answerTimeLimitMs);
+    state.challenges.set(member.id, { role: 'lookout', resolve, timer, msg, data: { correctAnswer } });
+  });
+}
+
+async function runDistractionChallenge(member, heistId, difficulty, channel) {
+  return new Promise(async (resolve) => {
+    const pool = DISTRACTION_PHRASES[difficulty];
+    const phrase = pool[Math.floor(Math.random() * pool.length)];
+    const timeLimit = DISTRACTION_TIMERS[difficulty];
+    const startTime = Date.now();
+    const embed = new EmbedBuilder()
+      .setColor('#c9a84c').setTitle('\ud83c\udfad DISTRACTION CHALLENGE')
+      .setDescription(`<@${member.id}> \u2014 Type the following phrase in this channel!\n\n> **\u0060${phrase}\u0060**\n\n\u23f1\ufe0f **${timeLimit}s** \u00b7 Case-insensitive`)
+      .setFooter({ text: 'Type it accurately and quickly!' });
+    const msg = await channel.send({ embeds: [embed] });
+    const state = heistChallengeState.get(heistId);
+    if (!state) { resolve(0); return; }
+    const distractKey = `${channel.id}.${member.id}`;
+    const timer = setTimeout(async () => {
+      heistDistractionListeners.delete(distractKey);
+      if (!heistChallengeState.get(heistId)?.challenges.has(member.id)) return;
+      heistChallengeState.get(heistId)?.challenges.delete(member.id);
+      await msg.edit({ embeds: [new EmbedBuilder().setColor('#888888').setTitle('\ud83c\udfad DISTRACTION \u2014 TIME\'S UP').setDescription(`<@${member.id}> didn't type the phrase in time.\n\n\u274c **0 pts** \u2014 Failed`)] }).catch(() => {});
+      resolve(0);
+    }, timeLimit * 1000);
+    state.challenges.set(member.id, { role: 'distraction', resolve, timer, msg, data: { phrase, startTime, timeLimit } });
+    heistDistractionListeners.set(distractKey, {
+      phrase,
+      callback: async (typedMsg) => {
+        clearTimeout(timer);
+        heistChallengeState.get(heistId)?.challenges.delete(member.id);
+        const elapsed = Date.now() - startTime;
+        await typedMsg.delete().catch(() => {});
+        const score = elapsed < timeLimit * 400 ? 2 : 1;
+        const te = new EmbedBuilder().setColor(hcScoreColor(score)).setTitle('\ud83c\udfad DISTRACTION \u2014 COMPLETE')
+          .setDescription(`<@${member.id}> typed: **\u0060${phrase}\u0060**\n\n${elapsed < timeLimit * 400 ? '\ud83d\udd25 Blazing fast!' : '\u2705 Got it!'}\n\n${hcScoreLabel(score)}`);
+        await msg.edit({ embeds: [te] }).catch(() => {});
+        resolve(score);
+      }
+    });
+  });
+}
+
+async function runGetawayChallenge(member, heistId, difficulty, channel) {
+  return new Promise(async (resolve) => {
+    const pool = GETAWAY_SCENARIOS[difficulty];
+    const scenario = pool[Math.floor(Math.random() * pool.length)];
+    const timeLimit = { easy: 28, medium: 22, hard: 15 }[difficulty];
+    const buttons = scenario.choices.map((c, i) =>
+      new ButtonBuilder()
+        .setCustomId(`hc_gw.${heistId}.${member.id}.${i}`)
+        .setLabel(c.label.length > 80 ? c.label.slice(0, 79) + '\u2026' : c.label)
+        .setStyle(ButtonStyle.Secondary)
+    );
+    const rows = [];
+    for (let i = 0; i < buttons.length; i += 3)
+      rows.push(new ActionRowBuilder().addComponents(buttons.slice(i, i + 3)));
+    const embed = new EmbedBuilder()
+      .setColor('#1E3A5F').setTitle('\ud83c\udfc3 GETAWAY CHALLENGE')
+      .setDescription(`<@${member.id}> \u2014 **${timeLimit}s** to choose your escape route!\n\n> **${scenario.situation}**`)
+      .setFooter({ text: 'One route is optimal. One is acceptable. Choose fast.' });
+    const msg = await channel.send({ embeds: [embed], components: rows });
+    const state = heistChallengeState.get(heistId);
+    if (!state) { resolve(0); return; }
+    const timer = setTimeout(async () => {
+      if (!heistChallengeState.get(heistId)?.challenges.has(member.id)) return;
+      heistChallengeState.get(heistId)?.challenges.delete(member.id);
+      await msg.edit({ embeds: [new EmbedBuilder().setColor('#888888').setTitle('\ud83c\udfc3 GETAWAY \u2014 TIME\'S UP').setDescription(`<@${member.id}> couldn't decide on a route in time.\n\n\u274c **0 pts** \u2014 Failed`)], components: [] }).catch(() => {});
+      resolve(0);
+    }, timeLimit * 1000);
+    state.challenges.set(member.id, { role: 'getaway', resolve, timer, msg, data: { scenario } });
+  });
+}
+
+async function runRoleChallenge(member, heistId, difficulty, channel) {
+  if (member.id.startsWith('0000')) { // test/fake crew members auto-succeed
+    await new Promise(r => setTimeout(r, 1200));
+    return 2;
+  }
+  const role = member.role || 'mastermind';
+  if (role === 'mastermind')  return runMastermindChallenge(member, heistId, difficulty, channel);
+  if (role === 'driller')     return runDrillerChallenge(member, heistId, difficulty, channel);
+  if (role === 'lookout')     return runLookoutChallenge(member, heistId, difficulty, channel);
+  if (role === 'distraction') return runDistractionChallenge(member, heistId, difficulty, channel);
+  if (role === 'getaway')     return runGetawayChallenge(member, heistId, difficulty, channel);
+  return 0;
+}
+
+
 async function cleanupHeistMessages(heistId) {
   const msgs = heistMessageMap.get(heistId) || [];
   await Promise.all(msgs.map(m => m.delete().catch(() => {})));
@@ -1783,25 +2251,13 @@ async function executeHeist(heistId, channelArg) {
     return;
   }
 
-  // Calculate success chance with crew bonuses
-  let successChance = heist.chance;
-  successChance += (crew.length - 1) * 0.03; // +3% per extra member
+  const difficulty  = getHeistDifficulty(heist.entry);
+  const crewList    = crew.map(m => m.username).join(', ');
+  const delay       = ms => new Promise(res => setTimeout(res, ms));
 
-  // Level bonus — check Lurkr or use BB total as proxy for level
-  // +2% for each member with total_earned > 1000 BB (proxy for higher level)
-  for (const member of crew) {
-    const u = getUser(member.id, member.username);
-    if (u.total_earned > 1000) successChance += 0.02;
-  }
-  successChance = Math.min(successChance, heist.chance + 0.25); // Cap at +25%
-
-  const success = Math.random() < successChance;
-  const crewList = crew.map(m => m.username).join(', ');
-  const narData = HEIST_NARRATIONS[heist.name];
-  const delay = ms => new Promise(res => setTimeout(res, ms));
-  // ── Leader briefing (from the heist leader, not King Bully) ──
+  // ── Leader briefing ───────────────────────────────────────────────────────────────────────────
   const leaderMember = crew[0];
-  const leaderRole = HEIST_ROLES[leaderMember.role] || HEIST_ROLES['mastermind'];
+  const leaderRole   = HEIST_ROLES[leaderMember.role] || HEIST_ROLES['mastermind'];
   const LEADER_BRIEFINGS = {
     'The Paint Heist': [
       `*"Alright listen up. Bully's color palette — the unreleased one, not the one she uses on stream — is sitting in the studio right now with zero security. I've clocked the window. We have maybe 12 minutes before anyone notices anything is off. ${leaderRole.emoji} I need everyone doing exactly what we planned. No improvising. Let's move."* — **${leaderMember.username}**`,
@@ -1846,88 +2302,94 @@ async function executeHeist(heistId, channelArg) {
       `*"This is the job everybody in BULLYLAND talks about and nobody has ever done. ${leaderRole.emoji} Tonight that changes. I need you sharp, I need you trusting each other, and I need you executing exactly what we planned. No hesitation. No deviation. We go in, we take everything, and we walk out like we own the place."* — **${leaderMember.username}**`,
     ],
   };
-
   const briefingOptions = LEADER_BRIEFINGS[heist.name] || [
     `*"You know the job. You know your role. ${leaderRole.emoji} Let's get this done."* — **${leaderMember.username}**`
   ];
   const briefingText = briefingOptions[Math.floor(Math.random() * briefingOptions.length)];
-
-  const narrationMessages = [];
-
-  // Leader briefing message (stays visible — not deleted)
   const briefingEmbed = new EmbedBuilder().setColor('#FF4500')
     .setTitle(`🦹 ${leaderMember.username} addresses the crew`)
     .setDescription(briefingText)
     .setFooter({ text: "Bully's World • The job begins." }).setTimestamp();
   const briefMsg = await channel.send({ embeds: [briefingEmbed] });
-  narrationMessages.push(briefMsg);
-  await delay(4000);
+  await delay(3500);
 
-  // Opening message
-  const openingMsg = await channel.send(`🦹 **${heist.name}** — The heist is underway...`);
-  narrationMessages.push(openingMsg);
-  await delay(2000);
+  // ── Challenge phase announcement ─────────────────────────────────────────────────────────────────
+  const challengeEmbed = new EmbedBuilder()
+    .setColor('#FF6B00')
+    .setTitle(`🦹 ${heist.name} — CHALLENGE PHASE`)
+    .setDescription(
+      'Each crew member must complete their role challenge simultaneously.\n' +
+      'Perform well \u2014 the crew\'s payout depends on everyone\'s combined score.\n\n' +
+      crew.map(m => `${HEIST_ROLES[m.role]?.emoji || '🦹'} **${m.username}** — ${HEIST_ROLES[m.role]?.label || 'Mastermind'}`).join('\n') +
+      `\n\n⚡ **Difficulty: ${difficulty.toUpperCase()}** | Challenges start now!`
+    )
+    .setFooter({ text: 'Complete your challenge before time runs out!' });
+  await channel.send({ embeds: [challengeEmbed] });
+  await delay(1200);
 
-  // Narrate each crew member
-  for (const member of crew) {
-    const role = member.role || 'mastermind';
-    const roleData = HEIST_ROLES[role];
-    const lines = narData?.roleLines?.[role] || [`${member.username} does their part...`];
-    const line = lines[Math.floor(Math.random() * lines.length)].replace('{user}', `**${member.username}**`);
-    const narMsg = await channel.send(`${roleData?.emoji || '🦹'} ${line}`);
-    narrationMessages.push(narMsg);
-    await delay(2500);
-  }
+  // ── Initialize challenge state ────────────────────────────────────────────────────────────────────────
+  heistChallengeState.set(heistId, { channel, heist, crew, difficulty, challenges: new Map() });
 
-  await delay(5000);
-  // Delete ALL narration messages including briefing — only result embed stays
-  await Promise.all(narrationMessages.map(m => m.delete().catch(() => {})));
+  // ── Run all role challenges in parallel ───────────────────────────────────────────────────────────
+  const scoreResults = await Promise.all(crew.map(m => runRoleChallenge(m, heistId, difficulty, channel)));
+  heistChallengeState.delete(heistId);
 
+  const totalScore = scoreResults.reduce((a, b) => a + b, 0);
+  const tier        = getOutcomeTier(totalScore, crew.length);
+  const maxScore    = crew.length * 2;
 
-  if (success) {
-    const share = Math.floor(heist.payout / crew.length);
+  // ── Score breakdown ──────────────────────────────────────────────────────────────────────────────────
+  const scoreLines = crew.map((m, i) => {
+    const s = scoreResults[i];
+    const tag = s >= 2 ? '+2 ✅' : s === 1 ? '+1 ⚠️' : s === 0 ? '0 ❌' : '−1 💥';
+    return `${HEIST_ROLES[m.role]?.emoji || '🦹'} **${m.username}** (${HEIST_ROLES[m.role]?.label || '?'})— ${tag}`;
+  }).join('\n');
+
+  await delay(1500);
+
+  // ── Outcome ─────────────────────────────────────────────────────────────────────────────────────────
+  let embedColor, embedTitle, payoutLine;
+  const completedIndex = HEISTS.findIndex(h => h.name === heist.name);
+
+  if (tier === 'major') {
+    const share = Math.floor(heist.payout * 2.5 / crew.length);
     crew.forEach(m => addBB(m.id, m.username, share, `heist win — ${heist.name}`));
-    // Record heist completion for the leader (unlocks next heist for them to lead)
-    const completedIndex = HEISTS.findIndex(h => h.name === heist.name);
-    if (completedIndex >= 0 && crew[0]) {
-      db.prepare('INSERT OR IGNORE INTO heist_completions (user_id, heist_index) VALUES (?, ?)').run(crew[0].id, completedIndex);
-    }
-    const embed = new EmbedBuilder().setColor('#3B6D11').setTitle(`🦹 HEIST SUCCESS — ${heist.name}`)
-      .setDescription(
-        `The crew pulled it off!
-
-` +
-        `**${heist.description}**
-
-` +
-        `**Crew:** ${crewList}
-` +
-        `**Success chance:** ${Math.round(successChance * 100)}%
-` +
-        `**Payout:** ${heist.payout} BB split — **${share} BB each**`
-      )
-      .setFooter({text:"Bully's World • Crime paid this time."}).setTimestamp();
-    await cleanupHeistMessages(heistId);
-    await channel.send({ embeds: [embed] });
+    if (completedIndex >= 0 && crew[0]) db.prepare('INSERT OR IGNORE INTO heist_completions (user_id, heist_index) VALUES (?, ?)').run(crew[0].id, completedIndex);
+    embedColor = '#FFD700'; embedTitle = `🏆 MAJOR SUCCESS — ${heist.name}`;
+    payoutLine = `The crew executed **flawlessly**.\n\n**Payout: ${share.toLocaleString()} BB each** \u2014 ${(heist.payout * 2.5).toLocaleString()} BB total (2.5x)`;
+  } else if (tier === 'success') {
+    const share = Math.floor(heist.payout * 1.5 / crew.length);
+    crew.forEach(m => addBB(m.id, m.username, share, `heist win — ${heist.name}`));
+    if (completedIndex >= 0 && crew[0]) db.prepare('INSERT OR IGNORE INTO heist_completions (user_id, heist_index) VALUES (?, ?)').run(crew[0].id, completedIndex);
+    embedColor = '#3B6D11'; embedTitle = `\u2705 SUCCESS — ${heist.name}`;
+    payoutLine = `The crew pulled it off.\n\n**Payout: ${share.toLocaleString()} BB each** \u2014 ${(heist.payout * 1.5).toLocaleString()} BB total (1.5x)`;
+  } else if (tier === 'partial') {
+    const share = Math.floor(heist.payout * 0.5 / crew.length);
+    crew.forEach(m => { if (share > 0) addBB(m.id, m.username, share, `heist partial — ${heist.name}`); });
+    embedColor = '#FFA500'; embedTitle = `\u26a0\ufe0f PARTIAL SUCCESS — ${heist.name}`;
+    payoutLine = `The crew got something, but not everything.\n\n**Partial payout: ${share.toLocaleString()} BB each**${share < heist.entry ? '\n*(Entry fees not fully recovered)*' : ''}`;
+  } else if (tier === 'arrest') {
+    embedColor = '#8B0000'; embedTitle = `\ud83d\udea8 ARRESTED — ${heist.name}`;
+    payoutLine = `Critical failures cost the crew everything. Everyone was caught.\n\n**Entry fees lost: ${heist.entry} BB each**`;
   } else {
-    const embed = new EmbedBuilder().setColor('#8B0000').setTitle(`🦹 HEIST FAILED — ${heist.name}`)
-      .setDescription(
-        `The crew got caught!
-
-` +
-        `**${heist.description}**
-
-` +
-        `**Crew:** ${crewList}
-` +
-        `**Success chance was:** ${Math.round(successChance * 100)}%
-` +
-        `**Entry fees lost:** ${heist.entry} BB each`
-      )
-      .setFooter({text:"Bully's World • Crime didn't pay this time."}).setTimestamp();
-    await cleanupHeistMessages(heistId);
-    await channel.send({ embeds: [embed] });
+    embedColor = '#4a4a4a'; embedTitle = `\u274c HEIST FAILED — ${heist.name}`;
+    payoutLine = `The crew couldn't pull it off.\n\n**Entry fees lost: ${heist.entry} BB each**`;
   }
+
+  await cleanupHeistMessages(heistId);
+  await briefMsg.delete().catch(() => {});
+
+  const resultEmbed = new EmbedBuilder()
+    .setColor(embedColor)
+    .setTitle(embedTitle)
+    .setDescription(`${payoutLine}\n\n**${heist.description}**`)
+    .addFields(
+      { name: '\ud83d\udcca Crew Score Breakdown', value: `${scoreLines}\n\n**Total: ${totalScore} / ${maxScore} pts**` },
+      { name: '\ud83d\udc65 Crew', value: crewList }
+    )
+    .setFooter({ text: `Difficulty: ${difficulty} \u2022 Bully's World` })
+    .setTimestamp();
+  await channel.send({ embeds: [resultEmbed] });
 }
 
 
@@ -1946,6 +2408,17 @@ client.on('messageCreate', async(message) => {
 
   const userId = message.author.id, username = message.author.username;
   const content = message.content.trim().toLowerCase();
+
+  // ── Heist distraction challenge ──────────────────────────────────────────────────────────────────
+  const _dKey = `${message.channelId}.${message.author.id}`;
+  if (heistDistractionListeners.has(_dKey)) {
+    const _dl = heistDistractionListeners.get(_dKey);
+    if (message.content.trim().toUpperCase() === _dl.phrase.toUpperCase()) {
+      heistDistractionListeners.delete(_dKey);
+      await _dl.callback(message);
+      return;
+    }
+  }
 
   // ── Channel gate — restrict commands to designated channels ──
   const _isAdmin = message.member?.permissions.has(PermissionsBitField.Flags.Administrator);
@@ -3275,6 +3748,8 @@ const heistTimers = new Map();           // heistId → timer
 const heistMessageMap = new Map();       // heistId → [messages]
 const heistSelectionPending = new Map(); // userId → { username, channel, availableHeists }
 let _heistIdCounter = 0;
+const heistChallengeState        = new Map(); // heistId → challenge phase state
+const heistDistractionListeners  = new Map(); // `channelId.userId` → listener
 let shopSelectionPending = new Map(); // userId -> waiting for shop item number
 let lotterySelectionPending = new Map(); // userId -> waiting for ticket count
 let activeDuels = new Map(); // challenged_id -> duel info
@@ -5287,6 +5762,78 @@ Launches <t:${endsAt}:R> — click **Join** to pick your role!`)
       if (!available.length) { await interaction.reply({ content: 'All roles taken!', ephemeral: true }); return; }
       const roleRow = new ActionRowBuilder().addComponents(available.map(([k, r]) => new ButtonBuilder().setCustomId(`heist_role.${heistId}.${k}`).setLabel(`${r.emoji} ${r.label}`).setStyle(ButtonStyle.Secondary)));
       await interaction.reply({ content: '**Pick your role:**', components: [roleRow], ephemeral: true }); return;
+    }
+
+    // ── Heist challenge: Mastermind ─────────────────────────────────────────────────────────────────────────────
+    if (customId.startsWith('hc_mm.')) {
+      const [,hcHeistId,hcTarget,hcChoice] = customId.split('.');
+      if (interaction.user.id !== hcTarget) { await interaction.reply({ content: "❌ That's not your challenge!", ephemeral: true }); return; }
+      const hcs = heistChallengeState.get(parseInt(hcHeistId));
+      if (!hcs) { await interaction.reply({ content: "⏱️ This challenge has expired.", ephemeral: true }); return; }
+      const hcc = hcs.challenges.get(hcTarget);
+      if (!hcc) { await interaction.reply({ content: "✅ Challenge already completed.", ephemeral: true }); return; }
+      clearTimeout(hcc.timer); hcs.challenges.delete(hcTarget);
+      const choice = hcc.data.scenario.choices[parseInt(hcChoice)];
+      const score  = choice.score;
+      const te = new EmbedBuilder().setColor(hcScoreColor(score)).setTitle("💼 MASTERMIND — RESULT")
+        .setDescription(`<@${hcTarget}> chose: **${choice.label}**\n\n*${choice.feedback}*\n\n${hcScoreLabel(score)}`);
+      await interaction.update({ embeds: [te], components: [] });
+      hcc.resolve(score); return;
+    }
+
+    // ── Heist challenge: Driller ───────────────────────────────────────────────────────────────────────────────
+    if (customId.startsWith('hc_drill.')) {
+      const [,hcHeistId,hcTarget] = customId.split('.');
+      if (interaction.user.id !== hcTarget) { await interaction.reply({ content: "❌ That's not your challenge!", ephemeral: true }); return; }
+      const hcs = heistChallengeState.get(parseInt(hcHeistId));
+      if (!hcs) { await interaction.reply({ content: "⏱️ This challenge has expired.", ephemeral: true }); return; }
+      const hcc = hcs.challenges.get(hcTarget);
+      if (!hcc) { await interaction.reply({ content: "✅ Challenge already completed.", ephemeral: true }); return; }
+      clearTimeout(hcc.timer); clearInterval(hcc.data.interval); hcs.challenges.delete(hcTarget);
+      const elapsed = Date.now() - hcc.data.startTime;
+      const cfg     = hcc.data.cfg;
+      const pos     = calcDrillerPos(elapsed, cfg.period, cfg.barWidth);
+      const score   = scoreDrillerShot(pos, cfg.targetStart, cfg.targetEnd);
+      const barStr  = renderDrillerBar(pos, cfg.targetStart, cfg.targetEnd, cfg.barWidth);
+      const posLabel = pos >= cfg.targetStart && pos <= cfg.targetEnd ? "\ud83c\udfaf **IN THE ZONE!**" : `Position ${pos + 1} (zone: ${cfg.targetStart + 1}\u2013${cfg.targetEnd + 1})`;
+      const te = new EmbedBuilder().setColor(hcScoreColor(score)).setTitle("🔧 DRILLER — RESULT")
+        .setDescription(`<@${hcTarget}> \u2014 ${posLabel}\n\n${barStr}\n\n${hcScoreLabel(score)}`);
+      await interaction.update({ embeds: [te], components: [] });
+      hcc.resolve(score); return;
+    }
+
+    // ── Heist challenge: Lookout ──────────────────────────────────────────────────────────────────────────────
+    if (customId.startsWith('hc_look.')) {
+      const parts2 = customId.split('.');
+      const hcHeistId = parts2[1], hcTarget = parts2[2], hcCorrect = parts2[3] === '1';
+      if (interaction.user.id !== hcTarget) { await interaction.reply({ content: "❌ That's not your challenge!", ephemeral: true }); return; }
+      const hcs = heistChallengeState.get(parseInt(hcHeistId));
+      if (!hcs) { await interaction.reply({ content: "⏱️ This challenge has expired.", ephemeral: true }); return; }
+      const hcc = hcs.challenges.get(hcTarget);
+      if (!hcc) { await interaction.reply({ content: "✅ Challenge already completed.", ephemeral: true }); return; }
+      clearTimeout(hcc.timer); hcs.challenges.delete(hcTarget);
+      const score = hcCorrect ? 2 : -1;
+      const te = new EmbedBuilder().setColor(hcScoreColor(score)).setTitle("👀 LOOKOUT — RESULT")
+        .setDescription(`<@${hcTarget}> ${hcCorrect ? `identified **${hcc.data.correctAnswer}** correctly!` : `picked wrong. (Correct: **${hcc.data.correctAnswer}**)`}\n\n${hcScoreLabel(score)}`);
+      await interaction.update({ embeds: [te], components: [] });
+      hcc.resolve(score); return;
+    }
+
+    // ── Heist challenge: Getaway ──────────────────────────────────────────────────────────────────────────────
+    if (customId.startsWith('hc_gw.')) {
+      const [,hcHeistId,hcTarget,hcChoice] = customId.split('.');
+      if (interaction.user.id !== hcTarget) { await interaction.reply({ content: "❌ That's not your challenge!", ephemeral: true }); return; }
+      const hcs = heistChallengeState.get(parseInt(hcHeistId));
+      if (!hcs) { await interaction.reply({ content: "⏱️ This challenge has expired.", ephemeral: true }); return; }
+      const hcc = hcs.challenges.get(hcTarget);
+      if (!hcc) { await interaction.reply({ content: "✅ Challenge already completed.", ephemeral: true }); return; }
+      clearTimeout(hcc.timer); hcs.challenges.delete(hcTarget);
+      const choice = hcc.data.scenario.choices[parseInt(hcChoice)];
+      const score  = choice.score;
+      const te = new EmbedBuilder().setColor(hcScoreColor(score)).setTitle("🏃 GETAWAY — RESULT")
+        .setDescription(`<@${hcTarget}> chose: **${choice.label}**\n\n*${choice.feedback}*\n\n${hcScoreLabel(score)}`);
+      await interaction.update({ embeds: [te], components: [] });
+      hcc.resolve(score); return;
     }
 
     // HEIST ROLE
