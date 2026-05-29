@@ -169,6 +169,11 @@ db.exec(`
     bail_amount INTEGER NOT NULL DEFAULT 0
   );
 
+  CREATE TABLE IF NOT EXISTS feature_flags (
+    feature TEXT PRIMARY KEY,
+    enabled INTEGER NOT NULL DEFAULT 1
+  );
+
   CREATE TABLE IF NOT EXISTS role_inventory (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id TEXT, role_name TEXT, rarity TEXT,
@@ -420,6 +425,67 @@ function addBB(userId, username, amount, reason) {
 function spendBB(userId, amount) {
   db.prepare('UPDATE balances SET balance = balance - ? WHERE user_id = ?').run(amount, userId);
   db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(userId, -amount, 'shop purchase');
+}
+
+// ── Feature flags ────────────────────────────────────────────────────────────
+const FEATURE_FLAGS = {
+  heist:   true,
+  casino:  true,
+  lottery: true,
+  trivia:  true,
+  hangman: true,
+  steal:   true,
+  gift:    true,
+  rain:    true,
+  duel:    true,
+};
+function isEnabled(f)      { return FEATURE_FLAGS[f] !== false; }
+function setFeature(f, v)  {
+  FEATURE_FLAGS[f] = v;
+  db.prepare('INSERT OR REPLACE INTO feature_flags (feature, enabled) VALUES (?, ?)').run(f, v ? 1 : 0);
+}
+function loadFeatureFlags() {
+  const rows = db.prepare('SELECT feature, enabled FROM feature_flags').all();
+  for (const r of rows) { if (r.feature in FEATURE_FLAGS) FEATURE_FLAGS[r.feature] = r.enabled === 1; }
+}
+
+const GC_FEATURES = [
+  { key: 'heist',   label: '🦹 Heist'  },
+  { key: 'casino',  label: '🎰 Casino' },
+  { key: 'lottery', label: '🎟️ Lottery' },
+  { key: 'trivia',  label: '🧠 Trivia' },
+  { key: 'hangman', label: '🔤 Hangman' },
+  { key: 'steal',   label: '🕵️ Steals' },
+  { key: 'gift',    label: '💸 Gifts'  },
+  { key: 'rain',    label: '🌧️ BB Rain' },
+  { key: 'duel',    label: '⚔️ Duels'  },
+];
+
+function buildGameController() {
+  const statusLines = GC_FEATURES.map(f =>
+    `${isEnabled(f.key) ? '🟢' : '🔴'} ${f.label} — **${isEnabled(f.key) ? 'ON' : 'OFF'}**`
+  ).join('\n');
+
+  const embed = new EmbedBuilder()
+    .setColor('#c9a84c')
+    .setTitle('🎮 Game Controller')
+    .setDescription('Toggle features on/off. Changes take effect immediately and persist after restart.\n\n' + statusLines)
+    .setFooter({ text: "Bully's World Admin • Green = ON  •  Red = OFF" })
+    .setTimestamp();
+
+  // Split into rows of 5
+  const rows = [];
+  for (let i = 0; i < GC_FEATURES.length; i += 5) {
+    rows.push(new ActionRowBuilder().addComponents(
+      GC_FEATURES.slice(i, i + 5).map(f =>
+        new ButtonBuilder()
+          .setCustomId(`gc_toggle.${f.key}`)
+          .setLabel(f.label)
+          .setStyle(isEnabled(f.key) ? ButtonStyle.Success : ButtonStyle.Danger)
+      )
+    ));
+  }
+  return { embeds: [embed], components: rows };
 }
 
 // Ping @Gamers role on announcements instead of @everyone
@@ -2309,6 +2375,7 @@ Type **!steal @${target.username}** to try your luck.`)
 
   // ── !rain ──
   if (content.startsWith('!rain ')) {
+    if (!isEnabled('rain')) { await message.reply('🌧️ BB Rain is currently **disabled**. Check back later.'); return; }
     const amount = parseInt(content.split(' ')[1]);
     if (isNaN(amount) || amount < 1) { await message.reply('Usage: `!rain [amount]` — splits BB among active members. Example: `!rain 500`'); return; }
     const u = getUser(userId, username);
@@ -2427,6 +2494,7 @@ Stay active to catch the next rain!`)
 
   // ── !duel ──
   if (content.startsWith('!duel ')) {
+    if (!isEnabled('duel')) { await message.reply('⚔️ Duels are currently **disabled**. Check back later.'); return; }
     const target = message.mentions.users.first();
     const amount = parseInt(message.content.trim().split(' ')[2]);
     if (!target) { await message.reply('Usage: `!duel @user [amount]`'); return; }
@@ -2536,6 +2604,7 @@ This challenge expires in 60 seconds.`)
 
   // ── !gift / !give ──
   if (content.startsWith('!gift ') || content.startsWith('!give ')) {
+    if (!isEnabled('gift')) { await message.reply('💸 Gifts are currently **disabled**. Check back later.'); return; }
     const mention = message.mentions.users.first();
     const amount = parseInt(message.content.trim().split(' ')[2]);
     if (!mention) { await message.reply('Usage: `!give @user amount`'); return; }
@@ -2773,6 +2842,12 @@ This challenge expires in 60 seconds.`)
   }
 
 
+  // ── !gamecontroller ──
+  if (content === '!gamecontroller') {
+    await message.reply(buildGameController());
+    return;
+  }
+
   // ── !unjail @user ──
   if (content.startsWith('!unjail ')) {
     const mention = message.mentions.users.first();
@@ -2874,8 +2949,54 @@ This challenge expires in 60 seconds.`)
     return;
   }
 
-  if (content === '!analytics') {
-    // ── Economy totals ───────────────────────────────────────────────────────
+  if (content === '!analytics' || content.startsWith('!analytics ')) {
+    // ── Parse optional date range ─────────────────────────────────────────────
+    const args = content.slice('!analytics'.length).trim().split(/\s+/).filter(Boolean);
+    let startDate = null, endDate = null, rangeLabel = 'All Time';
+
+    if (args.length > 0) {
+      const a1 = args[0];
+      const relMatch = a1.match(/^(\d+)(d|m|y)$/i);
+      const absMatch = a1.match(/^\d{4}-\d{2}-\d{2}$/);
+
+      if (relMatch) {
+        const n = parseInt(relMatch[1]), u = relMatch[2].toLowerCase();
+        const d = new Date();
+        if      (u === 'd') { d.setDate(d.getDate() - n);         rangeLabel = `Last ${n} day${n !== 1 ? 's' : ''}`; }
+        else if (u === 'm') { d.setMonth(d.getMonth() - n);       rangeLabel = `Last ${n} month${n !== 1 ? 's' : ''}`; }
+        else if (u === 'y') { d.setFullYear(d.getFullYear() - n); rangeLabel = `Last ${n} year${n !== 1 ? 's' : ''}`; }
+        startDate = d.toISOString().slice(0, 10);
+      } else if (absMatch) {
+        startDate = a1;
+        rangeLabel = `Since ${startDate}`;
+        if (args[1]?.match(/^\d{4}-\d{2}-\d{2}$/)) {
+          endDate = args[1];
+          rangeLabel = `${startDate} \u2192 ${endDate}`;
+        }
+      } else {
+        await message.reply(
+          '\u274c Invalid format. Examples:\n' +
+          '`!analytics` \u2014 all time\n' +
+          '`!analytics 7d` \u2014 last 7 days\n' +
+          '`!analytics 30d` \u2014 last 30 days\n' +
+          '`!analytics 3m` \u2014 last 3 months\n' +
+          '`!analytics 2026-05-01` \u2014 from a date to now\n' +
+          '`!analytics 2026-04-01 2026-04-30` \u2014 specific range'
+        );
+        return;
+      }
+    }
+
+    // Build SQL date filters (dates validated by regex — safe to interpolate)
+    const endTs   = endDate ? `${endDate} 23:59:59` : null;
+    const whereTx = startDate
+      ? (endTs ? `WHERE created_at >= '${startDate}' AND created_at <= '${endTs}'`
+               : `WHERE created_at >= '${startDate}'`)
+      : '';
+    const andTx      = whereTx ? whereTx.replace('WHERE', 'AND') : '';
+    const dailyLimit = (startDate && !endDate) ? 'LIMIT 30' : '';
+
+    // ── Economy totals (always current snapshot) ──────────────────────────────
     const totals = db.prepare(`
       SELECT SUM(balance) as wallet_total, SUM(total_earned) as all_time_earned, COUNT(*) as user_count
       FROM balances
@@ -2885,89 +3006,90 @@ This challenge expires in 60 seconds.`)
     const sources = db.prepare(`
       SELECT
         CASE
-          WHEN reason LIKE '%check-in%'        THEN '📅 Daily Check-In'
-          WHEN reason = 'message'              THEN '💬 Message Reward'
-          WHEN reason LIKE 'heist win%'        THEN '🦹 Heist Win'
-          WHEN reason LIKE 'stolen from%'      THEN '🎭 Steal Win'
-          WHEN reason LIKE '%treasure%'        THEN '🎁 Treasure Chest'
-          WHEN reason LIKE 'Booster%'          THEN '💎 Booster Paycheck'
-          WHEN reason LIKE 'Superfan%'         THEN '⭐ Superfan Paycheck'
-          WHEN reason LIKE '%stream event%'    THEN '🎟️ Redeem Code'
-          WHEN reason = 'gifted by Bully'      THEN '🎀 Admin Gift (single)'
-          WHEN reason LIKE 'gifteveryone%'     THEN '🎀 Admin Gift (everyone)'
-          WHEN reason LIKE 'mass gift%'        THEN '🎀 Admin Mass Gift'
-          WHEN reason LIKE 'admin adjustment%' THEN '🔧 Admin Adjustment'
-          WHEN reason LIKE '%rain%'            THEN '🌧️ BB Rain'
-          WHEN reason LIKE 'duel win%'         THEN '⚔️ Duel Win'
-          WHEN reason LIKE '%leaderboard%'     THEN '🏆 Leaderboard Winner'
-          WHEN reason LIKE 'received from%'    THEN '↔️ P2P Transfer'
-          WHEN reason LIKE '%Casino%'          THEN '🎰 Casino Win'
-          ELSE '❓ Other'
+          WHEN reason LIKE '%check-in%'        THEN '\ud83d\udcc5 Daily Check-In'
+          WHEN reason = 'message'              THEN '\ud83d\udcac Message Reward'
+          WHEN reason LIKE 'heist win%'        THEN '\ud83e\uddb9 Heist Win'
+          WHEN reason LIKE 'stolen from%'      THEN '\ud83c\udfa0 Steal Win'
+          WHEN reason LIKE '%treasure%'        THEN '\ud83c\udf81 Treasure Chest'
+          WHEN reason LIKE 'Booster%'          THEN '\ud83d\udcb4 Booster Paycheck'
+          WHEN reason LIKE 'Superfan%'         THEN '\u2b50 Superfan Paycheck'
+          WHEN reason LIKE '%stream event%'    THEN '\ud83c\udfab Redeem Code'
+          WHEN reason = 'gifted by Bully'      THEN '\ud83c\udf80 Admin Gift (single)'
+          WHEN reason LIKE 'gifteveryone%'     THEN '\ud83c\udf80 Admin Gift (everyone)'
+          WHEN reason LIKE 'mass gift%'        THEN '\ud83c\udf80 Admin Mass Gift'
+          WHEN reason LIKE 'admin adjustment%' THEN '\ud83d\udd27 Admin Adjustment'
+          WHEN reason LIKE '%rain%'            THEN '\ud83c\udf27\ufe0f BB Rain'
+          WHEN reason LIKE 'duel win%'         THEN '\u2694\ufe0f Duel Win'
+          WHEN reason LIKE '%leaderboard%'     THEN '\ud83c\udfc6 Leaderboard Winner'
+          WHEN reason LIKE 'received from%'    THEN '\u2194\ufe0f P2P Transfer'
+          WHEN reason LIKE '%Casino%'          THEN '\ud83c\udfb0 Casino Win'
+          ELSE '\u2753 Other'
         END as feature,
         SUM(amount) as total_bb,
         COUNT(*) as tx_count
       FROM transactions
-      WHERE amount > 0
+      WHERE amount > 0 ${andTx}
       GROUP BY feature
       ORDER BY total_bb DESC
     `).all();
 
     const grandTotal = sources.reduce((s, r) => s + r.total_bb, 0);
 
-    // ── Daily flow — last 14 days with data ──────────────────────────────────
+    // ── Daily flow ────────────────────────────────────────────────────────────
     const daily = db.prepare(`
       SELECT
         DATE(created_at) as day,
         SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END) as issued,
         SUM(CASE WHEN amount < 0 THEN ABS(amount) ELSE 0 END) as spent
       FROM transactions
+      ${whereTx}
       GROUP BY day
       ORDER BY day DESC
-      LIMIT 14
+      ${dailyLimit}
     `).all();
 
-    // ── Top 10 richest ───────────────────────────────────────────────────────
+    // ── Top 10 richest (always current) ──────────────────────────────────────
     const rich = db.prepare('SELECT username, balance FROM balances ORDER BY balance DESC LIMIT 10').all();
 
-    // ── Last transaction timestamp ───────────────────────────────────────────
-    const lastTx = db.prepare('SELECT MAX(created_at) as ts FROM transactions').get();
+    // ── Last transaction in range ─────────────────────────────────────────────
+    const lastTx = db.prepare(`SELECT MAX(created_at) as ts FROM transactions ${whereTx}`).get();
 
-    // ── Build embeds ─────────────────────────────────────────────────────────
+    // ── Build embeds ──────────────────────────────────────────────────────────
     const sourceLines = sources.map(r => {
       const pct = grandTotal > 0 ? ((r.total_bb / grandTotal) * 100).toFixed(1) : '0.0';
-      return `\`${String(r.total_bb.toLocaleString()).padStart(7)} BB\` **${pct}%** — ${r.feature} *(${r.tx_count} txns)*`;
+      return `\`${String(r.total_bb.toLocaleString()).padStart(7)} BB\` **${pct}%** \u2014 ${r.feature} *(${r.tx_count} txns)*`;
     }).join('\n');
 
     const dailyLines = daily.length
       ? daily.map(r => {
           const net = r.issued - r.spent;
           const sign = net >= 0 ? '+' : '';
-          return `\`${r.day}\`  +${r.issued.toLocaleString()} issued  −${r.spent.toLocaleString()} spent  **${sign}${net.toLocaleString()} net**`;
+          return `\`${r.day}\`  +${r.issued.toLocaleString()} issued  \u2212${r.spent.toLocaleString()} spent  **${sign}${net.toLocaleString()} net**`;
         }).join('\n')
-      : '_No transactions yet._';
+      : '_No transactions in this range._';
 
     const richLines = rich.map((r, i) =>
-      `**#${i + 1}** ${r.username} — \`${r.balance.toLocaleString()} BB\``
+      `**#${i + 1}** ${r.username} \u2014 \`${r.balance.toLocaleString()} BB\``
     ).join('\n');
 
     const embed1 = new EmbedBuilder()
       .setColor('#c9a84c')
-      .setTitle('📊 Economy Analytics')
+      .setTitle(`\ud83d\udcca Economy Analytics \u2014 ${rangeLabel}`)
       .addFields(
-        { name: '💰 Total Wallet Supply', value: `${(totals.wallet_total || 0).toLocaleString()} BB`, inline: true },
-        { name: '📈 All-Time Issued',     value: `${(totals.all_time_earned || 0).toLocaleString()} BB`, inline: true },
-        { name: '👥 Users Tracked',       value: `${totals.user_count}`, inline: true },
-        { name: `🏦 BB Issued by Source — ${grandTotal.toLocaleString()} BB total`, value: sourceLines || '_No data._' },
-        { name: '🏆 Top 10 Richest Members', value: richLines || '_No data._' }
+        { name: '\ud83d\udcb0 Total Wallet Supply', value: `${(totals.wallet_total || 0).toLocaleString()} BB`, inline: true },
+        { name: '\ud83d\udcc8 All-Time Issued',     value: `${(totals.all_time_earned || 0).toLocaleString()} BB`, inline: true },
+        { name: '\ud83d\udc65 Users Tracked',       value: `${totals.user_count}`, inline: true },
+        { name: `\ud83c\udfe6 BB Issued by Source \u2014 ${grandTotal.toLocaleString()} BB total`, value: sourceLines || '_No data._' },
+        { name: '\ud83c\udfc6 Top 10 Richest Members', value: richLines || '_No data._' }
       )
-      .setFooter({ text: `Last transaction: ${lastTx?.ts || 'never'} • Bully's World Admin` })
+      .setFooter({ text: `Last transaction: ${lastTx?.ts || 'none in range'} \u2022 Bully's World Admin` })
       .setTimestamp();
 
     const embed2 = new EmbedBuilder()
       .setColor('#1E3A5F')
-      .setTitle('📆 Daily BB Flow (last 14 active days)')
+      .setTitle(`\ud83d\udcc6 Daily BB Flow \u2014 ${rangeLabel}`)
       .setDescription(dailyLines)
-      .setFooter({ text: "issued = new BB created  •  spent = BB removed from supply" });
+      .setFooter({ text: "issued = new BB created  \u2022  spent = BB removed from supply" });
 
     await message.reply({ embeds: [embed1, embed2] });
     return;
@@ -3827,6 +3949,9 @@ client.once('ready', async()=>{
   if (!process.env.ROLE_BOOSTER)  console.warn('[⚠️  Config] ROLE_BOOSTER is not set — Booster weekly payouts are disabled. Add it in Railway → Variables.');
 
   // ── Neighborhood Watch: post channel button & reschedule any live votes ───────
+  loadFeatureFlags();
+  console.log('[GameController] Feature flags loaded:', Object.entries(FEATURE_FLAGS).map(([k,v]) => `${k}:${v?'ON':'OFF'}`).join(' '));
+
   try {
     await postNWChannelButton();
     const pendingNWReports = db.prepare("SELECT id, voting_ends_at FROM nw_reports WHERE status = 'voting'").all();
@@ -4376,6 +4501,17 @@ client.on('interactionCreate', async interaction => {
   if (!interaction.isButton()) return;
 
   // ── Neighborhood Watch buttons bypass testing mode (DM interactions have no member) ──
+  // ── Game Controller toggle ───────────────────────────────────────────────────
+  if (interaction.customId.startsWith('gc_toggle.')) {
+    const iAdm = interaction.member?.permissions?.has(PermissionsBitField.Flags.Administrator) || interaction.user.id === process.env.OWNER_ID;
+    if (!iAdm) { await interaction.reply({ content: '❌ Admin only.', ephemeral: true }); return; }
+    const feature = interaction.customId.split('.')[1];
+    if (!(feature in FEATURE_FLAGS)) { await interaction.reply({ content: '❌ Unknown feature.', ephemeral: true }); return; }
+    setFeature(feature, !FEATURE_FLAGS[feature]);
+    await interaction.update(buildGameController());
+    return;
+  }
+
   // ── Jail bail button ─────────────────────────────────────────────────────────
   if (interaction.customId.startsWith('jail_bail.')) {
     const targetId = interaction.customId.split('.')[1];
@@ -4693,6 +4829,7 @@ client.on('interactionCreate', async interaction => {
     // ── TRIVIA: start ────────────────────────────────────────────────────────
     // ── TRIVIA: category picker ───────────────────────────────────────────────
     if (customId === 'menu.trivia') {
+      if (!isEnabled('trivia') && !isAdmin) { await interaction.reply({ content: '🧠 Trivia is currently **disabled**. Check back later.', ephemeral: true }); return; }
       const cid = interaction.channelId;
       if (activeTrivia.has(cid)) { await interaction.reply({ content: '🧠 A trivia game is already running in this channel!', ephemeral: true }); return; }
       if (getActiveGameCount(cid) >= MAX_GAMES_PER_CHANNEL) { await interaction.reply({ content: `⏳ **2 games are already running in this channel.** Wait for one to finish before starting another!`, ephemeral: true }); return; }
@@ -4777,6 +4914,7 @@ client.on('interactionCreate', async interaction => {
 
     // ── HANGMAN: category picker ──────────────────────────────────────────────
     if (customId === 'menu.hangman') {
+      if (!isEnabled('hangman') && !isAdmin) { await interaction.reply({ content: '🔤 Hangman is currently **disabled**. Check back later.', ephemeral: true }); return; }
       const cid = interaction.channelId;
       if (activeHangman.has(cid)) { await interaction.reply({ content: '🔤 A hangman game is already running in this channel!', ephemeral: true }); return; }
       if (getActiveGameCount(cid) >= MAX_GAMES_PER_CHANNEL) { await interaction.reply({ content: `⏳ **2 games are already running in this channel.** Wait for one to finish before starting another!`, ephemeral: true }); return; }
@@ -4927,6 +5065,7 @@ client.on('interactionCreate', async interaction => {
 
     // MAIN MENU
     if (customId === 'menu.lottery') {
+      if (!isEnabled('lottery') && !isAdmin) { await interaction.reply({ content: '🎟️ The lottery is currently **disabled**. Check back later.', ephemeral: true }); return; }
       const week = getCurrentLotteryWeek();
       const ex = db.prepare('SELECT * FROM lottery_tickets WHERE user_id = ? AND week = ?').get(userId, week);
       const owned = ex ? ex.tickets : 0;
@@ -5016,6 +5155,7 @@ client.on('interactionCreate', async interaction => {
 
     // HEIST MENU
     if (customId === 'menu.heist') {
+      if (!isEnabled('heist') && !isAdmin) { await interaction.reply({ content: '🦹 Heists are currently **disabled**. Check back later.', ephemeral: true }); return; }
       if (activeHeists.size >= 3) { await interaction.reply({ content: '🦹 3 heists are already running! Wait for one to finish.', ephemeral: true }); return; }
       if (getActiveGameCount(interaction.channelId) >= MAX_GAMES_PER_CHANNEL) { await interaction.reply({ content: `⏳ **2 games are already running in this channel.** Wait for one to finish before starting another!`, ephemeral: true }); return; }
       if (heistSelectionPending.has(userId)) { await interaction.reply({ content: 'You already have a heist menu open!', ephemeral: true }); return; }
@@ -5189,6 +5329,7 @@ Launches <t:${endsAt}:R> — click **Join** to pick your role!`)
 
     // CASINO
     if (customId === 'menu.casino') {
+      if (!isEnabled('casino') && !isAdmin) { await interaction.reply({ content: '🎰 The casino is currently **disabled**. Check back later.', ephemeral: true }); return; }
       if (!casinoOpen(isAdmin)) { await interaction.reply({ content: "🎰 **Bully's Casino is closed right now.** Watch #general for the opening announcement!", ephemeral: true }); return; }
       const bal = getBal();
       const r1 = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('cas.slots').setLabel('🎰 Slots').setStyle(ButtonStyle.Primary), new ButtonBuilder().setCustomId('cas.blackjack').setLabel('🃏 Blackjack').setStyle(ButtonStyle.Success));
@@ -5656,6 +5797,7 @@ client.on('messageCreate', async msg => {
   if (target.id === userId) { await msg.reply("You can't steal from yourself."); return; }
   if (target.bot) { await msg.reply("You can't steal from a bot."); return; }
   const isAdminSteal = msg.member?.permissions.has(PermissionsBitField.Flags.Administrator) || userId === process.env.OWNER_ID;
+  if (!isEnabled('steal') && !isAdminSteal) { await msg.reply('🕵️ Steals are currently **disabled**. Check back later.'); return; }
   if (!isAdminSteal) {
     // Jail check — jailed users cannot steal
     const jailRowSteal = getJail(userId);
