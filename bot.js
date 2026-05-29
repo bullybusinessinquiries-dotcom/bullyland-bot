@@ -3735,6 +3735,92 @@ This challenge expires in 60 seconds.`)
     return;
   }
 
+  // ── !fixroles [confirm] ─────────────────────────────────────────────────────
+  // Recovery command: reads transaction log for "role rollback refund" entries,
+  // rebuilds the user→role map, and strips those Discord roles from members.
+  // Use this when rolerollback cleared the DB but Discord roles weren't stripped.
+  if (content === '!fixroles' || content === '!fixroles confirm') {
+    const isFixConfirm = content === '!fixroles confirm';
+    // Parse refund transactions — reason format:
+    // "role rollback refund — ROLE_NAME (purchased YYYY-MM-DD)"
+    const fixRows = db.prepare(`
+      SELECT DISTINCT user_id, reason FROM transactions
+      WHERE reason LIKE 'role rollback refund — %'
+      ORDER BY created_at DESC
+    `).all();
+
+    if (fixRows.length === 0) {
+      await message.reply('No role rollback refund transactions found in the log. Nothing to fix.');
+      return;
+    }
+
+    // Build list of { userId, roleName } pairs
+    const fixPairs = fixRows.map(r => {
+      const afterDash = r.reason.split(' — ')[1] || '';
+      const roleName  = afterDash.split(' (purchased')[0].trim();
+      return { userId: r.user_id, roleName };
+    }).filter(p => p.roleName);
+
+    if (!isFixConfirm) {
+      const lines = fixPairs.slice(0, 20).map(p => `<@${p.userId}> — **${p.roleName}**`).join('\n');
+      const more  = fixPairs.length > 20 ? `\n_...and ${fixPairs.length - 20} more_` : '';
+      await message.reply({ embeds: [new EmbedBuilder()
+        .setColor('#FF6600')
+        .setTitle('🔧 Fix Roles Preview')
+        .setDescription(
+          `**${fixPairs.length} role assignments** to strip (sourced from transaction log).\n\n` +
+          lines + more + `\n\n` +
+          `⚠️ Run \`!fixroles confirm\` to execute.`
+        )
+        .setFooter({ text: "Bully's World Admin • Preview Only" })
+        .setTimestamp()] });
+      return;
+    }
+
+    // Execute
+    const fixGuild = message.guild;
+    const fixAck = await message.reply(`⏳ Stripping **${fixPairs.length}** Discord roles from member profiles...`);
+    let fixStripped = 0, fixSkipped = 0;
+
+    // Refresh role cache, batch-fetch all unique members
+    try { await fixGuild.roles.fetch(); } catch (_) {}
+    const fixUniqueIds = [...new Set(fixPairs.map(p => p.userId))];
+    let fixMemberMap = new Map();
+    try {
+      const fetched = await fixGuild.members.fetch({ user: fixUniqueIds }).catch(() => null);
+      if (fetched) fetched.forEach(m => fixMemberMap.set(m.id, m));
+    } catch (_) {}
+
+    for (const p of fixPairs) {
+      try {
+        const member = fixMemberMap.get(p.userId);
+        if (!member) { fixSkipped++; continue; }
+        const discordRole = fixGuild.roles.cache.find(r => r.name === p.roleName);
+        if (discordRole && member.roles.cache.has(discordRole.id)) {
+          await member.roles.remove(discordRole, 'fixroles — post-rollback Discord cleanup');
+          fixStripped++;
+        } else {
+          fixSkipped++;
+        }
+      } catch (e) {
+        console.error(`[fixroles] Failed for ${p.userId}/${p.roleName}:`, e.message);
+        fixSkipped++;
+      }
+    }
+
+    await fixAck.edit({ content: '', embeds: [new EmbedBuilder()
+      .setColor('#8B0000')
+      .setTitle('🔧 Fix Roles Complete')
+      .setDescription(
+        `**${fixStripped} Discord roles** stripped from member profiles.\n` +
+        `**${fixSkipped} skipped** (member left server, or role already removed).\n\n` +
+        `_Sourced from transaction log — no DB records needed._`
+      )
+      .setFooter({ text: "Bully's World Admin • Recovery Complete" })
+      .setTimestamp()] });
+    return;
+  }
+
   // Test commands
   if (content==='!testspotlight') {
     await postMemberSpotlight();
