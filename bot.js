@@ -12,7 +12,7 @@ const { GoogleSpreadsheet } = require('google-spreadsheet');
 const { JWT } = require('google-auth-library');
 const schedule = require('node-schedule');
 
-const { Client, GatewayIntentBits, EmbedBuilder, PermissionsBitField, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, PermissionsBitField, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType, StringSelectMenuBuilder } = require('discord.js');
 const initRadio = require('./radio');
 const client = new Client({
   intents: [
@@ -248,6 +248,17 @@ try { db.exec('ALTER TABLE balances ADD COLUMN garnish_debt INTEGER NOT NULL DEF
 // Integrity check — runs after tables are guaranteed to exist
 { const count = db.prepare('SELECT COUNT(*) as c FROM balances').get()?.c ?? 0; console.log(`[DB] Users in database: ${count}${count === 0 ? ' ⚠️  (empty — check DB_PATH if this is unexpected on a live server)' : ''}`); }
 
+// ─── PROTECTED BANNER MESSAGES ────────────────────────────────────────────
+// These message IDs are branding banners pinned at the top of each channel.
+// Every purge/refresh function must skip these so they are never deleted.
+const BANNER_MESSAGE_IDS = new Set([
+  '1506875770918801531', // 🎉win-bully-apparrel🎉 (giveaway channel)
+  '1506875861373030413', // auction-house
+  '1506875960233037895', // BULLY Radio
+  '1506876074078900284', // 📊leaderboards
+  '1506876134510428280', // 🏪bullys-store
+]);
+
 // ─── CONFIG ────────────────────────────────────────────────────────────────
 const CONFIG = {
   GUILD_ID: process.env.GUILD_ID,
@@ -267,6 +278,7 @@ const CONFIG = {
     GENERAL:          process.env.CHANNEL_GENERAL,
     GAMES:            process.env.CHANNEL_GAMES,
     GAMES_2:          process.env.CHANNEL_GAMES_2,
+    TESTING:          '1492228049272438834',
   },
 
   ROLES: {
@@ -1000,10 +1012,11 @@ async function postMysteryDrop() {
     .setDescription(`A mystery drop just landed.\n\nType **!claim** in this channel.\n**First to claim it gets it. No second chances.**`)
     .addFields({name:'Expires',value:`<t:${Math.floor(expiresAt/1000)}:R>`,inline:true})
     .setFooter({text:"Bully's World • You snooze, you lose."}).setTimestamp();
-  // Purge old messages before posting new drop
+  // Purge old messages before posting new drop (preserve banner)
   try {
     const old = await channel.messages.fetch({ limit: 100 });
-    if (old.size > 0) await channel.bulkDelete(old).catch(async () => { for (const [,m] of old) await m.delete().catch(()=>{}); });
+    const toDelete = old.filter(m => !BANNER_MESSAGE_IDS.has(m.id));
+    if (toDelete.size > 0) await channel.bulkDelete(toDelete).catch(async () => { for (const [,m] of toDelete) await m.delete().catch(()=>{}); });
   } catch (_) {}
   const msg = await channel.send({ content: GAMER_PING, embeds: [embed] });
   activeDrop = { tier, claimed: false, expiresAt, messageId: msg.id };
@@ -1117,9 +1130,10 @@ function pickShopRoles(allRoles) {
 async function purgeShopChannel(channel) {
   try {
     const messages = await channel.messages.fetch({ limit: 100 });
-    if (messages.size > 0) {
-      await channel.bulkDelete(messages).catch(async () => {
-        for (const [, m] of messages) await m.delete().catch(() => {});
+    const toDelete = messages.filter(m => !BANNER_MESSAGE_IDS.has(m.id));
+    if (toDelete.size > 0) {
+      await channel.bulkDelete(toDelete).catch(async () => {
+        for (const [, m] of toDelete) await m.delete().catch(() => {});
       });
     }
   } catch (_) {}
@@ -1264,9 +1278,10 @@ function buildLeaderboardEmbed() {
 async function purgeLeaderboardChannel(channel) {
   try {
     const messages = await channel.messages.fetch({ limit: 100 });
-    if (messages.size > 0) {
-      await channel.bulkDelete(messages).catch(async () => {
-        for (const [, m] of messages) await m.delete().catch(() => {});
+    const toDelete = messages.filter(m => !BANNER_MESSAGE_IDS.has(m.id));
+    if (toDelete.size > 0) {
+      await channel.bulkDelete(toDelete).catch(async () => {
+        for (const [, m] of toDelete) await m.delete().catch(() => {});
       });
     }
   } catch (_) {}
@@ -3182,13 +3197,14 @@ async function purgeAuctionChannel() {
     do {
       fetched = await channel.messages.fetch({ limit: 100 });
       if (fetched.size === 0) break;
-      const deletable = fetched.filter(m => Date.now() - m.createdTimestamp < 14 * 24 * 60 * 60 * 1000);
+      const eligible = fetched.filter(m => !BANNER_MESSAGE_IDS.has(m.id));
+      const deletable = eligible.filter(m => Date.now() - m.createdTimestamp < 14 * 24 * 60 * 60 * 1000);
       if (deletable.size > 0) {
         await channel.bulkDelete(deletable, true).catch(() => {});
         deleted += deletable.size;
       }
       // Delete any older messages one by one
-      const older = fetched.filter(m => Date.now() - m.createdTimestamp >= 14 * 24 * 60 * 60 * 1000);
+      const older = eligible.filter(m => Date.now() - m.createdTimestamp >= 14 * 24 * 60 * 60 * 1000);
       for (const m of older.values()) { await m.delete().catch(() => {}); deleted++; }
     } while (fetched.size >= 100);
     console.log(`[Auction] Purged ${deleted} messages from auction channel.`);
@@ -3766,6 +3782,7 @@ function startScheduler() {
   schedule.scheduleJob('0 */12 * * *', ()=>refreshShop(true));
   schedule.scheduleJob({ rule:'0 0 1 * *', tz:CONFIG.TIMEZONE }, ()=>doMonthlyReset());
   schedule.scheduleJob('0 */6 * * *', ()=>postDailyLeaderboard());
+  postDailyLeaderboard(); // also post immediately on startup so it's never blank after a restart
   // Weekly lottery draw — Sunday at 8pm CT
   schedule.scheduleJob({ rule: '0 20 * * 0', tz: CONFIG.TIMEZONE }, () => runLottery());
 
@@ -4075,7 +4092,7 @@ client.on('messageCreate', async msg => {
   if (TESTING_MODE && !hasAccess(msg.member)) return;
   if (msg.content.trim().toLowerCase() !== '!bullygames') return;
   const _isAdmin = msg.member?.permissions.has(PermissionsBitField.Flags.Administrator);
-  const GAME_CHANNELS = [CONFIG.CHANNELS.GAMES, CONFIG.CHANNELS.GAMES_2];
+  const GAME_CHANNELS = [CONFIG.CHANNELS.GAMES, CONFIG.CHANNELS.GAMES_2, CONFIG.CHANNELS.TESTING];
   if (!_isAdmin && !GAME_CHANNELS.includes(msg.channelId)) {
     const r = await msg.reply(`🎮 Games only run in <#${CONFIG.CHANNELS.GAMES}> or <#${CONFIG.CHANNELS.GAMES_2}>. Head over there!`);
     setTimeout(() => r.delete().catch(() => {}), 6000);
@@ -4226,6 +4243,133 @@ async function endTriviaGame(channel, state) {
 }
 
 // ============================================================================
+// SELF-ROLES
+// ============================================================================
+
+const SELF_ROLE_CHANNEL_ID = '1357645830462505080'; // 👀-introduce-yourself
+
+const INTEREST_ROLES = [
+  { id: '1497978868093419730', label: '🎮 Gamer',   value: 'gamer'   },
+  { id: '1497978841082237110', label: '🍳 Cooking',  value: 'cooking' },
+  { id: '1497978802477727905', label: '🖌️ Artist',   value: 'artist'  },
+  { id: '1497978706042425574', label: '🍥 Anime',    value: 'anime'   },
+  { id: '1497978671816773782', label: '🎵 Music',    value: 'music'   },
+  { id: '1498193590332166185', label: '🍿 Movies',   value: 'movies'  },
+];
+const WATCH_ROLE_ID = '1494499384618909716'; // 👮 Neighborhood Watch
+
+// Image files live in /assets — committed to the repo so Railway can serve them
+const ASSET_DIR = path.join(__dirname, 'assets');
+
+// Message 1a — Introduce Yourself banner (standalone image)
+function buildInterestsBanner() {
+  return { files: [{ attachment: path.join(ASSET_DIR, 'banner-introduce-yourself.png'), name: 'banner-introduce-yourself.png' }] };
+}
+
+// Message 1b — Interests embed + dropdown
+function buildInterestsPanel() {
+  const embed = new EmbedBuilder()
+    .setColor('#c9a84c')
+    .setDescription(
+      "## 🎨  Choose Your Interests\n" +
+      "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n" +
+      "*Tell us who you are — pick the roles that match your vibe.*\n\n" +
+      "**Select as many as you like** using the dropdown below.\n" +
+      "You can come back and update them any time — nothing is permanent. 🙌"
+    )
+    .setFooter({ text: "Bully's World  •  roles update instantly" });
+
+  const interestMenu = new StringSelectMenuBuilder()
+    .setCustomId('selfrole_interests')
+    .setPlaceholder('Choose Your Interests…')
+    .setMinValues(0)
+    .setMaxValues(INTEREST_ROLES.length)
+    .addOptions(INTEREST_ROLES.map(r => ({ label: r.label, value: r.value })));
+
+  return {
+    embeds: [embed],
+    components: [new ActionRowBuilder().addComponents(interestMenu)],
+  };
+}
+
+// Message 2a — Neighborhood Watch banner (standalone image)
+function buildWatchBanner() {
+  return { files: [{ attachment: path.join(ASSET_DIR, 'banner-neighborhood-watch.png'), name: 'banner-neighborhood-watch.png' }] };
+}
+
+// Message 2b — Watch embed + toggle button
+function buildWatchPanel() {
+  const embed = new EmbedBuilder()
+    .setColor('#c9a84c')
+    .setDescription(
+      "## 👮‍♀️  Neighborhood Watch\n" +
+      "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n" +
+      "*See something, say something.*\n\n" +
+      "Help keep **Bully's World** a safe and welcoming space for everyone.\n" +
+      "Members of the Watch look out for the community and report rule-breaking when they see it.\n\n" +
+      "> **Click the button below to join or leave at any time.**"
+    )
+    .setFooter({ text: "Bully's World  •  Neighborhood Watch" });
+
+  const watchBtn = new ButtonBuilder()
+    .setCustomId('selfrole_watch')
+    .setLabel('👮 Join the Neighborhood Watch')
+    .setStyle(ButtonStyle.Success);
+
+  return {
+    embeds: [embed],
+    components: [new ActionRowBuilder().addComponents(watchBtn)],
+  };
+}
+
+// Separate interactionCreate listener so self-role logic is isolated
+client.on('interactionCreate', async interaction => {
+
+  // ── Neighborhood Watch — single-click toggle ─────────────────────────────
+  if (interaction.isButton() && interaction.customId === 'selfrole_watch') {
+    const has = interaction.member.roles.cache.has(WATCH_ROLE_ID);
+    try {
+      if (has) {
+        await interaction.member.roles.remove(WATCH_ROLE_ID);
+        await interaction.reply({ content: "👋 You've left the **Neighborhood Watch**.", flags: 64 });
+      } else {
+        await interaction.member.roles.add(WATCH_ROLE_ID);
+        await interaction.reply({ content: "✅ You've joined the **Neighborhood Watch**! Thanks for helping keep Bully's World safe.", flags: 64 });
+      }
+    } catch {
+      await interaction.reply({ content: '❌ Could not update your role — please let an admin know.', flags: 64 });
+    }
+    return;
+  }
+
+  // ── Interests dropdown ─────────────────────────────────────────────────────
+  if (interaction.isStringSelectMenu() && interaction.customId === 'selfrole_interests') {
+    const member = await interaction.member.fetch(); // fresh cache
+    const selected = new Set(interaction.values);
+
+    const toAdd    = INTEREST_ROLES.filter(r => selected.has(r.value)  && !member.roles.cache.has(r.id));
+    const toRemove = INTEREST_ROLES.filter(r => !selected.has(r.value) &&  member.roles.cache.has(r.id));
+
+    try {
+      if (toAdd.length)    await member.roles.add(toAdd.map(r => r.id));
+      if (toRemove.length) await member.roles.remove(toRemove.map(r => r.id));
+
+      if (!toAdd.length && !toRemove.length) {
+        await interaction.reply({ content: '✅ Your interest roles are already up to date!', flags: 64 });
+      } else {
+        const lines = [];
+        if (toAdd.length)    lines.push(`➕ Added: ${toAdd.map(r => r.label).join('  ')}`);
+        if (toRemove.length) lines.push(`➖ Removed: ${toRemove.map(r => r.label).join('  ')}`);
+        await interaction.reply({ content: `✅ Roles updated!\n${lines.join('\n')}`, flags: 64 });
+      }
+    } catch {
+      await interaction.reply({ content: '❌ Could not update your roles — please let an admin know.', flags: 64 });
+    }
+    return;
+  }
+});
+
+// ============================================================================
 // INTERACTION HANDLER
 // ============================================================================
 client.on('interactionCreate', async interaction => {
@@ -4288,7 +4432,7 @@ client.on('interactionCreate', async interaction => {
     customId.startsWith('lottery.') || customId.startsWith('slots.') ||
     customId.startsWith('bj.') || customId.startsWith('roulette.') || customId.startsWith('race.') ||
     customId.startsWith('trivia.') || customId.startsWith('hangman.');
-  const ALLOWED_GAME_CHANNELS = [CONFIG.CHANNELS.GAMES, CONFIG.CHANNELS.GAMES_2];
+  const ALLOWED_GAME_CHANNELS = [CONFIG.CHANNELS.GAMES, CONFIG.CHANNELS.GAMES_2, CONFIG.CHANNELS.TESTING];
   if (isGameInteraction && !ALLOWED_GAME_CHANNELS.includes(interaction.channelId)) {
     await interaction.reply({ content: `🎮 Games only run in <#${CONFIG.CHANNELS.GAMES}> or <#${CONFIG.CHANNELS.GAMES_2}>.`, ephemeral: true }); return;
   }
@@ -4455,7 +4599,7 @@ client.on('interactionCreate', async interaction => {
         embed = new EmbedBuilder().setColor('#9b59b6').setTitle('📣 Comms')
           .addFields(
             { name: '📢 Announcements', value:
-              '`!announcement` — guided flow: write text → pick mention → set time → queued\n' +
+              '`!announcement` — guided flow: write text → pick channel → pick format → pick mention → set time → queued\n' +
               '`!announcementqueue` — view all queued announcements with IDs\n' +
               '`!cancelannouncement [id]` — cancel a queued announcement by ID', inline: false },
             { name: '✉️ DM Blasts', value:
@@ -5685,17 +5829,21 @@ const _pendingAuctionSetups  = new Map(); // userId → { state, imageUrl, title
 const _announcementQueue = []; // { id, text, postAt, timeoutHandle }
 let _announcementNextId = 1;
 
-function scheduleAnnouncement(text, postAt, mention) {
+function scheduleAnnouncement(text, postAt, mention, channelId = ANNOUNCEMENT_CHANNEL_ID, format = 'embed') {
   const id = _announcementNextId++;
   const buildEmbed = (t) => new EmbedBuilder().setColor('#c9a84c').setTitle('📢 Announcement')
     .setDescription(t).setFooter({ text: "Bully's World" }).setTimestamp();
   const handle = setTimeout(async () => {
     const idx = _announcementQueue.findIndex(a => a.id === id);
     if (idx !== -1) _announcementQueue.splice(idx, 1);
-    const ch = await client.channels.fetch(ANNOUNCEMENT_CHANNEL_ID).catch(() => null);
-    if (ch) await ch.send({ content: mention || '', embeds: [buildEmbed(text)] });
+    const ch = await client.channels.fetch(channelId).catch(() => null);
+    if (!ch) return;
+    const payload = format === 'embed'
+      ? { content: mention || null, embeds: [buildEmbed(text)] }
+      : { content: mention ? `${mention}\n\n${text}` : text };
+    await ch.send(payload);
   }, postAt - Date.now());
-  _announcementQueue.push({ id, text, postAt, mention, timeoutHandle: handle });
+  _announcementQueue.push({ id, text, postAt, mention, channelId, format, timeoutHandle: handle });
   return id;
 }
 
@@ -5771,53 +5919,132 @@ client.on('messageCreate', async msg => {
     const session = _pendingAnnouncements.get(msg.author.id);
     clearTimeout(session.timer);
 
-    if (session.state === 'awaiting_text') {
-      session.text = msg.content.trim(); // preserve original casing
-      session.state = 'awaiting_mention';
+    const resetTimer = () => {
       session.timer = setTimeout(() => _pendingAnnouncements.delete(msg.author.id), 5 * 60 * 1000);
-      await msg.reply('🔔 Who should be mentioned?\n\nReply **`@everyone`**, **`@here`**, a role mention, or **`none`** for no ping.\n\nType **`cancel`** to abort.');
+    };
+    const cancel = async () => {
+      _pendingAnnouncements.delete(msg.author.id);
+      await msg.reply('❌ Announcement cancelled.');
+    };
+
+    // Step 1 — collect the message text
+    if (session.state === 'awaiting_text') {
+      session.text = msg.content.trim();
+      session.state = 'awaiting_channel';
+      resetTimer();
+      await msg.reply(
+        '📡 **Which channel?**\n\n' +
+        'Mention a channel (e.g. **`#announcements`**) or type **`default`** to use the default announcements channel.\n\n' +
+        'Type **`cancel`** to abort.'
+      );
       return;
     }
 
-    if (session.state === 'awaiting_mention') {
-      if (lower === 'cancel') {
-        _pendingAnnouncements.delete(msg.author.id);
-        await msg.reply('❌ Announcement cancelled.');
+    // Step 2 — pick the target channel
+    if (session.state === 'awaiting_channel') {
+      if (lower === 'cancel') { await cancel(); return; }
+
+      let targetChannel = null;
+      if (lower === 'default') {
+        targetChannel = await client.channels.fetch(ANNOUNCEMENT_CHANNEL_ID).catch(() => null);
+      } else {
+        // Accept a channel mention (#channel) or a raw ID
+        targetChannel = msg.mentions.channels.first()
+          ?? await client.channels.fetch(msg.content.trim().replace(/[<#>]/g, '')).catch(() => null);
+      }
+
+      if (!targetChannel?.isTextBased()) {
+        resetTimer();
+        await msg.reply("❌ Couldn't find that channel. Mention a channel (e.g. **`#general`**) or type **`default`**.");
         return;
       }
+
+      session.channelId = targetChannel.id;
+      session.channelName = targetChannel.name;
+      session.state = 'awaiting_format';
+      resetTimer();
+      await msg.reply(
+        '🎨 **What format?**\n\n' +
+        '**`embed`** — styled card with gold border and Bully\'s World footer\n' +
+        '**`plain`** — raw text, exactly as you typed it\n\n' +
+        'Type **`cancel`** to abort.'
+      );
+      return;
+    }
+
+    // Step 3 — pick embed or plain text
+    if (session.state === 'awaiting_format') {
+      if (lower === 'cancel') { await cancel(); return; }
+
+      if (!['embed', 'e', 'plain', 'p', 'text'].includes(lower)) {
+        resetTimer();
+        await msg.reply('❌ Reply **`embed`** or **`plain`**. Type **`cancel`** to abort.');
+        return;
+      }
+
+      session.format = ['embed', 'e'].includes(lower) ? 'embed' : 'plain';
+      session.state = 'awaiting_mention';
+      resetTimer();
+      await msg.reply(
+        '🔔 **Who should be mentioned?**\n\n' +
+        'Reply **`@everyone`**, **`@here`**, a role mention, or **`none`** for no ping.\n\n' +
+        'Type **`cancel`** to abort.'
+      );
+      return;
+    }
+
+    // Step 4 — mention / ping
+    if (session.state === 'awaiting_mention') {
+      if (lower === 'cancel') { await cancel(); return; }
       session.mention = lower === 'none' ? '' : msg.content.trim();
       session.state = 'awaiting_time';
-      session.timer = setTimeout(() => _pendingAnnouncements.delete(msg.author.id), 5 * 60 * 1000);
-      await msg.reply('⏰ When should this be posted?\n\nReply **`now`** to post immediately, or a time like **`6:00pm`** or **`8:30am`** (CT).\n\nType **`cancel`** to abort.');
+      resetTimer();
+      await msg.reply(
+        '⏰ **When should this post?**\n\n' +
+        'Reply **`now`** to post immediately, or a time like **`6:00pm`** or **`8:30am`** (CT).\n\n' +
+        'Type **`cancel`** to abort.'
+      );
       return;
     }
 
+    // Step 5 — schedule or post now
     if (session.state === 'awaiting_time') {
-      if (lower === 'cancel') {
+      if (lower === 'cancel') { await cancel(); return; }
+
+      const announceCh = await client.channels.fetch(session.channelId).catch(() => null);
+      if (!announceCh) {
         _pendingAnnouncements.delete(msg.author.id);
-        await msg.reply('❌ Announcement cancelled.');
+        await msg.reply('❌ Could not fetch the target channel. Announcement aborted.');
         return;
       }
-      const announceCh = await client.channels.fetch(ANNOUNCEMENT_CHANNEL_ID).catch(() => null);
-      if (!announceCh) { _pendingAnnouncements.delete(msg.author.id); await msg.reply('❌ Could not find the announcements channel.'); return; }
-      const buildEmbed = (text) => new EmbedBuilder().setColor('#c9a84c').setTitle('📢 Announcement')
+
+      const buildEmbed = (text) => new EmbedBuilder()
+        .setColor('#c9a84c').setTitle('📢 Announcement')
         .setDescription(text).setFooter({ text: "Bully's World" }).setTimestamp();
-      const mention = session.mention || '';
+
+      const mention  = session.mention || '';
+      const payload  = session.format === 'embed'
+        ? { content: mention || null, embeds: [buildEmbed(session.text)] }
+        : { content: mention ? `${mention}\n\n${session.text}` : session.text };
+
       if (lower === 'now') {
         _pendingAnnouncements.delete(msg.author.id);
-        await announceCh.send({ content: mention, embeds: [buildEmbed(session.text)] });
-        await msg.reply('✅ Announcement posted!');
+        await announceCh.send(payload);
+        await msg.reply(`✅ Announcement posted in <#${session.channelId}>!`);
       } else {
         const postAt = parseShutdownTime(lower);
         if (!postAt) {
-          session.timer = setTimeout(() => _pendingAnnouncements.delete(msg.author.id), 5 * 60 * 1000);
+          resetTimer();
           await msg.reply("❌ Couldn't parse that time. Try **`now`**, **`6:00pm`**, or **`14:30`**. Or type **`cancel`** to abort.");
           return;
         }
-        _pendingAnnouncements.delete(msg.author.id); // clear session immediately so user can queue another
+        _pendingAnnouncements.delete(msg.author.id);
         const unix = Math.floor(postAt.getTime() / 1000);
-        const queuedId = scheduleAnnouncement(session.text, postAt, mention);
-        await msg.reply(`✅ Announcement **#${queuedId}** queued for <t:${unix}:F> (<t:${unix}:R>).\nUse \`!announcementqueue\` to view all queued, or \`!cancelannouncement ${queuedId}\` to remove it.`);
+        const queuedId = scheduleAnnouncement(session.text, postAt, mention, session.channelId, session.format);
+        await msg.reply(
+          `✅ Announcement **#${queuedId}** queued for <t:${unix}:F> (<t:${unix}:R>) in <#${session.channelId}>.\n` +
+          `Use \`!announcementqueue\` to view all queued, or \`!cancelannouncement ${queuedId}\` to remove it.`
+        );
       }
       return;
     }
@@ -5990,6 +6217,18 @@ client.on('messageCreate', async msg => {
     return;
   }
 
+  // ── !selfroles — post or refresh the self-role panels ──
+  if (lower === '!selfroles') {
+    const ch = await client.channels.fetch(SELF_ROLE_CHANNEL_ID).catch(() => null);
+    if (!ch) { await msg.reply('❌ Could not find the self-roles channel.'); return; }
+    await ch.send(buildInterestsBanner());
+    await ch.send(buildInterestsPanel());
+    await ch.send(buildWatchBanner());
+    await ch.send(buildWatchPanel());
+    await msg.reply(`✅ Self-role panels posted in <#${SELF_ROLE_CHANNEL_ID}>!`);
+    return;
+  }
+
   // ── !announcement ──
   if (lower === '!announcement') {
     if (_pendingAnnouncements.has(msg.author.id)) {
@@ -6014,7 +6253,9 @@ client.on('messageCreate', async msg => {
     const lines = _announcementQueue.map(a => {
       const unix = Math.floor(a.postAt / 1000);
       const preview = a.text.length > 80 ? a.text.slice(0, 80) + '…' : a.text;
-      return `**#${a.id}** — <t:${unix}:F> (<t:${unix}:R>)\n> ${preview}`;
+      const chTag = a.channelId ? `<#${a.channelId}>` : '#announcements';
+      const fmt   = a.format === 'plain' ? 'plain text' : 'embed';
+      return `**#${a.id}** — <t:${unix}:F> (<t:${unix}:R>) · ${chTag} · ${fmt}\n> ${preview}`;
     });
     const embed = new EmbedBuilder().setColor('#c9a84c').setTitle(`📢 Announcement Queue (${_announcementQueue.length})`)
       .setDescription(lines.join('\n\n'))

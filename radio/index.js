@@ -31,6 +31,28 @@ async function initRadio(client) {
   const nowPlaying   = new NowPlayingManager();
   const presence     = new PresenceManager();
 
+  // ── UDP connectivity check ────────────────────────────────────────────────
+  // @discordjs/voice requires outbound UDP for voice IP discovery.
+  // This confirms whether Railway's container can create UDP sockets at all.
+  await new Promise(resolve => {
+    const dgram = require('dgram');
+    try {
+      const sock = dgram.createSocket('udp4');
+      sock.bind(0, '0.0.0.0', () => {
+        console.log('[Radio] UDP socket test PASSED — port', sock.address().port);
+        sock.close();
+        resolve();
+      });
+      sock.on('error', err => {
+        console.error('[Radio] UDP socket test FAILED:', err.message);
+        resolve();
+      });
+    } catch (err) {
+      console.error('[Radio] Cannot create UDP socket:', err.message);
+      resolve();
+    }
+  });
+
   // ── Initial file scans ───────────────────────────────────────────────────
   queue.scan();
   intermissions.scan();
@@ -48,18 +70,15 @@ async function initRadio(client) {
 
   try {
     await engine.connect();
-    engine._advance(); // kick off the first track
+    // Start playback immediately — if the connection isn't fully ready yet,
+    // the player enters AutoPaused and the retry loop resumes it automatically
+    // the moment the voice connection reaches Ready state.
+    engine._advance();
   } catch (err) {
     console.error('[Radio] Could not connect to voice channel:', err.message);
     console.error('[Radio]    Check RADIO_VOICE_CHANNEL_ID and that the bot has Connect + Speak permissions.');
-    // Retry after 30 seconds in case of a transient startup issue
-    setTimeout(async () => {
-      try {
-        await engine.connect();
-        engine._advance();
-      } catch (retryErr) {
-        console.error('[Radio] Retry failed:', retryErr.message);
-      }
+    setTimeout(() => {
+      engine.connect().then(() => engine._advance()).catch(e => console.error('[Radio] Retry failed:', e.message));
     }, 30_000);
   }
 

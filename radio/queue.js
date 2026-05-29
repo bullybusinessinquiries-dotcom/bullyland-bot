@@ -35,6 +35,17 @@ class Queue {
 
     const foundSet = new Set(found);
 
+    // ── Cold start: queue is empty — shuffle everything at once ─────────────
+    // Must run BEFORE the "add new files" loop so the shuffle actually fires.
+    // The loop inserts files one-by-one and never triggers this condition.
+    if (this._known.size === 0 && found.length > 0) {
+      this.tracks   = _shuffle([...found]);
+      this._known   = new Set(found);
+      this.position = 0;
+      console.log(`[Radio] Loaded ${this.tracks.length} track(s) — shuffled and ready.`);
+      return;
+    }
+
     // ── Remove files that no longer exist ────────────────────────────────────
     for (const f of [...this._known]) {
       if (!foundSet.has(f)) {
@@ -60,14 +71,6 @@ class Queue {
 
     if (newFiles.length) {
       console.log(`[Radio] +${newFiles.length} new track(s) entered rotation (total: ${this.tracks.length})`);
-    }
-
-    // ── Cold start: nothing was known yet — load and shuffle everything ──────
-    if (this.tracks.length === 0 && found.length > 0) {
-      this.tracks   = _shuffle([...found]);
-      this._known   = new Set(found);
-      this.position = 0;
-      console.log(`[Radio] Loaded ${this.tracks.length} track(s) — shuffled and ready.`);
     }
   }
 

@@ -18,18 +18,17 @@ const {
 const path   = require('path');
 const config = require('./config');
 
-// Inject ffmpeg-static binary into PATH so @discordjs/voice (prism-media) can find it.
-// Falls back to system ffmpeg if ffmpeg-static is not installed.
+// Tell prism-media (used internally by @discordjs/voice) where FFmpeg is.
+// On Railway, nixpacks.toml installs FFmpeg system-wide so it's in PATH automatically.
+// Locally, ffmpeg-static provides a bundled binary as a fallback.
 try {
   const ffmpegPath = require('ffmpeg-static');
   if (ffmpegPath) {
-    const dir = path.dirname(ffmpegPath);
-    if (!process.env.PATH.includes(dir)) {
-      process.env.PATH = dir + path.delimiter + process.env.PATH;
-    }
+    process.env.FFMPEG_PATH = ffmpegPath; // prism-media reads this env var directly
+    console.log('[Radio] FFmpeg (ffmpeg-static):', ffmpegPath);
   }
 } catch (_) {
-  // ffmpeg-static not installed — rely on system ffmpeg in PATH
+  console.log('[Radio] ffmpeg-static not found — using system FFmpeg from PATH');
 }
 
 class RadioEngine {
@@ -50,6 +49,14 @@ class RadioEngine {
       if (!this._paused) this._advance();
     });
 
+    // AutoPaused means the voice connection isn't ready yet.
+    // Keep retrying unpause every 2 seconds — the player will resume
+    // automatically once the connection reaches Ready state.
+    this._player.on(AudioPlayerStatus.AutoPaused, () => {
+      console.warn('[Radio] AudioPlayer AutoPaused — will keep retrying until connection is ready...');
+      this._startAutoPausedRetry();
+    });
+
     // Broken stream — skip to next after a brief pause
     this._player.on('error', err => {
       console.error('[Radio] Playback error:', err.message, '— skipping track');
@@ -58,48 +65,90 @@ class RadioEngine {
   }
 
   init(client) {
-    this._client = client;
+    this._client        = client;
+    this._started       = false;
+    this._autoPauseTimer = null;
   }
 
-  // ── Join the configured voice channel and start the reconnect watcher ──────
+  // ── Keep retrying unpause while AutoPaused ────────────────────────────────
+  // @discordjs/voice will transition the player from AutoPaused → Playing
+  // automatically when the voice connection reaches Ready. This just prods
+  // it every 2 seconds in case that automatic transition doesn't fire.
+  _startAutoPausedRetry() {
+    if (this._autoPauseTimer) return; // already retrying
+    this._autoPauseTimer = setInterval(() => {
+      const status = this._player.state.status;
+      if (status !== AudioPlayerStatus.AutoPaused) {
+        clearInterval(this._autoPauseTimer);
+        this._autoPauseTimer = null;
+        console.log('[Radio] AutoPaused resolved — broadcast resuming.');
+        return;
+      }
+      this._player.unpause();
+    }, 2_000);
+  }
+
+  // ── Join the configured voice channel ────────────────────────────────────
+  // Playback does NOT start here — it starts when the Ready event fires
+  // in _watchConnection(). This prevents AutoPaused caused by playing
+  // before the Discord voice handshake is fully complete.
   async connect() {
     if (!config.VOICE_CHANNEL_ID) {
       console.error('[Radio] RADIO_VOICE_CHANNEL_ID is not set in .env — radio disabled.');
       return;
     }
 
+    const { getVoiceConnection } = require('@discordjs/voice');
     const guild = await this._client.guilds.fetch(config.GUILD_ID);
+
+    // Destroy any stale connection left over from a previous deployment.
+    // A lingering session_id causes Discord to immediately close the voice
+    // WebSocket (state 1→6) on every IDENTIFY attempt, creating an endless cycle.
+    const stale = getVoiceConnection(config.GUILD_ID);
+    if (stale) {
+      console.log('[Radio] Destroying stale voice connection from previous session...');
+      stale.destroy();
+      await new Promise(r => setTimeout(r, 2_000));
+    }
 
     this._connection = joinVoiceChannel({
       channelId:      config.VOICE_CHANNEL_ID,
       guildId:        config.GUILD_ID,
       adapterCreator: guild.voiceAdapterCreator,
-      selfDeaf:       true,  // radio doesn't need to hear users
+      selfDeaf:       true,
     });
 
     this._connection.subscribe(this._player);
     this._watchConnection();
+    console.log('[Radio] Joining voice channel...');
 
-    console.log('[Radio] Joined voice channel.');
+    // Log connection state transitions for diagnostics
+    this._connection.on('stateChange', (oldState, newState) => {
+      console.log(`[Radio] Connection: ${oldState.status} → ${newState.status}`);
+    });
   }
 
-  // ── Monitor the voice connection and reconnect if it drops ────────────────
+  // ── Monitor the voice connection ──────────────────────────────────────────
   _watchConnection() {
+    this._connection.on(VoiceConnectionStatus.Ready, () => {
+      this._reconnecting = false;
+      console.log('[Radio] Voice connection ready.');
+    });
+
     this._connection.on(VoiceConnectionStatus.Disconnected, async () => {
       if (this._reconnecting) return;
       this._reconnecting = true;
-      console.log('[Radio] Disconnected from voice — attempting to reconnect...');
+      console.log('[Radio] Disconnected — attempting to reconnect...');
 
       try {
-        // Discord sometimes re-establishes the connection automatically
+        // Discord sometimes re-establishes automatically
         await Promise.race([
-          entersState(this._connection, VoiceConnectionStatus.Signalling,  5_000),
-          entersState(this._connection, VoiceConnectionStatus.Connecting,  5_000),
+          entersState(this._connection, VoiceConnectionStatus.Signalling, 5_000),
+          entersState(this._connection, VoiceConnectionStatus.Connecting, 5_000),
         ]);
-        // If we reach here, connection is coming back on its own
         this._reconnecting = false;
       } catch {
-        // Connection didn't recover — destroy it and rejoin from scratch
+        // Didn't recover — destroy and rejoin
         try { this._connection.destroy(); } catch (_) {}
         this._reconnecting = false;
 
@@ -107,19 +156,13 @@ class RadioEngine {
           console.log('[Radio] Rejoining voice channel...');
           try {
             await this.connect();
-            if (!this._paused) this._advance();
+            // Playback resumes automatically when Ready fires above
           } catch (err) {
-            console.error('[Radio] Reconnect failed:', err.message, '— will retry in 30s');
-            setTimeout(() => this._watchConnection(), 30_000);
+            console.error('[Radio] Reconnect failed:', err.message, '— retrying in 30s');
+            setTimeout(() => this.connect(), 30_000);
           }
         }, config.RECONNECT_DELAY_MS);
       }
-    });
-
-    // Log when fully connected for diagnostics
-    this._connection.on(VoiceConnectionStatus.Ready, () => {
-      this._reconnecting = false;
-      console.log('[Radio] Voice connection ready.');
     });
   }
 

@@ -264,19 +264,29 @@ function pickImage() {
   const files = loadImageFiles();
   if (!files.length) return null;
 
+  // State stores basenames only — full paths differ between Windows dev and Railway (Linux).
+  // On load, we map basenames back to full paths so the state survives cross-platform deploys.
+  const basenames = files.map(f => path.basename(f));
+  const byBasename = Object.fromEntries(files.map(f => [path.basename(f), f]));
+
   let state = { order: [], index: 0 };
   try { state = JSON.parse(fs.readFileSync(IMG_STATE, 'utf8')); } catch (_) {}
 
-  // Reshuffle when exhausted or pool size changed (new images added/removed)
-  if (!state.order.length || state.index >= state.order.length || state.order.length !== files.length) {
-    state.order = fisherYates(files);
+  // Detect stale state: full paths from a different OS are present → force reshuffle
+  const stateHasFullPaths = state.order.length > 0 && state.order[0].includes(path.sep === '/' ? '\\' : '/');
+  const poolChanged = state.order.length !== basenames.length;
+
+  if (!state.order.length || state.index >= state.order.length || poolChanged || stateHasFullPaths) {
+    state.order = fisherYates(basenames); // store basenames only
     state.index = 0;
     console.log('[DailyQ] Image pool reshuffled');
   }
 
-  const chosen = state.order[state.index++];
+  const chosenBasename = state.order[state.index++];
   try { fs.writeFileSync(IMG_STATE, JSON.stringify(state), 'utf8'); } catch (_) {}
-  return chosen;
+
+  // Resolve basename back to full path for this environment
+  return byBasename[chosenBasename] ?? files[0];
 }
 
 // ─── QUOTE FETCHER ────────────────────────────────────────────────────────────
@@ -490,9 +500,13 @@ const dailyQ = {
 
   // ── Handle incoming message (called from bot.js messageCreate) ──────────────
   async handleMessage(message) {
-    if (!this.activePost)                              return;
+    if (!this.activePost)                                return;
     if (message.channelId !== this.activePost.channelId) return;
-    if (message.author.bot)                            return;
+    if (message.author.bot)                              return;
+
+    // Must be a direct reply to the questionnaire message — random channel
+    // messages don't count, users have to hit Reply on the question embed.
+    if (message.reference?.messageId !== this.activePost.messageId) return;
 
     const userId   = message.author.id;
     const username = message.author.username;
@@ -655,12 +669,25 @@ const dailyQ = {
         .setFooter({ text: `Test closes in 2 minutes • Category: ${q.category} • Tone: ${toneEmoji} ${q.tone}` })
         .setTimestamp();
 
-      const testMsg = await message.channel.send({ embeds: [embed] });
+      const sendOpts = { embeds: [embed] };
+      const imagePath = pickImage();
+      if (imagePath) {
+        const { AttachmentBuilder } = require('discord.js');
+        const attachment = new AttachmentBuilder(imagePath, { name: 'morning.png' });
+        embed.setImage('attachment://morning.png');
+        sendOpts.files = [attachment];
+      }
+
+      const testMsg = await message.channel.send(sendOpts);
 
       // Collect responses in memory for the test summary (no DB writes, no BB)
       const testResponses = new Map(); // userId → { username, text, ts }
       const collector = message.channel.createMessageCollector({
-        filter: m => !m.author.bot && !m.content.startsWith('!') && m.content.trim().length >= CFG.rewards.minResponseLength,
+        filter: m =>
+          !m.author.bot &&
+          !m.content.startsWith('!') &&
+          m.content.trim().length >= CFG.rewards.minResponseLength &&
+          m.reference?.messageId === testMsg.id, // must Reply to the question
         time: 2 * 60 * 1000, // 2 minutes
       });
 
