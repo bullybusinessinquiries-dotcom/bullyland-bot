@@ -163,6 +163,12 @@ db.exec(`
     PRIMARY KEY (user_id, heist_index)
   );
 
+  CREATE TABLE IF NOT EXISTS jail (
+    user_id TEXT PRIMARY KEY,
+    release_at TEXT NOT NULL,
+    bail_amount INTEGER NOT NULL DEFAULT 0
+  );
+
   CREATE TABLE IF NOT EXISTS role_inventory (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id TEXT, role_name TEXT, rarity TEXT,
@@ -301,10 +307,10 @@ const CONFIG = {
   // Shop items
   // Role prices by rarity — loaded from Google Sheet at boot
   ROLE_PRICES: {
-    Common:    200,
-    Uncommon:  450,
-    Rare:      900,
-    Legendary: 2000,
+    Common:    750,
+    Uncommon:  1250,
+    Rare:      2000,
+    Legendary: 5000,
   },
   // Roles are loaded from Google Sheet — SHOP_ITEMS kept minimal for non-role items
   SHOP_ITEMS: [],
@@ -403,6 +409,36 @@ function spendBB(userId, amount) {
   db.prepare('UPDATE balances SET balance = balance - ? WHERE user_id = ?').run(amount, userId);
   db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(userId, -amount, 'shop purchase');
 }
+
+// Ping @Gamers role on announcements instead of @everyone
+const GAMER_PING = process.env.ROLE_GAMER ? `<@&${process.env.ROLE_GAMER}>` : '@here';
+
+// ── Jail helpers ─────────────────────────────────────────────────────────────
+function getJail(userId) {
+  const row = db.prepare('SELECT * FROM jail WHERE user_id = ?').get(userId);
+  if (!row) return null;
+  if (new Date(row.release_at) <= new Date()) {
+    db.prepare('DELETE FROM jail WHERE user_id = ?').run(userId);
+    return null;
+  }
+  return row;
+}
+function isJailed(userId) { return getJail(userId) !== null; }
+function jailUser(userId, minutes, bailAmount) {
+  const releaseAt = new Date(Date.now() + minutes * 60000).toISOString();
+  db.prepare('INSERT OR REPLACE INTO jail (user_id, release_at, bail_amount) VALUES (?, ?, ?)').run(userId, releaseAt, bailAmount);
+}
+
+// Jail duration / bail scaled to the amount that was attempted to steal
+function calcJailTime(stealAmount) { return Math.min(60, Math.max(5, Math.round(stealAmount / 10))); }
+function calcBail(stealAmount)     { return Math.min(5000, Math.max(100, stealAmount * 2)); }
+
+// Is a user active (sent a message in the last 5 days)?
+function isActive(userId) {
+  const row = db.prepare('SELECT last_message FROM balances WHERE user_id = ?').get(userId);
+  if (!row || !row.last_message) return false;
+  return Date.now() - new Date(row.last_message).getTime() < 5 * 24 * 60 * 60 * 1000;
+}
 // ─── BANK SYSTEM ──────────────────────────────────────────────────────────
 // Bank capacity is determined by the member's Lurkr level role.
 // Add each level role ID + its bank capacity below.
@@ -495,43 +531,67 @@ async function sendSuperfanPaycheck(member, isFirstTime = false) {
 // ── Weekly booster payouts — runs every Friday at noon CT ────────────────────
 async function runBoosterPayouts() {
   try {
+    const boosterRoleId = process.env.ROLE_BOOSTER;
+    if (!boosterRoleId) {
+      console.warn('[Booster] ⚠️  ROLE_BOOSTER not set in env — weekly payouts are disabled. Add ROLE_BOOSTER to Railway env vars.');
+      return { paid: 0, skipped: 0, reason: 'missing_env' };
+    }
     const guild = await client.guilds.fetch(CONFIG.GUILD_ID);
     await guild.members.fetch(); // populate cache
     const week     = getISOWeek();
-    const boosters = guild.members.cache.filter(m => !!m.premiumSince);
-    let paid = 0;
+    const boosters = guild.members.cache.filter(m => m.roles.cache.has(boosterRoleId) && !m.user.bot);
+    if (!boosters.size) {
+      console.log(`[Booster] No members with Booster role found (week ${week})`);
+      return { paid: 0, skipped: 0, reason: 'no_boosters' };
+    }
+    let paid = 0, skipped = 0;
     for (const [, member] of boosters) {
       const already = db.prepare('SELECT 1 FROM booster_payouts WHERE user_id = ? AND week = ?').get(member.id, week);
-      if (already) continue;
+      if (already) { skipped++; continue; }
       addBB(member.id, member.user.username, BOOSTER_WEEKLY_BB, 'Booster Club weekly paycheck');
       db.prepare('INSERT OR IGNORE INTO booster_payouts (user_id, week) VALUES (?, ?)').run(member.id, week);
       await sendBoosterPaycheck(member, false);
       paid++;
     }
-    console.log(`[Booster] Paid ${paid} boosters ${BOOSTER_WEEKLY_BB} BB each (week ${week})`);
-  } catch (e) { console.error('[Booster] Payout error:', e.message); }
+    console.log(`[Booster] Paid ${paid} boosters ${BOOSTER_WEEKLY_BB} BB each (week ${week}) | ${skipped} already paid`);
+    return { paid, skipped };
+  } catch (e) {
+    console.error('[Booster] Payout error:', e.message);
+    return { paid: 0, skipped: 0, error: e.message };
+  }
 }
 
 // ── Weekly superfan payouts — runs every Friday at noon CT ───────────────────
 async function runSuperfanPayouts() {
   try {
+    const superfanRoleId = process.env.ROLE_SUPERFAN;
+    if (!superfanRoleId) {
+      console.warn('[Superfan] ⚠️  ROLE_SUPERFAN not set in env — weekly payouts are disabled. Add ROLE_SUPERFAN to Railway env vars.');
+      return { paid: 0, skipped: 0, reason: 'missing_env' };
+    }
     const guild = await client.guilds.fetch(CONFIG.GUILD_ID);
     await guild.members.fetch();
-    const superfanRoleId = process.env.ROLE_SUPERFAN;
-    if (!superfanRoleId) { console.log('[Superfan] ROLE_SUPERFAN not set — skipping payouts'); return; }
     const week      = getISOWeek();
     const superfans = guild.members.cache.filter(m => m.roles.cache.has(superfanRoleId));
-    let paid = 0;
+    if (!superfans.size) {
+      console.log(`[Superfan] No superfan members found (week ${week})`);
+      return { paid: 0, skipped: 0, reason: 'no_members' };
+    }
+    let paid = 0, skipped = 0;
     for (const [, member] of superfans) {
       const already = db.prepare('SELECT 1 FROM superfan_payouts WHERE user_id = ? AND week = ?').get(member.id, week);
-      if (already) continue;
+      if (already) { skipped++; continue; }
       addBB(member.id, member.user.username, SUPERFAN_WEEKLY_BB, 'Superfan Club weekly paycheck');
       db.prepare('INSERT OR IGNORE INTO superfan_payouts (user_id, week) VALUES (?, ?)').run(member.id, week);
       await sendSuperfanPaycheck(member, false);
       paid++;
     }
-    console.log(`[Superfan] Paid ${paid} superfans ${SUPERFAN_WEEKLY_BB} BB each (week ${week})`);
-  } catch (e) { console.error('[Superfan] Payout error:', e.message); }
+    console.log(`[Superfan] Paid ${paid} superfans ${SUPERFAN_WEEKLY_BB} BB each (week ${week}) | ${skipped} already paid`);
+    return { paid, skipped };
+  } catch (e) {
+    console.error('[Superfan] Payout error:', e.message);
+    return { paid: 0, skipped: 0, error: e.message };
+  }
 }
 
 // ─── ITEM SHOP ────────────────────────────────────────────────────────────
@@ -945,7 +1005,7 @@ async function postMysteryDrop() {
     const old = await channel.messages.fetch({ limit: 100 });
     if (old.size > 0) await channel.bulkDelete(old).catch(async () => { for (const [,m] of old) await m.delete().catch(()=>{}); });
   } catch (_) {}
-  const msg = await channel.send({ content: '@everyone', embeds: [embed] });
+  const msg = await channel.send({ content: GAMER_PING, embeds: [embed] });
   activeDrop = { tier, claimed: false, expiresAt, messageId: msg.id };
   setTimeout(async () => {
     if (activeDrop && !activeDrop.claimed && activeDrop.messageId === msg.id) {
@@ -1253,7 +1313,7 @@ async function postGiveawayOpening() {
       `Max 15 tickets per person. More tickets = better odds. Good luck! 🎰`
     )
     .setFooter({text:"Bully's World • May the best lady win."}).setTimestamp();
-  await channel.send({ content: '@everyone', embeds: [embed] });
+  await channel.send({ content: GAMER_PING, embeds: [embed] });
   console.log('[Giveaway] Opening announcement posted');
 }
 
@@ -1279,7 +1339,7 @@ async function runGiveaway() {
     .setDescription(`<@${winner.userId}> just won the quarterly giveaway!\n\nPrize: **${CONFIG.GIVEAWAY_PRIZE}**\n\nCheck your DMs to claim. You have **48 hours** or the prize is forfeited.`)
     .addFields({name:'Total entries',value:`${pool.length}`,inline:true},{name:"Winner's tickets",value:`${winnerTickets}`,inline:true})
     .setFooter({text:"Bully's World • Congratulations!"}).setTimestamp();
-  await channel.send({ content: '@everyone', embeds: [embed] });
+  await channel.send({ content: GAMER_PING, embeds: [embed] });
 
   try {
     const guild = await client.guilds.fetch(CONFIG.GUILD_ID);
@@ -1574,8 +1634,9 @@ client.on('guildMemberUpdate', async (oldMember, newMember) => {
       console.log(`[LevelUp] Sent reward DM to ${newMember.user.username} for role ${tier?.label || roleId}`);
     }
 
-    // ── New server boost detected ─────────────────────────────────────────────
-    if (!oldMember.premiumSince && newMember.premiumSince) {
+    // ── Booster role granted ──────────────────────────────────────────────────
+    const boosterRoleId = process.env.ROLE_BOOSTER;
+    if (boosterRoleId && addedRoleIds.includes(boosterRoleId)) {
       const week = getISOWeek();
       const already = db.prepare('SELECT 1 FROM booster_payouts WHERE user_id = ? AND week = ?').get(newMember.id, week);
       if (!already) {
@@ -1820,7 +1881,9 @@ client.on('messageCreate', async(message) => {
   const user = getUser(userId, username);
   const lastMsg = user.last_message ? new Date(user.last_message).getTime() : 0;
   if (Date.now() - lastMsg > CONFIG.MESSAGE_COOLDOWN_MS) {
-    addBB(userId, username, CONFIG.MESSAGE_BB, 'message');
+    const jailRow = getJail(userId);
+    const msgReward = jailRow ? Math.max(1, Math.floor(CONFIG.MESSAGE_BB * 0.40)) : CONFIG.MESSAGE_BB;
+    addBB(userId, username, msgReward, jailRow ? 'message (jailed — 60% cut)' : 'message');
     db.prepare('UPDATE balances SET last_message = CURRENT_TIMESTAMP WHERE user_id = ?').run(userId);
   }
 
@@ -1836,12 +1899,17 @@ client.on('messageCreate', async(message) => {
     const today = new Date().toISOString().slice(0,10);
     const yesterday = new Date(Date.now()-86400000).toISOString().slice(0,10);
     const newStreak = lastCI === yesterday ? (u.streak||0)+1 : 1;
-    const reward = getStreakReward(newStreak);
-    addBB(userId, username, reward, `daily check-in (streak: ${newStreak})`);
+    const baseReward = getStreakReward(newStreak);
+    const jailRowCI = getJail(userId);
+    const reward = jailRowCI ? Math.max(1, Math.floor(baseReward * 0.40)) : baseReward;
+    addBB(userId, username, reward, jailRowCI ? `daily check-in (streak: ${newStreak}, jailed — 60% cut)` : `daily check-in (streak: ${newStreak})`);
     db.prepare('UPDATE balances SET streak = ?, last_checkin = ? WHERE user_id = ?').run(newStreak, today, userId);
     try {
-      const dmEmbed = new EmbedBuilder().setColor('#c9a84c').setTitle('Check-in claimed!')
-        .setDescription(`You got **${reward} BB**.\nStreak: **${newStreak} day${newStreak!==1?'s':''}**\n\n${newStreak>=7?'Your streak doubled your reward. Keep going.':'Hit a 7-day streak to double your daily reward.'}`)
+      const jailNote = jailRowCI
+        ? `\n⛓️ **Jailed** — earnings reduced 60%. Use \`!jail\` to check your status or pay bail.`
+        : (newStreak >= 7 ? 'Your streak doubled your reward. Keep going.' : 'Hit a 7-day streak to double your daily reward.');
+      const dmEmbed = new EmbedBuilder().setColor(jailRowCI ? '#8B0000' : '#c9a84c').setTitle('Check-in claimed!')
+        .setDescription(`You got **${reward} BB**.\nStreak: **${newStreak} day${newStreak!==1?'s':''}**\n\n${jailNote}`)
         .setFooter({text:"Bully's World • Show up every day."}).setTimestamp();
       await message.author.send({ embeds: [dmEmbed] });
     } catch {}
@@ -2459,23 +2527,77 @@ This challenge expires in 60 seconds.`)
     if (mention.id === userId) { await message.reply("You can't give BB to yourself."); return; }
     if (mention.bot) { await message.reply("You can't give BB to a bot."); return; }
     if (isNaN(amount) || amount < 1) { await message.reply('Please enter a valid amount. Example: `!give @user 100`'); return; }
+
+    // Block gifts to inactive users (5+ days no activity) — permanent rule
+    if (!isActive(mention.id)) {
+      await message.reply(`❌ **${mention.username}** hasn't been active in the last 5 days and cannot receive gifts right now.\n_This is a permanent server rule to keep the economy healthy._`);
+      return;
+    }
+
+    // Block gifts to jailed users
+    if (isJailed(mention.id)) {
+      await message.reply(`❌ **${mention.username}** is in jail and cannot receive gifts right now.`);
+      return;
+    }
+
+    const fee      = Math.max(1, Math.ceil(amount * 0.10));
+    const received = amount - fee;
+    if (received < 1) { await message.reply(`Amount too small — after the 10% transfer fee, the recipient would receive nothing.`); return; }
     const u = getUser(userId, username);
     if (u.balance < amount) { await message.reply(`Not enough BB. You have **${u.balance} BB**.`); return; }
+
+    // Sender pays the full amount; fee is burned; recipient gets amount − fee
     db.prepare('UPDATE balances SET balance = balance - ? WHERE user_id = ?').run(amount, userId);
     db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(userId, -amount, `sent to ${mention.username}`);
-    addBB(mention.id, mention.username, amount, `received from ${username}`);
+    addBB(mention.id, mention.username, received, `received from ${username}`);
+
     const embed = new EmbedBuilder().setColor('#c9a84c').setTitle('💸 Bully Bucks Sent!')
-      .setDescription(`**${username}** sent **${amount} BB** to **${mention.username}**!\n\nThat's love right there. 🙏`)
+      .setDescription(`**${username}** sent **${amount} BB** to **${mention.username}**.\n**${mention.username}** received **${received} BB** after the 10% transfer fee (**${fee} BB** burned).`)
       .setFooter({text:"Bully's World • Spread the wealth."}).setTimestamp();
     await message.reply({ embeds: [embed] });
     if (dmAllowed(mention.id)) {
       try {
         const dmEmbed = new EmbedBuilder().setColor('#c9a84c').setTitle('💸 You received Bully Bucks!')
-          .setDescription(`**${username}** just sent you **${amount} BB**!\n\nCheck your balance with \`!balance\`.`)
+          .setDescription(`**${username}** sent you **${amount} BB**. After the 10% transfer fee, you received **${received} BB**.\n\nCheck your balance with \`!balance\`.`)
           .setFooter({text:"Bully's World • Someone's feeling generous."}).setTimestamp();
         await mention.send({ embeds: [dmEmbed] });
       } catch {}
     }
+    return;
+  }
+
+  // ── !jail ──
+  if (content === '!jail') {
+    const jailRow = getJail(userId);
+    if (!jailRow) {
+      await message.reply({ embeds: [new EmbedBuilder()
+        .setColor('#3B6D11')
+        .setTitle('✅ You\'re Free')
+        .setDescription('You are **not in jail**. Stay out of trouble.')
+        .setFooter({ text: "Bully's World" }).setTimestamp()
+      ] });
+      return;
+    }
+    const releaseTs = Math.floor(new Date(jailRow.release_at).getTime() / 1000);
+    const u = getUser(userId, username);
+    const canAfford = u.balance >= jailRow.bail_amount;
+    const bailBtn = new ButtonBuilder()
+      .setCustomId(`jail_bail.${userId}`)
+      .setLabel(`💰 Pay Bail — ${jailRow.bail_amount.toLocaleString()} BB`)
+      .setStyle(ButtonStyle.Danger)
+      .setDisabled(!canAfford);
+    await message.reply({ embeds: [new EmbedBuilder()
+      .setColor('#8B0000')
+      .setTitle('⛓️ You\'re in Jail')
+      .setDescription(
+        `**Released:** <t:${releaseTs}:F> (<t:${releaseTs}:R>)\n` +
+        `**Bail:** ${jailRow.bail_amount.toLocaleString()} BB\n` +
+        `**Your wallet:** ${u.balance.toLocaleString()} BB\n\n` +
+        `_While jailed: no steals, no heists, no received gifts, earnings reduced 60%._` +
+        (!canAfford ? `\n\n⚠️ You don't have enough BB to pay bail right now.` : '')
+      )
+      .setFooter({ text: "Bully's World • Do the time or pay the bail." }).setTimestamp()
+    ], components: [new ActionRowBuilder().addComponents(bailBtn)] });
     return;
   }
 
@@ -2516,7 +2638,7 @@ This challenge expires in 60 seconds.`)
     const embed = new EmbedBuilder().setColor('#8B0000').setTitle(`💥 DISASTER — ${disaster.name}`)
       .setDescription(`${disaster.description}\n\n**Everyone in the server just lost ${amount} BB.**\n\nThere is no escape. There is no refund. This is BULLYLAND.`)
       .setFooter({text:"Bully's World • Disasters happen."}).setTimestamp();
-    await message.channel.send({ content: '@everyone', embeds: [embed] });
+    await message.channel.send({ content: GAMER_PING, embeds: [embed] });
     return;
   }
 
@@ -2633,6 +2755,207 @@ This challenge expires in 60 seconds.`)
     if (!mention) { await message.reply('Usage: !resetuser @user'); return; }
     db.prepare('UPDATE balances SET balance = 0, streak = 0 WHERE user_id = ?').run(mention.id);
     await message.reply(`Reset ${mention.username}'s balance and streak.`); return;
+  }
+
+
+  // ── !unjail @user ──
+  if (content.startsWith('!unjail ')) {
+    const mention = message.mentions.users.first();
+    if (!mention) { await message.reply('Usage: `!unjail @user`'); return; }
+    const jailRow = getJail(mention.id);
+    if (!jailRow) { await message.reply(`${mention.username} is not in jail.`); return; }
+    db.prepare('DELETE FROM jail WHERE user_id = ?').run(mention.id);
+    await message.reply(`✅ **${mention.username}** has been released from jail.`);
+    return;
+  }
+
+  // ── !crowntax [confirm] ──
+  if (content === '!crowntax' || content === '!crowntax confirm') {
+    const TAX_BRACKETS = [
+      { min: 40000, rate: 0.15, label: '40k+',      pct: '15%' },
+      { min: 15000, rate: 0.10, label: '15k–40k',   pct: '10%' },
+      { min: 5000,  rate: 0.05, label: '5k–15k',    pct: '5%'  },
+    ];
+    const allUsers = db.prepare('SELECT user_id, username, balance FROM balances WHERE balance >= 5000 ORDER BY balance DESC').all();
+
+    if (!allUsers.length) { await message.reply('No users meet the minimum threshold (5,000 BB). No tax applied.'); return; }
+
+    const preview = allUsers.map(u => {
+      const bracket = TAX_BRACKETS.find(b => u.balance >= b.min);
+      const tax = Math.floor(u.balance * bracket.rate);
+      return { ...u, tax, rate: bracket.rate, label: bracket.label, pct: bracket.pct };
+    });
+
+    const totalTaxed = preview.reduce((s, u) => s + u.tax, 0);
+
+    if (content === '!crowntax') {
+      const lines = preview.slice(0, 20).map(u =>
+        `**${u.username}** — ${u.balance.toLocaleString()} BB → taxed **${u.tax.toLocaleString()} BB** *(${u.pct}, ${u.label})*`
+      ).join('\n');
+      const more = preview.length > 20 ? `\n_...and ${preview.length - 20} more_` : '';
+      const previewEmbed = new EmbedBuilder()
+        .setColor('#FFD700')
+        .setTitle('👑 Emergency Crown Tax — Preview')
+        .setDescription(
+          `**${preview.length} users** will be taxed.\n**${totalTaxed.toLocaleString()} BB** total will be burned from circulation.\n\n` +
+          `**Brackets:**\nUnder 5k → None\n5k–15k → 5%\n15k–40k → 10%\n40k+ → 15%\n\n` +
+          `**Affected users:**\n${lines}${more}`
+        )
+        .setFooter({ text: 'Run !crowntax confirm to execute. This cannot be undone.' })
+        .setTimestamp();
+      await message.reply({ embeds: [previewEmbed] });
+      return;
+    }
+
+    // Execute the tax
+    let taxed = 0, totalBurned = 0;
+    for (const u of preview) {
+      db.prepare('UPDATE balances SET balance = balance - ? WHERE user_id = ?').run(u.tax, u.user_id);
+      db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(u.user_id, -u.tax, `Emergency Crown Tax (${u.pct})`);
+      taxed++;
+      totalBurned += u.tax;
+    }
+
+    const resultEmbed = new EmbedBuilder()
+      .setColor('#FFD700')
+      .setTitle('👑 Emergency Crown Tax — Executed')
+      .setDescription(
+        `**${taxed} users** taxed.\n**${totalBurned.toLocaleString()} BB** burned from circulation.\n\n` +
+        `_Every member with 5,000+ BB has been taxed. The funds have been destroyed — not redistributed._`
+      )
+      .setFooter({ text: "Bully's World • Crown Tax complete." })
+      .setTimestamp();
+    await message.reply({ embeds: [resultEmbed] });
+
+    // Post the decree to announcements
+    const taxAnnounceChannel = client.channels.cache.get(ANNOUNCEMENT_CHANNEL_ID) ||
+                               client.channels.cache.get(CONFIG.CHANNELS.GENERAL);
+    if (taxAnnounceChannel) {
+      await taxAnnounceChannel.send({ content: GAMER_PING, embeds: [new EmbedBuilder()
+        .setColor('#FFD700')
+        .setTitle('👑  BY DECREE OF THE CROWN')
+        .setDescription(
+          `*Let it be known throughout BULLYLAND —*\n\n` +
+          `The economy has grown unstable. Wealth has accumulated beyond what the land can sustain. ` +
+          `In the interest of balance, fairness, and the future of this community, ` +
+          `**an Emergency Crown Tax has been levied.**\n\n` +
+          `━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+          `**📜 THE CROWN TAX — COLLECTED**\n\n` +
+          `All members carrying significant wealth were taxed according to the following brackets:\n\n` +
+          `> 🪙 **Under 5,000 BB** — exempt\n` +
+          `> 💰 **5,000 – 14,999 BB** — 5% levied\n` +
+          `> 💎 **15,000 – 39,999 BB** — 10% levied\n` +
+          `> 👑 **40,000 BB and above** — 15% levied\n\n` +
+          `━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+          `**${taxed} member${taxed !== 1 ? 's' : ''}** were taxed.\n` +
+          `**${totalBurned.toLocaleString()} BB** has been permanently destroyed — not redistributed.\n\n` +
+          `_This was a one-time measure. The books are balanced. The economy moves forward from here._\n\n` +
+          `*There was no appeal. There was no exception. The crown has spoken.*`
+        )
+        .setFooter({ text: "Bully's World • Emergency Economic Decree" })
+        .setTimestamp()
+      ] });
+    }
+    return;
+  }
+
+  if (content === '!analytics') {
+    // ── Economy totals ───────────────────────────────────────────────────────
+    const totals = db.prepare(`
+      SELECT SUM(balance) as wallet_total, SUM(total_earned) as all_time_earned, COUNT(*) as user_count
+      FROM balances
+    `).get();
+
+    // ── BB issued by feature, bucketed ───────────────────────────────────────
+    const sources = db.prepare(`
+      SELECT
+        CASE
+          WHEN reason LIKE '%check-in%'        THEN '📅 Daily Check-In'
+          WHEN reason = 'message'              THEN '💬 Message Reward'
+          WHEN reason LIKE 'heist win%'        THEN '🦹 Heist Win'
+          WHEN reason LIKE 'stolen from%'      THEN '🎭 Steal Win'
+          WHEN reason LIKE '%treasure%'        THEN '🎁 Treasure Chest'
+          WHEN reason LIKE 'Booster%'          THEN '💎 Booster Paycheck'
+          WHEN reason LIKE 'Superfan%'         THEN '⭐ Superfan Paycheck'
+          WHEN reason LIKE '%stream event%'    THEN '🎟️ Redeem Code'
+          WHEN reason = 'gifted by Bully'      THEN '🎀 Admin Gift (single)'
+          WHEN reason LIKE 'gifteveryone%'     THEN '🎀 Admin Gift (everyone)'
+          WHEN reason LIKE 'mass gift%'        THEN '🎀 Admin Mass Gift'
+          WHEN reason LIKE 'admin adjustment%' THEN '🔧 Admin Adjustment'
+          WHEN reason LIKE '%rain%'            THEN '🌧️ BB Rain'
+          WHEN reason LIKE 'duel win%'         THEN '⚔️ Duel Win'
+          WHEN reason LIKE '%leaderboard%'     THEN '🏆 Leaderboard Winner'
+          WHEN reason LIKE 'received from%'    THEN '↔️ P2P Transfer'
+          WHEN reason LIKE '%Casino%'          THEN '🎰 Casino Win'
+          ELSE '❓ Other'
+        END as feature,
+        SUM(amount) as total_bb,
+        COUNT(*) as tx_count
+      FROM transactions
+      WHERE amount > 0
+      GROUP BY feature
+      ORDER BY total_bb DESC
+    `).all();
+
+    const grandTotal = sources.reduce((s, r) => s + r.total_bb, 0);
+
+    // ── Daily flow — last 14 days with data ──────────────────────────────────
+    const daily = db.prepare(`
+      SELECT
+        DATE(created_at) as day,
+        SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END) as issued,
+        SUM(CASE WHEN amount < 0 THEN ABS(amount) ELSE 0 END) as spent
+      FROM transactions
+      GROUP BY day
+      ORDER BY day DESC
+      LIMIT 14
+    `).all();
+
+    // ── Top 10 richest ───────────────────────────────────────────────────────
+    const rich = db.prepare('SELECT username, balance FROM balances ORDER BY balance DESC LIMIT 10').all();
+
+    // ── Last transaction timestamp ───────────────────────────────────────────
+    const lastTx = db.prepare('SELECT MAX(created_at) as ts FROM transactions').get();
+
+    // ── Build embeds ─────────────────────────────────────────────────────────
+    const sourceLines = sources.map(r => {
+      const pct = grandTotal > 0 ? ((r.total_bb / grandTotal) * 100).toFixed(1) : '0.0';
+      return `\`${String(r.total_bb.toLocaleString()).padStart(7)} BB\` **${pct}%** — ${r.feature} *(${r.tx_count} txns)*`;
+    }).join('\n');
+
+    const dailyLines = daily.length
+      ? daily.map(r => {
+          const net = r.issued - r.spent;
+          const sign = net >= 0 ? '+' : '';
+          return `\`${r.day}\`  +${r.issued.toLocaleString()} issued  −${r.spent.toLocaleString()} spent  **${sign}${net.toLocaleString()} net**`;
+        }).join('\n')
+      : '_No transactions yet._';
+
+    const richLines = rich.map((r, i) =>
+      `**#${i + 1}** ${r.username} — \`${r.balance.toLocaleString()} BB\``
+    ).join('\n');
+
+    const embed1 = new EmbedBuilder()
+      .setColor('#c9a84c')
+      .setTitle('📊 Economy Analytics')
+      .addFields(
+        { name: '💰 Total Wallet Supply', value: `${(totals.wallet_total || 0).toLocaleString()} BB`, inline: true },
+        { name: '📈 All-Time Issued',     value: `${(totals.all_time_earned || 0).toLocaleString()} BB`, inline: true },
+        { name: '👥 Users Tracked',       value: `${totals.user_count}`, inline: true },
+        { name: `🏦 BB Issued by Source — ${grandTotal.toLocaleString()} BB total`, value: sourceLines || '_No data._' },
+        { name: '🏆 Top 10 Richest Members', value: richLines || '_No data._' }
+      )
+      .setFooter({ text: `Last transaction: ${lastTx?.ts || 'never'} • Bully's World Admin` })
+      .setTimestamp();
+
+    const embed2 = new EmbedBuilder()
+      .setColor('#1E3A5F')
+      .setTitle('📆 Daily BB Flow (last 14 active days)')
+      .setDescription(dailyLines)
+      .setFooter({ text: "issued = new BB created  •  spent = BB removed from supply" });
+
+    await message.reply({ embeds: [embed1, embed2] });
+    return;
   }
 
   // Test commands
@@ -2906,7 +3229,7 @@ async function startScheduledAuction(auctionId) {
   const bidRow = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('auction.bid').setLabel(`🔨 Place Bid — $${(auction.starting_bid || 50).toFixed(2)}`).setStyle(ButtonStyle.Success)
   );
-  const auctionMsg = await channel.send({ content: `@everyone 🎨 A new auction is live — **${auction.title}**! Place your bids below.`, embeds: [embed], components: [bidRow] });
+  const auctionMsg = await channel.send({ content: `${GAMER_PING} 🎨 A new auction is live — **${auction.title}**! Place your bids below.`, embeds: [embed], components: [bidRow] });
   db.prepare('UPDATE auctions SET message_id = ? WHERE id = ?').run(auctionMsg.id, auctionId);
   auctionTimer = setTimeout(() => endAuction(auctionId, true), durationMs);
   console.log(`[Auction] Scheduled auction #${auctionId} "${auction.title}" is now live.`);
@@ -3464,9 +3787,10 @@ function startScheduler() {
   schedule.scheduleJob({ rule:'0 12 1 2,5,8,11 *', tz:CONFIG.TIMEZONE }, ()=>runGiveaway());
 
   // Booster + Superfan Club weekly paychecks — every Friday at 12pm CT
-  schedule.scheduleJob({ rule: '0 12 * * 5', tz: CONFIG.TIMEZONE }, () => {
-    runBoosterPayouts();
-    runSuperfanPayouts();
+  schedule.scheduleJob({ rule: '0 12 * * 5', tz: CONFIG.TIMEZONE }, async () => {
+    console.log('[Scheduler] Running weekly Booster + Superfan payouts...');
+    await runBoosterPayouts();
+    await runSuperfanPayouts();
   });
 
   console.log('[Scheduler] All jobs started.');
@@ -3480,6 +3804,18 @@ client.once('ready', async()=>{
   await refreshShop();
   startScheduler();
   dailyQ.init(client, db, addBB);
+
+  // ── Startup env checks ────────────────────────────────────────────────────────
+  if (!process.env.ROLE_SUPERFAN) console.warn('[⚠️  Config] ROLE_SUPERFAN is not set — Superfan weekly payouts are disabled. Add it in Railway → Variables.');
+  if (!process.env.ROLE_BOOSTER)  console.warn('[⚠️  Config] ROLE_BOOSTER is not set — Booster weekly payouts are disabled. Add it in Railway → Variables.');
+
+  // ── Neighborhood Watch: post channel button & reschedule any live votes ───────
+  try {
+    await postNWChannelButton();
+    const pendingNWReports = db.prepare("SELECT id, voting_ends_at FROM nw_reports WHERE status = 'voting'").all();
+    for (const r of pendingNWReports) scheduleNWResolve(r.id, r.voting_ends_at);
+    if (pendingNWReports.length) console.log(`[NW] Rescheduled ${pendingNWReports.length} pending vote(s).`);
+  } catch (e) { console.error('[NW] Startup error:', e.message); }
 
   // ── Reload persisted scheduled auctions (survives bot restarts) ───────────────
   const pendingScheduled = db.prepare("SELECT * FROM auctions WHERE status = 'scheduled'").all();
@@ -3894,6 +4230,48 @@ async function endTriviaGame(channel, state) {
 // ============================================================================
 client.on('interactionCreate', async interaction => {
   if (!interaction.isButton()) return;
+
+  // ── Neighborhood Watch buttons bypass testing mode (DM interactions have no member) ──
+  // ── Jail bail button ─────────────────────────────────────────────────────────
+  if (interaction.customId.startsWith('jail_bail.')) {
+    const targetId = interaction.customId.split('.')[1];
+    if (interaction.user.id !== targetId) {
+      await interaction.reply({ content: "That's not your jail card.", ephemeral: true }); return;
+    }
+    const jailRow = getJail(targetId);
+    if (!jailRow) {
+      await interaction.update({ embeds: [new EmbedBuilder().setColor('#3B6D11').setTitle('✅ Already Free').setDescription("You're no longer in jail.")], components: [] });
+      return;
+    }
+    const bail = jailRow.bail_amount;
+    const u = getUser(targetId, interaction.user.username);
+    if (u.balance < bail) {
+      await interaction.reply({ content: `❌ Not enough BB. You need **${bail.toLocaleString()} BB**, you have **${u.balance.toLocaleString()} BB**.`, ephemeral: true });
+      return;
+    }
+    db.prepare('UPDATE balances SET balance = balance - ? WHERE user_id = ?').run(bail, targetId);
+    db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(targetId, -bail, 'bail paid');
+    db.prepare('DELETE FROM jail WHERE user_id = ?').run(targetId);
+    await interaction.update({ embeds: [new EmbedBuilder()
+      .setColor('#3B6D11')
+      .setTitle('✅ Bail Paid — You\'re Free!')
+      .setDescription(`You paid **${bail.toLocaleString()} BB** and walked out of jail.\n\nDon't let us see you back here. 👮`)
+      .setFooter({ text: "Bully's World" }).setTimestamp()
+    ], components: [] });
+    return;
+  }
+
+  if (interaction.customId === 'nw_submit' ||
+      interaction.customId.startsWith('nw_vote_') ||
+      interaction.customId.startsWith('nw_vote_confirm.') ||
+      interaction.customId.startsWith('nw_vote_back.') ||
+      interaction.customId.startsWith('nw_appeal.') ||
+      interaction.customId.startsWith('nw_mod_uphold.') ||
+      interaction.customId.startsWith('nw_mod_overturn.')) {
+    await handleNWInteraction(interaction).catch(e => console.error('[NW] Interaction error:', e.message));
+    return;
+  }
+
   if (TESTING_MODE && !hasAccess(interaction.member)) {
     await interaction.reply({ content: '🔒 Bot is in testing mode. You need the @tester role.', ephemeral: true }); return;
   }
@@ -3980,10 +4358,10 @@ client.on('interactionCreate', async interaction => {
             { name: '🖤 Black Market', value: '`!blackmarket` — special items with unique abilities\n(Account Pull, Pocket Scan, Vault Key)', inline: false },
             { name: '🎁 Gift & Redeem', value: '`!gift @user [amount]` — send your own BB to someone\n`!redeem CODE` — redeem a stream event code for BB', inline: false },
             { name: '🏷️ Role Rarities', value:
-              '⬜ **Common** — 200 BB\n' +
-              '🟦 **Uncommon** — 450 BB\n' +
-              '🟣 **Rare** — 900 BB\n' +
-              '🟡 **Legendary** — 2,000 BB',
+              '⬜ **Common** — 750 BB\n' +
+              '🟦 **Uncommon** — 1,250 BB\n' +
+              '🟣 **Rare** — 2,000 BB\n' +
+              '🟡 **Legendary** — 5,000 BB',
               inline: false },
             { name: '🎒 Inventory',    value: '`!inventory` — see your roles and equip/unequip them (max 3 equipped)', inline: false }
           )
@@ -4590,6 +4968,15 @@ Launches <t:${endsAt}:R> — click **Join** to pick your role!`)
       if (!activeHeist) { await interaction.reply({ content: '❌ This heist has ended or no longer exists.', ephemeral: true }); return; }
       if (activeHeist.crew.find(m => m.id === userId)) { await interaction.reply({ content: "You're already in this crew!", ephemeral: true }); return; }
       if (activeHeist.crew.length >= 5) { await interaction.reply({ content: 'Crew is full (5/5)!', ephemeral: true }); return; }
+      // Jail check — jailed users cannot join heists
+      if (!isAdmin) {
+        const jailRowHeist = getJail(userId);
+        if (jailRowHeist) {
+          const releaseTs = Math.floor(new Date(jailRowHeist.release_at).getTime() / 1000);
+          await interaction.reply({ content: `⛓️ You're in **jail** and can't join a heist.\nReleased <t:${releaseTs}:R> — or pay **${jailRowHeist.bail_amount.toLocaleString()} BB** bail with \`!bail\`.`, ephemeral: true });
+          return;
+        }
+      }
       const u = getUser(userId, username);
       if (u.balance < activeHeist.heist.entry) { await interaction.reply({ content: `❌ Need **${activeHeist.heist.entry} BB** to join.`, ephemeral: true }); return; }
       const available = Object.entries(HEIST_ROLES).filter(([k]) => !activeHeist.crew.find(m => m.role === k));
@@ -5126,6 +5513,13 @@ client.on('messageCreate', async msg => {
   if (target.bot) { await msg.reply("You can't steal from a bot."); return; }
   const isAdminSteal = msg.member?.permissions.has(PermissionsBitField.Flags.Administrator) || userId === process.env.OWNER_ID;
   if (!isAdminSteal) {
+    // Jail check — jailed users cannot steal
+    const jailRowSteal = getJail(userId);
+    if (jailRowSteal) {
+      const releaseTs = Math.floor(new Date(jailRowSteal.release_at).getTime() / 1000);
+      await msg.reply(`⛓️ You're in **jail** and can't steal right now.\nReleased <t:${releaseTs}:R> — or pay **${jailRowSteal.bail_amount.toLocaleString()} BB** bail with \`!bail\` to get out now.`);
+      return;
+    }
     const cd = db.prepare('SELECT last_steal FROM steal_cooldown WHERE user_id = ?').get(userId);
     if (cd) {
       const rem = 3 * 60 * 1000 - (Date.now() - new Date(cd.last_steal).getTime());
@@ -5230,10 +5624,32 @@ Click **BLOCK IT** within **${windowSecs} seconds**!`).setFooter({ text: "Bully'
     const penalty = Math.max(1, Math.floor(stealAmount * 0.5));
     const u = getUser(userId, username);
     const actualPenalty = Math.min(penalty, u.balance);
-    if (actualPenalty > 0) db.prepare('UPDATE balances SET balance = balance - ? WHERE user_id = ?').run(actualPenalty, userId);
-    await msg.channel.send({ embeds: [new EmbedBuilder().setColor('#8B0000').setTitle('🛡️ Steal Blocked!').setDescription(`**${target.username}** blocked it in time!
+    if (actualPenalty > 0) {
+      db.prepare('UPDATE balances SET balance = balance - ? WHERE user_id = ?').run(actualPenalty, userId);
+      db.prepare('INSERT INTO transactions (user_id, amount, reason) VALUES (?, ?, ?)').run(userId, -actualPenalty, `steal blocked by ${target.username} — penalty`);
+    }
 
-**${username}** loses **${actualPenalty} BB** as a penalty.`).addFields({ name: `${username}'s balance`, value: `${u.balance - actualPenalty} BB`, inline: true }, { name: `${target.username}'s balance`, value: `${targetUser.balance} BB`, inline: true }).setFooter({ text: "Bully's World • Crime doesn't pay." }).setTimestamp()] });
+    // Jail the caught thief
+    if (!isAdminSteal) {
+      const jailMins = calcJailTime(stealAmount);
+      const bail     = calcBail(stealAmount);
+      jailUser(userId, jailMins, bail);
+      const releaseTs = Math.floor((Date.now() + jailMins * 60000) / 1000);
+      await msg.channel.send({ embeds: [new EmbedBuilder().setColor('#8B0000').setTitle('🚔 Caught in the Act!')
+        .setDescription(
+          `**${target.username}** blocked it in time and called the cops!\n\n` +
+          `**${username}** loses **${actualPenalty} BB** and is sent to **jail** for **${jailMins} minute${jailMins !== 1 ? 's' : ''}**.\n\n` +
+          `⛓️ Released <t:${releaseTs}:R> · Bail: **${bail.toLocaleString()} BB** (\`!bail\`)\n` +
+          `_While jailed: no steals, no heists, earnings reduced 60%._`
+        )
+        .addFields(
+          { name: `${username}'s balance`, value: `${u.balance - actualPenalty} BB`, inline: true },
+          { name: `${target.username}'s balance`, value: `${targetUser.balance} BB`, inline: true }
+        )
+        .setFooter({ text: "Bully's World • Crime doesn't pay." }).setTimestamp()] });
+    } else {
+      await msg.channel.send({ embeds: [new EmbedBuilder().setColor('#8B0000').setTitle('🛡️ Steal Blocked!').setDescription(`**${target.username}** blocked it in time!\n\n**${username}** loses **${actualPenalty} BB** as a penalty.`).addFields({ name: `${username}'s balance`, value: `${u.balance - actualPenalty} BB`, inline: true }, { name: `${target.username}'s balance`, value: `${targetUser.balance} BB`, inline: true }).setFooter({ text: "Bully's World • Crime doesn't pay." }).setTimestamp()] });
+    }
   } else {
     const actualStolen = Math.min(stealAmount, targetUser.balance);
     db.prepare('UPDATE balances SET balance = balance - ? WHERE user_id = ?').run(actualStolen, target.id);
@@ -5813,6 +6229,59 @@ client.on('messageCreate', async msg => {
   if (lower === '!testingmode on' || lower === '!testingmodeon') { TESTING_MODE = true; await msg.reply('🔒 Testing mode **ON** — only admins and @tester can use the bot.'); return; }
   if (lower === '!testingmode off' || lower === '!testingmodeoff') { TESTING_MODE = false; await msg.reply('✅ Testing mode **OFF** — bot is open to everyone.'); return; }
 
+  // ── Neighborhood Watch admin commands ─────────────────────────────────────────
+  if (lower === '!postnw') {
+    await msg.reply('♻️ Re-posting Neighborhood Watch ticket button...');
+    await postNWChannelButton();
+    await msg.reply('✅ Done.');
+    return;
+  }
+
+  if (lower.startsWith('!nwstrikes')) {
+    const target = msg.mentions.users.first();
+    const targetId = target?.id || parts[1];
+    if (!targetId) { await msg.reply('Usage: `!nwstrikes @user`'); return; }
+    const now = new Date().toISOString();
+    const allStrikes = db.prepare('SELECT * FROM nw_strikes WHERE user_id = ? ORDER BY issued_at DESC').all(targetId);
+    const activeStrikes = allStrikes.filter(s => s.expires_at > now && s.appeal_outcome !== 'overturned');
+    if (!allStrikes.length) { await msg.reply(`No strikes found for <@${targetId}>.`); return; }
+    const lines = allStrikes.map(s => {
+      const active = s.expires_at > now && s.appeal_outcome !== 'overturned';
+      return `• Report #${s.report_id} — ${active ? '🔴 Active' : '⚫ Expired/Overturned'} | Issued <t:${Math.floor(new Date(s.issued_at).getTime()/1000)}:D> | Expires <t:${Math.floor(new Date(s.expires_at).getTime()/1000)}:D>`;
+    });
+    await msg.reply(`**Strikes for <@${targetId}>:** ${activeStrikes.length} active / ${allStrikes.length} total\n${lines.join('\n')}`);
+    return;
+  }
+
+  if (lower.startsWith('!nwclearstrikes')) {
+    const target = msg.mentions.users.first();
+    if (!target) { await msg.reply('Usage: `!nwclearstrikes @user`'); return; }
+    db.prepare('DELETE FROM nw_strikes WHERE user_id = ?').run(target.id);
+    await msg.reply(`✅ All strikes cleared for <@${target.id}>.`);
+    return;
+  }
+
+  if (lower.startsWith('!nwresolve')) {
+    const reportId = parseInt(parts[1]);
+    if (isNaN(reportId)) { await msg.reply('Usage: `!nwresolve <reportId>`'); return; }
+    const report = db.prepare('SELECT * FROM nw_reports WHERE id = ?').get(reportId);
+    if (!report) { await msg.reply(`❌ Report #${reportId} not found.`); return; }
+    if (report.status !== 'voting') { await msg.reply(`ℹ️ Report #${reportId} is already resolved (status: \`${report.status}\`).`); return; }
+    await msg.reply(`⏩ Force-resolving Report #${reportId}…`);
+    await resolveNWReport(reportId);
+    const updated = db.prepare('SELECT status FROM nw_reports WHERE id = ?').get(reportId);
+    await msg.reply(`✅ Report #${reportId} resolved → status: \`${updated?.status}\``);
+    return;
+  }
+
+  if (lower === '!nwlist') {
+    const reports = db.prepare('SELECT id, status, accused_info, created_at FROM nw_reports ORDER BY id DESC LIMIT 10').all();
+    if (!reports.length) { await msg.reply('No NW reports in the database.'); return; }
+    const lines = reports.map(r => `**#${r.id}** \`${r.status}\` — accused: ${r.accused_info || '_unknown_'} — <t:${Math.floor(new Date(r.created_at).getTime()/1000)}:R>`).join('\n');
+    await msg.reply({ embeds: [new EmbedBuilder().setColor('#1E3A5F').setTitle('👮‍♀️ Recent NW Reports').setDescription(lines)] });
+    return;
+  }
+
   // ── !superfan add/remove/list ──────────────────────────────────────────────
   if (lower.startsWith('!superfan')) {
     const superfanRoleId = process.env.ROLE_SUPERFAN;
@@ -5853,18 +6322,35 @@ client.on('messageCreate', async msg => {
 
   // ── !boosterlist ──────────────────────────────────────────────────────────
   if (lower === '!boosterlist') {
+    const boosterRoleId = process.env.ROLE_BOOSTER;
+    if (!boosterRoleId) { await msg.reply('❌ `ROLE_BOOSTER` is not set in env vars.'); return; }
     const guild = await client.guilds.fetch(CONFIG.GUILD_ID);
     await guild.members.fetch();
-    const boosters = guild.members.cache.filter(m => !!m.premiumSince);
+    const boosters = guild.members.cache.filter(m => m.roles.cache.has(boosterRoleId) && !m.user.bot);
     if (!boosters.size) { await msg.reply('No active boosters right now.'); return; }
-    const lines = [...boosters.values()].map(m => `• ${m.user.username} *(boosting since ${new Date(m.premiumSince).toLocaleDateString()})*`).join('\n');
-    await msg.reply({ embeds: [new EmbedBuilder().setColor('#f47fff').setTitle(`💜 Booster Club (${boosters.size})`).setDescription(lines).setTimestamp()] });
+    const lines = [...boosters.values()].map(m => `• ${m.user.username}`).join('\n');
+    await msg.reply({ embeds: [new EmbedBuilder().setColor('#f47fff').setTitle(`🧡 Booster Club (${boosters.size})`).setDescription(lines).setTimestamp()] });
     return;
   }
 
   // ── !payboost / !paysuperfan — manual trigger ─────────────────────────────
-  if (lower === '!payboost') { await msg.reply('⏳ Running booster payouts…'); await runBoosterPayouts(); await msg.reply('✅ Booster payouts complete.'); return; }
-  if (lower === '!paysuperfan') { await msg.reply('⏳ Running superfan payouts…'); await runSuperfanPayouts(); await msg.reply('✅ Superfan payouts complete.'); return; }
+  if (lower === '!payboost') {
+    await msg.reply('⏳ Running booster payouts…');
+    const r = await runBoosterPayouts();
+    if (r.error)               await msg.reply(`❌ Booster payout failed: \`${r.error}\``);
+    else if (r.reason === 'no_boosters') await msg.reply('ℹ️ No active server boosters found — nothing to pay.');
+    else                       await msg.reply(`✅ Booster payouts complete — **${r.paid} paid**, ${r.skipped} already paid this week.`);
+    return;
+  }
+  if (lower === '!paysuperfan') {
+    await msg.reply('⏳ Running superfan payouts…');
+    const r = await runSuperfanPayouts();
+    if (r.error)               await msg.reply(`❌ Superfan payout failed: \`${r.error}\``);
+    else if (r.reason === 'missing_env') await msg.reply('❌ **`ROLE_SUPERFAN` is not set** in your environment variables — payouts are disabled.\n\nAdd `ROLE_SUPERFAN=<role_id>` in Railway → Variables, then re-deploy.');
+    else if (r.reason === 'no_members') await msg.reply('ℹ️ No members with the Superfan role found — nothing to pay.');
+    else                       await msg.reply(`✅ Superfan payouts complete — **${r.paid} paid**, ${r.skipped} already paid this week.`);
+    return;
+  }
 
   if (lower === '!testlottery') { await msg.reply('🎟️ Triggering lottery...'); await runLottery(); return; }
   if (lower === '!testchest') { await msg.reply('📦 Spawning chest...'); await spawnTreasureChest(); return; }
@@ -5995,7 +6481,7 @@ async function deactivateConstructionZone() {
       const embed = new EmbedBuilder().setColor('#3B6D11').setTitle("🎉 Bully's World is back!")
         .setDescription("We're back online. Thanks for your patience!\n\nCheck out what's new and get back in the game. 🧡")
         .setFooter({ text: "Bully's World • We're live." }).setTimestamp();
-      await general.send({ content: '@everyone', embeds: [embed] });
+      await general.send({ content: GAMER_PING, embeds: [embed] });
     }
     console.log('[Construction] Server restored.');
   } catch (err) {
@@ -6073,6 +6559,806 @@ client.once('ready', async () => {
       const cch = await guild.channels.fetch(CONSTRUCTION_CHANNEL_ID).catch(() => null);
       if (cch) await cch.permissionOverwrites.edit(_EVERYONE_ID, { ViewChannel: false }).catch(() => {});
     } catch (_) {}
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ─── NEIGHBORHOOD WATCH ────────────────────────────────────────────────────────
+// Anonymous community moderation: ticket → NW member votes → strikes → appeals
+// ═══════════════════════════════════════════════════════════════════════════════
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS nw_reports (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    reporter_id    TEXT NOT NULL,
+    description    TEXT NOT NULL,
+    accused_info   TEXT DEFAULT '',
+    accused_id     TEXT DEFAULT '',
+    evidence_urls  TEXT DEFAULT '[]',
+    status         TEXT DEFAULT 'voting',
+    vote_messages  TEXT DEFAULT '[]',
+    created_at     TEXT DEFAULT CURRENT_TIMESTAMP,
+    voting_ends_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS nw_votes (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_id  INTEGER NOT NULL,
+    voter_id   TEXT NOT NULL,
+    vote       TEXT NOT NULL,
+    voted_at   TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(report_id, voter_id)
+  );
+  CREATE TABLE IF NOT EXISTS nw_strikes (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id          TEXT NOT NULL,
+    username         TEXT DEFAULT '',
+    report_id        INTEGER,
+    issued_at        TEXT DEFAULT CURRENT_TIMESTAMP,
+    expires_at       TEXT NOT NULL,
+    appealed         INTEGER DEFAULT 0,
+    appeal_resolved  INTEGER DEFAULT 0,
+    appeal_outcome   TEXT DEFAULT ''
+  );
+  CREATE TABLE IF NOT EXISTS nw_missed_votes (
+    voter_id           TEXT PRIMARY KEY,
+    consecutive_misses INTEGER DEFAULT 0,
+    last_updated       TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+`);
+
+const NW_ROLE_ID          = process.env.ROLE_NEIGHBORHOOD_WATCH    || '1494499384618909716';
+const NW_CHANNEL_ID       = process.env.CHANNEL_NEIGHBORHOOD_WATCH || '1509648000866062427';
+const NW_MOD_CHANNEL_ID   = process.env.CHANNEL_MOD                || '1357502855078088814';
+const NW_VOTE_HOURS       = 24;
+const NW_STRIKE_LIMIT     = 3;
+const NW_STRIKE_EXPIRY_MS = 90 * 86400000; // 90 days
+const NW_MAX_MISSES       = 2;
+const NW_DM_TIMEOUT_MS    = 10 * 60000;    // 10 min to complete DM flow
+
+// In-memory: active DM report flows
+// Map<userId, { stage, description, accusedInfo, accusedId, timeoutHandle }>
+const nwPendingReports = new Map();
+
+// In-memory: pending resolution timers
+// Map<reportId, TimeoutHandle>
+const nwResolutionTimers = new Map();
+
+// ── Post (or refresh) the Submit-a-Ticket button in the NW channel ─────────────
+async function postNWChannelButton() {
+  try {
+    const ch = await client.channels.fetch(NW_CHANNEL_ID).catch(() => null);
+    if (!ch) { console.log('[NW] Submit-a-ticket channel not found.'); return; }
+
+    // Remove old bot messages so the channel stays clean
+    const old = await ch.messages.fetch({ limit: 20 }).catch(() => null);
+    if (old) {
+      for (const m of old.values()) {
+        if (m.author.id === client.user.id) await m.delete().catch(() => {});
+      }
+    }
+
+    const embed = new EmbedBuilder()
+      .setColor('#1E3A5F')
+      .setTitle('👮‍♀️  Bullyland\'s Neighborhood Watch')
+      .setDescription(
+        '**See something? Say something.**\n\n' +
+        'All reports are **completely anonymous** — no one will ever know you filed a ticket.\n\n' +
+        '**To submit a report you\'ll need:**\n' +
+        '• A clear description of what happened\n' +
+        '• The **Discord User ID** of the person being reported (right-click their name → Copy User ID)\n' +
+        '• Screenshot or video evidence\n\n' +
+        'Reports are reviewed by **Neighborhood Watch members** — trusted community volunteers who vote on whether a strike should be issued.\n\n' +
+        '⚠️ Submitting false or abusive reports may result in consequences.'
+      )
+      .setFooter({ text: 'Bully\'s World • Neighborhood Watch' });
+
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('nw_submit')
+        .setLabel('🎫  Submit a Ticket')
+        .setStyle(ButtonStyle.Primary)
+    );
+
+    await ch.send({ embeds: [embed], components: [row] });
+    console.log('[NW] Submit-a-Ticket button posted.');
+  } catch (e) {
+    console.error('[NW] postNWChannelButton error:', e.message);
+  }
+}
+
+// ── Distribute a report DM to every current NW member ──────────────────────────
+async function distributeNWReport(reportId) {
+  const report = db.prepare('SELECT * FROM nw_reports WHERE id = ?').get(reportId);
+  if (!report) return;
+
+  const guild = await client.guilds.fetch(CONFIG.GUILD_ID).catch(() => null);
+  if (!guild) return;
+  await guild.members.fetch().catch(() => {});
+
+  const nwMembers    = guild.members.cache.filter(m =>
+    m.roles.cache.has(NW_ROLE_ID) && !m.user.bot && m.id !== report.reporter_id
+  );
+  const evidenceUrls = JSON.parse(report.evidence_urls || '[]');
+  const deadlineTs   = Math.floor(new Date(report.voting_ends_at).getTime() / 1000);
+
+  const mainEmbed = new EmbedBuilder()
+    .setColor('#FFB347')
+    .setTitle('👮‍♀️  New Neighborhood Watch Report')
+    .setDescription(
+      'An anonymous report has been submitted and needs your review.\n\n' +
+      `**Reported User:** ${report.accused_info || '_Not specified_'}\n\n` +
+      `**Description:**\n> ${report.description.replace(/\n/g, '\n> ')}`
+    )
+    .addFields(
+      { name: '⏰ Voting Deadline', value: `<t:${deadlineTs}:F>  (<t:${deadlineTs}:R>)` },
+      {
+        name: '📋 How to Vote',
+        value:
+          '**✅ Issue Strike** — you believe a strike is warranted based on the evidence.\n' +
+          '**❌ No Action** — the evidence does not warrant a strike.\n' +
+          '**🚩 Flag as Irrelevant** — the ticket appears unnecessary or abusive.\n\n' +
+          `A simple majority (>50%) of YES votes issues the strike.\n` +
+          `Missing **${NW_MAX_MISSES} consecutive** votes will remove your Neighborhood Watch role.`
+      }
+    )
+    .setFooter({ text: `Report #${reportId} • Bully's World Neighborhood Watch` });
+
+  const voteRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`nw_vote_yes.${reportId}`).setLabel('✅  Issue Strike').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId(`nw_vote_no.${reportId}`).setLabel('❌  No Action').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`nw_vote_flag.${reportId}`).setLabel('🚩  Flag as Irrelevant').setStyle(ButtonStyle.Secondary)
+  );
+
+  const voteMessages = [];
+
+  for (const [, member] of nwMembers) {
+    try {
+      const embeds = [mainEmbed];
+
+      if (evidenceUrls.length > 0) {
+        embeds.push(
+          new EmbedBuilder()
+            .setColor('#2b2d31')
+            .setTitle('📎  Evidence')
+            .setDescription(evidenceUrls.map((u, i) => `[View Evidence ${i + 1}](${u})`).join('\n'))
+        );
+      }
+
+      const dmMsg = await member.send({ embeds, components: [voteRow] });
+      voteMessages.push({ member_id: member.id, message_id: dmMsg.id });
+    } catch (e) {
+      console.log(`[NW] Could not DM ${member.user.username}: ${e.message}`);
+    }
+  }
+
+  db.prepare('UPDATE nw_reports SET vote_messages = ? WHERE id = ?')
+    .run(JSON.stringify(voteMessages), reportId);
+
+  console.log(`[NW] Report #${reportId} → distributed to ${voteMessages.length} NW member(s).`);
+}
+
+// ── Resolve voting when the 24-hour window closes ──────────────────────────────
+async function resolveNWReport(reportId) {
+  const report = db.prepare('SELECT * FROM nw_reports WHERE id = ?').get(reportId);
+  if (!report || report.status !== 'voting') return;
+
+  const votes        = db.prepare('SELECT * FROM nw_votes WHERE report_id = ?').all(reportId);
+  const yesCount     = votes.filter(v => v.vote === 'yes').length;
+  const voteMessages = JSON.parse(report.vote_messages || '[]');
+  const total        = voteMessages.length;
+  const strikeIssued = total > 0 && (yesCount / total) > 0.5;
+
+  console.log(`[NW] Resolving Report #${reportId}: ${yesCount}/${total} YES → Strike: ${strikeIssued}`);
+
+  db.prepare('UPDATE nw_reports SET status = ? WHERE id = ?')
+    .run(strikeIssued ? 'strike' : 'no_action', reportId);
+
+  // Disable vote buttons on all NW member DMs
+  const disabledRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`nw_vote_yes.${reportId}`).setLabel('✅  Issue Strike').setStyle(ButtonStyle.Danger).setDisabled(true),
+    new ButtonBuilder().setCustomId(`nw_vote_no.${reportId}`).setLabel('❌  No Action').setStyle(ButtonStyle.Secondary).setDisabled(true),
+    new ButtonBuilder().setCustomId(`nw_vote_flag.${reportId}`).setLabel('🚩  Flag as Irrelevant').setStyle(ButtonStyle.Secondary).setDisabled(true)
+  );
+  for (const { member_id, message_id } of voteMessages) {
+    try {
+      const u   = await client.users.fetch(member_id).catch(() => null);
+      const dm  = u ? await u.createDM().catch(() => null) : null;
+      const msg = dm ? await dm.messages.fetch(message_id).catch(() => null) : null;
+      if (msg) await msg.edit({ components: [disabledRow] }).catch(() => {});
+    } catch (_) {}
+  }
+
+  // ── Track missed voters — remove NW role after NW_MAX_MISSES consecutive misses ──
+  const guild    = await client.guilds.fetch(CONFIG.GUILD_ID).catch(() => null);
+  const voterIds = new Set(votes.map(v => v.voter_id));
+
+  if (guild) {
+    await guild.members.fetch().catch(() => {});
+    for (const { member_id } of voteMessages) {
+      if (voterIds.has(member_id)) {
+        // Voted → reset consecutive miss counter
+        db.prepare(`
+          INSERT INTO nw_missed_votes (voter_id, consecutive_misses)
+          VALUES (?, 0)
+          ON CONFLICT(voter_id) DO UPDATE SET consecutive_misses = 0, last_updated = CURRENT_TIMESTAMP
+        `).run(member_id);
+      } else {
+        // Missed → increment
+        const existing = db.prepare('SELECT consecutive_misses FROM nw_missed_votes WHERE voter_id = ?').get(member_id);
+        const nextMiss = (existing?.consecutive_misses || 0) + 1;
+        db.prepare(`
+          INSERT INTO nw_missed_votes (voter_id, consecutive_misses)
+          VALUES (?, ?)
+          ON CONFLICT(voter_id) DO UPDATE SET consecutive_misses = ?, last_updated = CURRENT_TIMESTAMP
+        `).run(member_id, nextMiss, nextMiss);
+
+        if (nextMiss >= NW_MAX_MISSES) {
+          const gm = guild.members.cache.get(member_id);
+          if (gm) {
+            await gm.roles.remove(NW_ROLE_ID).catch(() => {});
+            db.prepare('UPDATE nw_missed_votes SET consecutive_misses = 0 WHERE voter_id = ?').run(member_id);
+            await gm.send(
+              '**👮‍♀️ Neighborhood Watch Role Removed**\n\n' +
+              `You've missed **${NW_MAX_MISSES} consecutive** Neighborhood Watch votes without responding.\n\n` +
+              'Your **👮 Neighborhood Watch** role has been removed. You\'re welcome to re-apply by picking up the role again in the server.'
+            ).catch(() => {});
+            console.log(`[NW] Removed NW role from ${member_id} — ${nextMiss} consecutive misses.`);
+          }
+        }
+      }
+    }
+  }
+
+  // ── Issue strike if majority voted yes ────────────────────────────────────────
+  if (strikeIssued) {
+    const expiresAt = new Date(Date.now() + NW_STRIKE_EXPIRY_MS).toISOString();
+    const now       = new Date().toISOString();
+
+    if (report.accused_id) {
+      db.prepare('INSERT INTO nw_strikes (user_id, username, report_id, expires_at) VALUES (?, ?, ?, ?)')
+        .run(report.accused_id, report.accused_info || '', reportId, expiresAt);
+
+      const activeStrikes = db.prepare(`
+        SELECT COUNT(*) AS cnt FROM nw_strikes
+        WHERE user_id = ? AND expires_at > ? AND appeal_outcome != 'overturned'
+      `).get(report.accused_id, now)?.cnt || 0;
+
+      const isKick = activeStrikes >= NW_STRIKE_LIMIT;
+
+      // DM the accused
+      try {
+        const accused = await client.users.fetch(report.accused_id).catch(() => null);
+        if (accused) {
+          const strikeEmbed = new EmbedBuilder()
+            .setColor('#FF4444')
+            .setTitle('⚠️  Strike Issued — Bullyland Neighborhood Watch')
+            .setDescription(
+              'The Neighborhood Watch reviewed a complaint and issued a strike against your account.\n\n' +
+              `**Your Active Strikes:** ${activeStrikes} / ${NW_STRIKE_LIMIT}\n` +
+              `**This strike expires:** <t:${Math.floor(new Date(expiresAt).getTime() / 1000)}:D>\n\n` +
+              (isKick
+                ? '⛔ **You have reached the maximum number of strikes and have been removed from the server.**'
+                : 'If you believe this was issued in error, you may appeal using the button below.\nYour appeal will be reviewed by the server moderators.')
+            )
+            .setFooter({ text: 'Bully\'s World Neighborhood Watch' });
+
+          const appealRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+              .setCustomId(`nw_appeal.${reportId}`)
+              .setLabel('📬  Appeal This Strike')
+              .setStyle(ButtonStyle.Primary)
+              .setDisabled(isKick)
+          );
+
+          await accused.send({ embeds: [strikeEmbed], components: [appealRow] });
+        }
+      } catch (e) { console.error(`[NW] Could not DM accused (${report.accused_id}):`, e.message); }
+
+      // Kick on 3rd strike
+      if (isKick && guild) {
+        const gm = guild.members.cache.get(report.accused_id);
+        if (gm) {
+          await gm.kick('Bullyland Neighborhood Watch: 3 strikes reached.').catch(e => console.error('[NW] Kick failed:', e.message));
+          console.log(`[NW] Kicked ${report.accused_id} — ${activeStrikes} active strikes.`);
+        }
+      }
+    } else {
+      // accused_id not resolved — escalate to mods for manual action
+      const modCh = await client.channels.fetch(NW_MOD_CHANNEL_ID).catch(() => null);
+      if (modCh) {
+        await modCh.send({
+          embeds: [new EmbedBuilder()
+            .setColor('#FF6600')
+            .setTitle('⚠️  NW Strike Voted — Manual Action Required')
+            .setDescription(
+              `Report **#${reportId}** received a majority YES vote but the accused user couldn't be resolved automatically.\n\n` +
+              `**Reported As:** ${report.accused_info || '_Unknown_'}\n\n` +
+              `**Description:**\n> ${report.description}\n\n` +
+              'Please manually identify the user and take action.'
+            )
+            .setFooter({ text: 'Bully\'s World Neighborhood Watch' })
+          ]
+        }).catch(() => {});
+      }
+    }
+  }
+
+  // ── Notify reporter of outcome (no vote details, stays fully anonymous) ────────
+  try {
+    const reporter = await client.users.fetch(report.reporter_id).catch(() => null);
+    if (reporter) {
+      await reporter.send({
+        embeds: [new EmbedBuilder()
+          .setColor(strikeIssued ? '#3B6D11' : '#888888')
+          .setTitle('📋  Your Report Has Been Reviewed')
+          .setDescription(
+            strikeIssued
+              ? '✅ The Neighborhood Watch completed their review of your anonymous report.\n\n**A strike has been issued** to the reported user.'
+              : 'ℹ️ The Neighborhood Watch completed their review of your anonymous report.\n\n**No action was taken** at this time.'
+          )
+          .setFooter({ text: 'Bully\'s World Neighborhood Watch' })
+        ]
+      }).catch(() => {});
+    }
+  } catch (_) {}
+
+  nwResolutionTimers.delete(reportId);
+}
+
+// ── Schedule a report's vote resolution ────────────────────────────────────────
+function scheduleNWResolve(reportId, votingEndsAt) {
+  const delay = Math.max(0, new Date(votingEndsAt).getTime() - Date.now());
+  if (delay === 0) { resolveNWReport(reportId); return; }
+  const t = setTimeout(() => resolveNWReport(reportId), delay);
+  nwResolutionTimers.set(reportId, t);
+}
+
+// ── Handle all NW button interactions ──────────────────────────────────────────
+async function handleNWInteraction(interaction) {
+  const { customId, user } = interaction;
+  const userId = user.id;
+
+  // ── 🎫 SUBMIT A TICKET (guild channel button) ──────────────────────────────
+  if (customId === 'nw_submit') {
+    if (nwPendingReports.has(userId)) {
+      await interaction.reply({ content: '📨 You already have a report in progress — check your DMs!', ephemeral: true });
+      return;
+    }
+
+    try {
+      await user.send({
+        embeds: [new EmbedBuilder()
+          .setColor('#1E3A5F')
+          .setTitle('👮‍♀️  Anonymous Ticket — Step 1 of 3')
+          .setDescription(
+            'Thank you for reaching out. Your report is **completely anonymous** — your identity will never be shared.\n\n' +
+            '**Please describe the situation clearly.**\n' +
+            '_What happened? When? Include any relevant context._\n\n' +
+            '> Reply to this message with your description.\n\n' +
+            '💡 Type `cancel` at any time to cancel.'
+          )
+        ]
+      });
+
+      await interaction.reply({ content: '📨 Check your DMs! We\'ve opened a private ticket for you.', ephemeral: true });
+
+      const timeoutHandle = setTimeout(() => {
+        if (nwPendingReports.has(userId)) {
+          nwPendingReports.delete(userId);
+          user.send('⏰ Your ticket timed out after 10 minutes with no response. Feel free to start again anytime.').catch(() => {});
+        }
+      }, NW_DM_TIMEOUT_MS);
+
+      nwPendingReports.set(userId, { stage: 'description', description: '', accusedInfo: '', accusedId: '', timeoutHandle });
+    } catch (e) {
+      await interaction.reply({
+        content: '❌ I couldn\'t send you a DM. Please enable **"Allow Direct Messages from Server Members"** in your Discord privacy settings, then try again.',
+        ephemeral: true
+      }).catch(() => {});
+    }
+    return;
+  }
+
+  // ── ✅/❌/🚩 VOTE — Step 1: show confirmation screen ─────────────────────────
+  if (customId.startsWith('nw_vote_') && !customId.startsWith('nw_vote_confirm.') && !customId.startsWith('nw_vote_back.')) {
+    const [action, reportIdStr] = customId.split('.');
+    const voteType = action.replace('nw_vote_', ''); // yes | no | flag
+    const reportId = parseInt(reportIdStr);
+
+    if (isNaN(reportId)) { await interaction.reply({ content: '❌ Invalid report.', ephemeral: true }); return; }
+
+    const report = db.prepare('SELECT * FROM nw_reports WHERE id = ?').get(reportId);
+    if (!report) { await interaction.reply({ content: '❌ Report not found.', ephemeral: true }); return; }
+    if (report.status !== 'voting') {
+      await interaction.reply({ content: 'ℹ️ Voting on this report is already closed.', ephemeral: true }); return;
+    }
+    if (new Date() > new Date(report.voting_ends_at)) {
+      await interaction.reply({ content: '⏰ The voting window for this report has expired.', ephemeral: true }); return;
+    }
+
+    // Already voted?
+    const alreadyVoted = db.prepare('SELECT 1 FROM nw_votes WHERE report_id = ? AND voter_id = ?').get(reportId, userId);
+    if (alreadyVoted) { await interaction.reply({ content: '✅ You\'ve already cast your vote on this report.', ephemeral: true }); return; }
+
+    const voteLabels  = { yes: '✅  Issue Strike', no: '❌  No Action', flag: '🚩  Flag as Irrelevant' };
+    const voteColors  = { yes: 0xFF4444, no: 0x5865F2, flag: 0xFFA500 };
+    const voteWarning = { yes: 'This will count as a **YES** vote to issue a strike.', no: 'This will count as a **NO** vote — no action taken.', flag: 'This will flag the ticket as unnecessary or irrelevant.' };
+
+    const pendingEmbed = new EmbedBuilder()
+      .setColor(voteColors[voteType] || 0x888888)
+      .setTitle('⚠️  Confirm Your Vote')
+      .setDescription(
+        `You selected: **${voteLabels[voteType]}**\n\n${voteWarning[voteType]}\n\n` +
+        '**This cannot be undone.** Press **Confirm** to submit your vote, or **Go Back** to change it.'
+      );
+
+    const confirmRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`nw_vote_confirm.${reportId}.${voteType}`)
+        .setLabel('Confirm Vote')
+        .setStyle(voteType === 'yes' ? ButtonStyle.Danger : ButtonStyle.Primary),
+      new ButtonBuilder()
+        .setCustomId(`nw_vote_back.${reportId}`)
+        .setLabel('↩️  Go Back')
+        .setStyle(ButtonStyle.Secondary)
+    );
+
+    await interaction.update({
+      embeds: [...interaction.message.embeds, pendingEmbed],
+      components: [confirmRow]
+    });
+    return;
+  }
+
+  // ── ✅/❌/🚩 VOTE — Step 2: confirmed, record the vote ────────────────────────
+  if (customId.startsWith('nw_vote_confirm.')) {
+    const parts    = customId.split('.');
+    const reportId = parseInt(parts[1]);
+    const voteType = parts[2]; // yes | no | flag
+
+    if (isNaN(reportId)) { await interaction.reply({ content: '❌ Invalid report.', ephemeral: true }); return; }
+
+    const report = db.prepare('SELECT * FROM nw_reports WHERE id = ?').get(reportId);
+    if (!report || report.status !== 'voting') {
+      await interaction.reply({ content: 'ℹ️ Voting on this report is already closed.', ephemeral: true }); return;
+    }
+
+    try {
+      db.prepare('INSERT INTO nw_votes (report_id, voter_id, vote) VALUES (?, ?, ?)').run(reportId, userId, voteType);
+    } catch (e) {
+      if (e.message.includes('UNIQUE')) {
+        await interaction.reply({ content: '✅ Your vote was already recorded.', ephemeral: true }); return;
+      }
+      throw e;
+    }
+
+    const voteLabels = { yes: 'Issue Strike', no: 'No Action', flag: 'Flag as Irrelevant' };
+    const voteColors = { yes: 0xFF4444, no: 0x888888, flag: 0xFFA500 };
+
+    const doneEmbed = new EmbedBuilder()
+      .setColor(voteColors[voteType] || 0x888888)
+      .setDescription(`✅ **Vote recorded: ${voteLabels[voteType] || voteType}**\n\nThank you for your contribution to the Neighborhood Watch.`);
+
+    const disabledRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`nw_vote_yes.${reportId}`).setLabel('✅  Issue Strike').setStyle(ButtonStyle.Danger).setDisabled(true),
+      new ButtonBuilder().setCustomId(`nw_vote_no.${reportId}`).setLabel('❌  No Action').setStyle(ButtonStyle.Secondary).setDisabled(true),
+      new ButtonBuilder().setCustomId(`nw_vote_flag.${reportId}`).setLabel('🚩  Flag as Irrelevant').setStyle(ButtonStyle.Secondary).setDisabled(true)
+    );
+
+    // Replace all embeds with just the done embed (cleans up the confirmation screen)
+    await interaction.update({ embeds: [doneEmbed], components: [disabledRow] });
+    return;
+  }
+
+  // ── ↩️ VOTE — Go Back: restore original vote buttons ─────────────────────────
+  if (customId.startsWith('nw_vote_back.')) {
+    const reportId = parseInt(customId.split('.')[1]);
+
+    const originalRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`nw_vote_yes.${reportId}`).setLabel('✅  Issue Strike').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId(`nw_vote_no.${reportId}`).setLabel('❌  No Action').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`nw_vote_flag.${reportId}`).setLabel('🚩  Flag as Irrelevant').setStyle(ButtonStyle.Secondary)
+    );
+
+    // Strip the confirmation embed (last one) and restore the original embeds + buttons
+    const restoredEmbeds = interaction.message.embeds.slice(0, -1);
+    await interaction.update({ embeds: restoredEmbeds, components: [originalRow] });
+    return;
+  }
+
+  // ── 📬 APPEAL (accused's DM) ───────────────────────────────────────────────────
+  if (customId.startsWith('nw_appeal.')) {
+    const reportId = parseInt(customId.split('.')[1]);
+    const report   = db.prepare('SELECT * FROM nw_reports WHERE id = ?').get(reportId);
+
+    if (!report) { await interaction.reply({ content: '❌ Report not found.', ephemeral: true }); return; }
+    if (report.status !== 'strike') {
+      await interaction.reply({ content: 'ℹ️ This report is not eligible for appeal.', ephemeral: true }); return;
+    }
+
+    const strikeRow = db.prepare('SELECT * FROM nw_strikes WHERE report_id = ? AND user_id = ?').get(reportId, userId);
+    if (strikeRow?.appealed) {
+      await interaction.reply({ content: '✅ You\'ve already submitted an appeal for this strike.', ephemeral: true }); return;
+    }
+
+    db.prepare('UPDATE nw_strikes SET appealed = 1 WHERE report_id = ? AND user_id = ?').run(reportId, userId);
+    db.prepare('UPDATE nw_reports SET status = ? WHERE id = ?').run('appealed', reportId);
+
+    // Send appeal to mod channel
+    try {
+      const modCh = await client.channels.fetch(NW_MOD_CHANNEL_ID).catch(() => null);
+      if (modCh) {
+        const appealEmbed = new EmbedBuilder()
+          .setColor('#FFD700')
+          .setTitle('📬  Neighborhood Watch — Strike Appeal')
+          .setDescription(
+            `<@${userId}> has appealed a strike issued by the Neighborhood Watch.\n\n` +
+            `**Report #${reportId}**\n` +
+            `**Reported User:** ${report.accused_info || `<@${userId}>`}\n\n` +
+            `**Original Description:**\n> ${report.description}\n\n` +
+            'Please review and issue a final ruling below.'
+          )
+          .setFooter({ text: 'Bully\'s World Neighborhood Watch • Appeal' });
+
+        const modRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(`nw_mod_uphold.${reportId}.${userId}`).setLabel('⚖️  Uphold Strike').setStyle(ButtonStyle.Danger),
+          new ButtonBuilder().setCustomId(`nw_mod_overturn.${reportId}.${userId}`).setLabel('✅  Overturn Strike').setStyle(ButtonStyle.Success)
+        );
+
+        await modCh.send({ embeds: [appealEmbed], components: [modRow] });
+      }
+    } catch (e) { console.error('[NW] Could not post appeal to mod channel:', e.message); }
+
+    await interaction.update({
+      embeds: [new EmbedBuilder()
+        .setColor('#FFD700')
+        .setTitle('📬  Appeal Submitted')
+        .setDescription(
+          'Your appeal has been forwarded to the server moderators for review.\n\n' +
+          'You will be notified of their decision.'
+        )
+        .setFooter({ text: 'Bully\'s World Neighborhood Watch' })
+      ],
+      components: [new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`nw_appeal.${reportId}`).setLabel('📬  Appeal Submitted').setStyle(ButtonStyle.Secondary).setDisabled(true)
+      )]
+    });
+    return;
+  }
+
+  // ── ⚖️ MOD DECISION (mod channel) ────────────────────────────────────────────
+  if (customId.startsWith('nw_mod_uphold.') || customId.startsWith('nw_mod_overturn.')) {
+    const parts     = customId.split('.');
+    const decision  = parts[0].replace('nw_mod_', ''); // uphold | overturn
+    const reportId  = parseInt(parts[1]);
+    const accusedId = parts[2];
+
+    const report = db.prepare('SELECT * FROM nw_reports WHERE id = ?').get(reportId);
+    if (!report) { await interaction.reply({ content: '❌ Report not found.', ephemeral: true }); return; }
+
+    const strike = db.prepare('SELECT * FROM nw_strikes WHERE report_id = ? AND user_id = ?').get(reportId, accusedId);
+    if (strike?.appeal_resolved) {
+      await interaction.reply({ content: 'ℹ️ This appeal has already been resolved.', ephemeral: true }); return;
+    }
+
+    const outcome = decision === 'uphold' ? 'upheld' : 'overturned';
+    db.prepare('UPDATE nw_strikes SET appeal_resolved = 1, appeal_outcome = ? WHERE report_id = ? AND user_id = ?')
+      .run(outcome, reportId, accusedId);
+    db.prepare('UPDATE nw_reports SET status = ? WHERE id = ?').run('appeal_resolved', reportId);
+
+    // DM the accused with the final ruling
+    try {
+      const accused = await client.users.fetch(accusedId).catch(() => null);
+      if (accused) {
+        await accused.send({
+          embeds: [new EmbedBuilder()
+            .setColor(outcome === 'overturned' ? '#3B6D11' : '#FF4444')
+            .setTitle('⚖️  Appeal Decision — Neighborhood Watch')
+            .setDescription(
+              outcome === 'overturned'
+                ? '✅ **Your appeal was successful.**\n\nThe moderators reviewed your case and **overturned the strike**. It has been removed from your record.'
+                : '❌ **Your appeal was denied.**\n\nThe moderators reviewed your case and **upheld the strike**. It remains on your record.'
+            )
+            .setFooter({ text: 'Bully\'s World Neighborhood Watch' })
+          ]
+        }).catch(() => {});
+      }
+    } catch (_) {}
+
+    // Also notify the reporter
+    try {
+      const reporter = await client.users.fetch(report.reporter_id).catch(() => null);
+      if (reporter) {
+        await reporter.send({
+          embeds: [new EmbedBuilder()
+            .setColor(outcome === 'upheld' ? '#3B6D11' : '#888888')
+            .setTitle('📋  Appeal Outcome — Your Report')
+            .setDescription(
+              outcome === 'upheld'
+                ? '✅ The moderators reviewed the appeal on your report and **upheld the strike**.'
+                : 'ℹ️ The moderators reviewed the appeal on your report and **overturned the strike**.'
+            )
+            .setFooter({ text: 'Bully\'s World Neighborhood Watch' })
+          ]
+        }).catch(() => {});
+      }
+    } catch (_) {}
+
+    // Update the mod channel message
+    await interaction.update({
+      embeds: [new EmbedBuilder()
+        .setColor(outcome === 'upheld' ? '#FF4444' : '#3B6D11')
+        .setTitle(`⚖️  Appeal ${outcome === 'upheld' ? 'Upheld' : 'Overturned'} — Report #${reportId}`)
+        .setDescription(
+          `Decision made by <@${userId}>.\n\n` +
+          `**Outcome:** ${outcome === 'upheld' ? '❌ Strike upheld' : '✅ Strike overturned'}\n` +
+          `**Accused:** ${report.accused_info || `<@${accusedId}>`}`
+        )
+        .setFooter({ text: 'Bully\'s World Neighborhood Watch • Resolved' })
+      ],
+      components: [new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`nw_mod_uphold.${reportId}.${accusedId}`).setLabel('⚖️  Uphold Strike').setStyle(ButtonStyle.Danger).setDisabled(true),
+        new ButtonBuilder().setCustomId(`nw_mod_overturn.${reportId}.${accusedId}`).setLabel('✅  Overturn Strike').setStyle(ButtonStyle.Success).setDisabled(true)
+      )]
+    });
+    return;
+  }
+}
+
+// ── DM message handler: collect report info across 3 stages ────────────────────
+client.on('messageCreate', async msg => {
+  if (msg.author.bot) return;
+  if (msg.channel.type !== 1) return;          // DMs only (type 1 = DM channel)
+  if (!nwPendingReports.has(msg.author.id)) return;
+
+  const state  = nwPendingReports.get(msg.author.id);
+  const userId = msg.author.id;
+  const text   = msg.content.trim();
+
+  // Allow cancellation at any stage
+  if (text.toLowerCase() === 'cancel') {
+    clearTimeout(state.timeoutHandle);
+    nwPendingReports.delete(userId);
+    await msg.reply('🚫 Ticket cancelled. You can start a new one anytime from the server.');
+    return;
+  }
+
+  // Reset the 10-minute timeout on each message
+  clearTimeout(state.timeoutHandle);
+  state.timeoutHandle = setTimeout(() => {
+    if (nwPendingReports.has(userId)) {
+      nwPendingReports.delete(userId);
+      msg.author.send('⏰ Your ticket timed out. Feel free to start again anytime.').catch(() => {});
+    }
+  }, NW_DM_TIMEOUT_MS);
+
+  // ── Stage 1: Description ─────────────────────────────────────────────────────
+  if (state.stage === 'description') {
+    if (text.length < 10) {
+      await msg.reply('⚠️ Please provide a more detailed description (at least 10 characters).'); return;
+    }
+    state.description = text;
+    state.stage = 'accused';
+    nwPendingReports.set(userId, state);
+
+    await msg.reply({
+      embeds: [new EmbedBuilder()
+        .setColor('#1E3A5F')
+        .setTitle('👮‍♀️  Step 2 of 3 — Who Are You Reporting?')
+        .setDescription(
+          'Please provide the **Discord User ID** of the person you\'re reporting.\n\n' +
+          '**How to get a User ID:**\n' +
+          '1. Open Discord → **Settings** (⚙️) → **Advanced**\n' +
+          '2. Turn on **Developer Mode**\n' +
+          '3. Go to the server, **right-click** the person\'s name\n' +
+          '4. Click **Copy User ID**\n' +
+          '5. Paste the ID here\n\n' +
+          '_The ID will be a long number like: `742271263892045824`_\n\n' +
+          '> Reply to this message with the User ID.'
+        )
+      ]
+    });
+    return;
+  }
+
+  // ── Stage 2: Accused User ID ─────────────────────────────────────────────────
+  if (state.stage === 'accused') {
+    const idMatch = text.trim().match(/^(\d{17,19})$/);
+    if (!idMatch) {
+      await msg.reply(
+        '⚠️ That doesn\'t look like a valid User ID.\n\n' +
+        'A User ID is a **17–19 digit number** (e.g. `742271263892045824`).\n' +
+        'To find it: Discord Settings → Advanced → turn on **Developer Mode**, ' +
+        'then right-click the person\'s name → **Copy User ID**.\n\n' +
+        'Please try again.'
+      );
+      return;
+    }
+
+    const accusedId = idMatch[1];
+
+    // Prevent reporting yourself
+    if (accusedId === userId) {
+      await msg.reply('⚠️ You cannot report yourself. Please provide a different User ID.');
+      return;
+    }
+
+    // Confirm the user exists via Discord API
+    const fetchedUser = await client.users.fetch(accusedId).catch(() => null);
+    if (!fetchedUser) {
+      await msg.reply(
+        '⚠️ Could not find a Discord user with that ID.\n\n' +
+        'Double-check the ID and try again, or make sure Developer Mode is enabled.'
+      );
+      return;
+    }
+
+    state.accusedId   = accusedId;
+    state.accusedInfo = fetchedUser.username;
+    state.stage       = 'evidence';
+    nwPendingReports.set(userId, state);
+
+    await msg.reply({
+      embeds: [new EmbedBuilder()
+        .setColor('#1E3A5F')
+        .setTitle('👮‍♀️  Step 3 of 3 — Evidence')
+        .setDescription(
+          `Got it — you're reporting **${fetchedUser.username}**.\n\n` +
+          'Almost done! Please share your **evidence**.\n\n' +
+          '• **Attach a file** (screenshot or video) directly to your reply, **or**\n' +
+          '• **Paste a direct link** to the evidence\n\n' +
+          '_Reports without evidence may not result in action._'
+        )
+      ]
+    });
+    return;
+  }
+
+  // ── Stage 3: Evidence ────────────────────────────────────────────────────────
+  if (state.stage === 'evidence') {
+    const evidenceUrls = [];
+
+    // Collect file attachments
+    for (const [, att] of msg.attachments) evidenceUrls.push(att.url);
+
+    // Collect URLs from text
+    const urlMatches = text.match(/https?:\/\/[^\s]+/g) || [];
+    evidenceUrls.push(...urlMatches);
+
+    if (evidenceUrls.length === 0) {
+      await msg.reply('⚠️ No evidence detected. Please attach a file or paste a direct link.'); return;
+    }
+
+    clearTimeout(state.timeoutHandle);
+    nwPendingReports.delete(userId);
+
+    // Create the report record
+    const votingEndsAt = new Date(Date.now() + NW_VOTE_HOURS * 3600000).toISOString();
+    const ins = db.prepare(`
+      INSERT INTO nw_reports (reporter_id, description, accused_info, accused_id, evidence_urls, voting_ends_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(userId, state.description, state.accusedInfo, state.accusedId || '', JSON.stringify(evidenceUrls), votingEndsAt);
+
+    const reportId = ins.lastInsertRowid;
+    console.log(`[NW] Report #${reportId} created by ${userId} — accused: "${state.accusedInfo}" (ID: ${state.accusedId || 'unresolved'})`);
+
+    // Confirm to reporter
+    await msg.reply({
+      embeds: [new EmbedBuilder()
+        .setColor('#3B6D11')
+        .setTitle('✅  Report Submitted')
+        .setDescription(
+          'Your anonymous report has been submitted successfully.\n\n' +
+          'The **Neighborhood Watch** will review the evidence and vote within **24 hours**.\n\n' +
+          'You will receive a DM when a decision has been made.'
+        )
+        .setFooter({ text: `Report #${reportId} • Bully's World Neighborhood Watch` })
+      ]
+    });
+
+    // Distribute to NW members and schedule resolution
+    await distributeNWReport(reportId);
+    scheduleNWResolve(reportId, votingEndsAt);
   }
 });
 
