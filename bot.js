@@ -3817,8 +3817,16 @@ This challenge expires in 60 seconds.`)
   // Strips shop-bought roles from members after a rolerollback that cleared the
   // DB but left Discord roles intact. ONLY strips roles that exist in SHOP_ROLES
   // (the Google Sheet source list) — reaction/interest roles are never touched.
-  if (content === '!fixroles' || content === '!fixroles confirm') {
-    const isFixConfirm = content === '!fixroles confirm';
+  // Usage: !fixroles YYYY-MM-DD [confirm]
+  if (content.startsWith('!fixroles')) {
+    const fixParts   = content.split(/\s+/);
+    const fixDate    = fixParts[1];
+    const isFixConfirm = fixParts[2] === 'confirm' || fixParts[1] === 'confirm';
+
+    if (!fixDate || fixDate === 'confirm' || !/^\d{4}-\d{2}-\d{2}$/.test(fixDate)) {
+      await message.reply('Usage: `!fixroles YYYY-MM-DD` (preview) or `!fixroles YYYY-MM-DD confirm` (execute)\nOnly strips roles purchased on or after that date that exist in the shop master list.');
+      return;
+    }
 
     if (!SHOP_ROLES.length) {
       await message.reply('⚠️ SHOP_ROLES is empty — sheet may not have loaded yet. Try again in a moment.');
@@ -3828,7 +3836,7 @@ This challenge expires in 60 seconds.`)
     // Build a Set of all known shop role names for fast lookup
     const shopRoleNames = new Set(SHOP_ROLES.map(r => r.name));
 
-    // Parse refund transactions from last 7 days
+    // Read all rollback refund transactions from last 7 days
     const fixCutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
     const fixRows = db.prepare(`
       SELECT DISTINCT user_id, reason FROM transactions
@@ -3842,12 +3850,18 @@ This challenge expires in 60 seconds.`)
       return;
     }
 
-    // Build pairs — only keep entries whose role name is in the shop list
+    // Parse reason string: "role rollback refund — ROLE_NAME (purchased YYYY-MM-DD)"
+    // Filter: must be a shop role AND purchased on/after the specified date
     const fixPairs = fixRows.map(r => {
-      const afterDash = r.reason.split(' — ')[1] || '';
-      const roleName  = afterDash.split(' (purchased')[0].trim();
-      return { userId: r.user_id, roleName };
-    }).filter(p => p.roleName && shopRoleNames.has(p.roleName)); // ← shop roles ONLY
+      const afterDash    = r.reason.split(' — ')[1] || '';
+      const roleName     = afterDash.split(' (purchased')[0].trim();
+      const purchasedRaw = (afterDash.match(/\(purchased (\d{4}-\d{2}-\d{2})\)/) || [])[1] || '';
+      return { userId: r.user_id, roleName, purchasedDate: purchasedRaw };
+    }).filter(p =>
+      p.roleName &&
+      shopRoleNames.has(p.roleName) &&       // shop roles only
+      p.purchasedDate >= fixDate             // on or after the specified date
+    );
 
     const skippedNonShop = fixRows.length - fixPairs.length;
 
@@ -3857,17 +3871,17 @@ This challenge expires in 60 seconds.`)
     }
 
     if (!isFixConfirm) {
-      const lines = fixPairs.slice(0, 20).map(p => `<@${p.userId}> — **${p.roleName}**`).join('\n');
+      const lines = fixPairs.slice(0, 20).map(p => `<@${p.userId}> — **${p.roleName}** (bought ${p.purchasedDate})`).join('\n');
       const more  = fixPairs.length > 20 ? `\n_...and ${fixPairs.length - 20} more_` : '';
       await message.reply({ embeds: [new EmbedBuilder()
         .setColor('#FF6600')
-        .setTitle('🔧 Fix Roles Preview')
+        .setTitle(`🔧 Fix Roles Preview — Purchased Since ${fixDate}`)
         .setDescription(
           `**${fixPairs.length} shop role assignments** to strip.\n` +
-          (skippedNonShop > 0 ? `**${skippedNonShop} non-shop entries ignored** (reaction/interest roles — safe).\n` : '') +
+          (skippedNonShop > 0 ? `**${skippedNonShop} entries ignored** (non-shop or before cutoff date — safe).\n` : '') +
           `\n` + lines + more + `\n\n` +
-          `Only roles from the shop's Google Sheet list will be stripped.\n` +
-          `⚠️ Run \`!fixroles confirm\` to execute.`
+          `Only roles from the shop's master list purchased on/after **${fixDate}** will be stripped.\n` +
+          `⚠️ Run \`!fixroles ${fixDate} confirm\` to execute.`
         )
         .setFooter({ text: "Bully's World Admin • Preview Only" })
         .setTimestamp()] });
@@ -3876,7 +3890,7 @@ This challenge expires in 60 seconds.`)
 
     // Execute
     const fixGuild = message.guild;
-    const fixAck = await message.reply(`⏳ Stripping **${fixPairs.length}** shop roles from member profiles...`);
+    const fixAck = await message.reply(`⏳ Stripping **${fixPairs.length}** shop roles purchased since **${fixDate}**...`);
     try { await fixGuild.roles.fetch(); } catch (_) {}
     const fixUniqueIds = [...new Set(fixPairs.map(p => p.userId))];
     let fixMemberMap = new Map();
@@ -3905,12 +3919,12 @@ This challenge expires in 60 seconds.`)
 
     await fixAck.edit({ content: '', embeds: [new EmbedBuilder()
       .setColor('#8B0000')
-      .setTitle('🔧 Fix Roles Complete')
+      .setTitle(`🔧 Fix Roles Complete — Since ${fixDate}`)
       .setDescription(
         `**${fixStripped} shop roles** stripped from member profiles.\n` +
         `**${fixSkipped} skipped** (already removed, member left, or role not found).\n` +
-        (skippedNonShop > 0 ? `**${skippedNonShop} non-shop entries untouched** (reaction/interest roles preserved).\n` : '') +
-        `\n_Only roles from the shop's master list were affected._`
+        (skippedNonShop > 0 ? `**${skippedNonShop} entries untouched** (non-shop or before cutoff — reaction/interest roles preserved).\n` : '') +
+        `\n_Only shop roles purchased on/after **${fixDate}** were affected._`
       )
       .setFooter({ text: "Bully's World Admin • Recovery Complete" })
       .setTimestamp()] });
