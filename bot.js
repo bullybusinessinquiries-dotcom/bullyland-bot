@@ -3735,6 +3735,84 @@ This challenge expires in 60 seconds.`)
     return;
   }
 
+  // ── !restorestripped [confirm] ──────────────────────────────────────────────
+  // Emergency restore: re-adds all roles that !fixroles stripped, using the
+  // same transaction log source. Run this to undo the accidental strip.
+  if (content === '!restorestripped' || content === '!restorestripped confirm') {
+    const isRsConfirm = content === '!restorestripped confirm';
+    const rsRows = db.prepare(`
+      SELECT DISTINCT user_id, reason FROM transactions
+      WHERE reason LIKE 'role rollback refund — %'
+      ORDER BY created_at DESC
+    `).all();
+    if (rsRows.length === 0) {
+      await message.reply('No rollback refund transactions found. Nothing to restore.');
+      return;
+    }
+    const rsPairs = rsRows.map(r => {
+      const afterDash = r.reason.split(' — ')[1] || '';
+      const roleName  = afterDash.split(' (purchased')[0].trim();
+      return { userId: r.user_id, roleName };
+    }).filter(p => p.roleName);
+
+    if (!isRsConfirm) {
+      const lines = rsPairs.slice(0, 20).map(p => `<@${p.userId}> — **${p.roleName}**`).join('\n');
+      const more  = rsPairs.length > 20 ? `\n_...and ${rsPairs.length - 20} more_` : '';
+      await message.reply({ embeds: [new EmbedBuilder()
+        .setColor('#2ECC71')
+        .setTitle('🔁 Restore Stripped Roles — Preview')
+        .setDescription(
+          `**${rsPairs.length} roles** will be re-added to members.\n\n` +
+          lines + more + `\n\n` +
+          `⚠️ Run \`!restorestripped confirm\` to execute.`
+        )
+        .setFooter({ text: "Bully's World Admin • Preview Only" })
+        .setTimestamp()] });
+      return;
+    }
+
+    const rsGuild = message.guild;
+    const rsAck = await message.reply(`⏳ Restoring **${rsPairs.length}** roles...`);
+    try { await rsGuild.roles.fetch(); } catch (_) {}
+    const rsIds = [...new Set(rsPairs.map(p => p.userId))];
+    let rsMemberMap = new Map();
+    try {
+      const fetched = await rsGuild.members.fetch({ user: rsIds }).catch(() => null);
+      if (fetched) fetched.forEach(m => rsMemberMap.set(m.id, m));
+    } catch (_) {}
+
+    let rsRestored = 0, rsSkipped = 0;
+    for (const p of rsPairs) {
+      try {
+        const member = rsMemberMap.get(p.userId);
+        if (!member) { rsSkipped++; continue; }
+        const discordRole = rsGuild.roles.cache.find(r => r.name === p.roleName);
+        if (!discordRole) { rsSkipped++; continue; }
+        if (!member.roles.cache.has(discordRole.id)) {
+          await member.roles.add(discordRole, 'restorestripped — emergency role restore');
+          rsRestored++;
+        } else {
+          rsSkipped++; // already has it
+        }
+      } catch (e) {
+        console.error(`[restorestripped] Failed for ${p.userId}/${p.roleName}:`, e.message);
+        rsSkipped++;
+      }
+    }
+
+    await rsAck.edit({ content: '', embeds: [new EmbedBuilder()
+      .setColor('#2ECC71')
+      .setTitle('🔁 Roles Restored')
+      .setDescription(
+        `**${rsRestored} roles** re-added to members.\n` +
+        `**${rsSkipped} skipped** (already had role, member left, or role not found).\n\n` +
+        `_All members should now have their roles back._`
+      )
+      .setFooter({ text: "Bully's World Admin • Restore Complete" })
+      .setTimestamp()] });
+    return;
+  }
+
   // ── !fixroles [confirm] ─────────────────────────────────────────────────────
   // Recovery command: reads transaction log for "role rollback refund" entries,
   // rebuilds the user→role map, and strips those Discord roles from members.
@@ -3743,11 +3821,14 @@ This challenge expires in 60 seconds.`)
     const isFixConfirm = content === '!fixroles confirm';
     // Parse refund transactions — reason format:
     // "role rollback refund — ROLE_NAME (purchased YYYY-MM-DD)"
+    // Only grab entries from the last 7 days to avoid touching old/unrelated rollbacks
+    const fixCutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
     const fixRows = db.prepare(`
       SELECT DISTINCT user_id, reason FROM transactions
       WHERE reason LIKE 'role rollback refund — %'
+      AND created_at >= ?
       ORDER BY created_at DESC
-    `).all();
+    `).all(fixCutoff);
 
     if (fixRows.length === 0) {
       await message.reply('No role rollback refund transactions found in the log. Nothing to fix.');
