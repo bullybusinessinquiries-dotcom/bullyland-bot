@@ -5118,7 +5118,7 @@ async function startTriviaRound(channel, state) {
   try { trivia = await generateTriviaQuestion(state.catId); } catch {
     channel.send('❌ Couldn\'t fetch a trivia question. Ending game early.').catch(() => {});
     activeTrivia.delete(channel.id);
-    gameCooldowns.set(state.cdKey, Date.now() + 5 * 60 * 1000);
+    gameCooldowns.set(state.cdKey, Date.now() + 3 * 60 * 1000);
     return;
   }
   state.question = trivia.question;
@@ -5203,7 +5203,7 @@ function getTriviaPayoutRates(playerCount) {
 
 async function endTriviaGame(channel, state) {
   activeTrivia.delete(channel.id);
-  gameCooldowns.set(state.cdKey, Date.now() + 5 * 60 * 1000);
+  gameCooldowns.set(state.cdKey, Date.now() + 3 * 60 * 1000);
 
   const allScores = [...state.scores.entries()];
   if (!allScores.length) {
@@ -5869,7 +5869,7 @@ client.on('interactionCreate', async interaction => {
         const cur = activeHangman.get(cid);
         if (!cur || cur.messageId !== hmMsg.id) return;
         activeHangman.delete(cid);
-        gameCooldowns.set(cdKey, Date.now() + 5 * 60 * 1000);
+        gameCooldowns.set(cdKey, Date.now() + 3 * 60 * 1000);
         const failEmbed = new EmbedBuilder().setColor('#8B0000').setTitle(`🔤 Hangman — Time's Up!`)
           .setDescription(`${HANGMAN_STAGES[6]}\n\n**The word was: ${cur.word}**`)
           .setFooter({ text: "Bully's World" }).setTimestamp();
@@ -6509,7 +6509,7 @@ client.on('messageCreate', async msg => {
         // ✅ Correct solve
         clearTimeout(hmState.timeout);
         activeHangman.delete(cid);
-        gameCooldowns.set(cdKey, Date.now() + 5 * 60 * 1000);
+        gameCooldowns.set(cdKey, Date.now() + 3 * 60 * 1000);
         addBB(userId, username, 100, 'hangman — solved the word');
         const rewards = [];
         for (const [uid, letters] of hmState.participants) {
@@ -6560,7 +6560,7 @@ client.on('messageCreate', async msg => {
       if (solved) {
         clearTimeout(hmState.timeout);
         activeHangman.delete(cid);
-        gameCooldowns.set(cdKey, Date.now() + 5 * 60 * 1000);
+        gameCooldowns.set(cdKey, Date.now() + 3 * 60 * 1000);
         addBB(userId, username, 100, 'hangman — completed the word');
         const rewards = [];
         for (const [uid, letters] of hmState.participants) {
@@ -6588,7 +6588,7 @@ client.on('messageCreate', async msg => {
       if (hmState.wrong.size >= 6) {
         clearTimeout(hmState.timeout);
         activeHangman.delete(cid);
-        gameCooldowns.set(cdKey, Date.now() + 5 * 60 * 1000);
+        gameCooldowns.set(cdKey, Date.now() + 3 * 60 * 1000);
         const loseEmbed = buildHangmanEmbed(hmState).setColor('#8B0000').setTitle('🔤 Hangman — Game Over').setFooter({ text: "Bully's World" });
         const hmMsg = await msg.channel.messages.fetch(hmState.messageId).catch(() => null);
         if (hmMsg) await hmMsg.edit({ embeds: [loseEmbed], components: [] }).catch(() => {});
