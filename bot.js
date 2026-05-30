@@ -5072,7 +5072,7 @@ client.on('messageCreate', async msg => {
   }
   // Build game menu — disabled games show as greyed out for everyone
   const gmBtn = (id, label, style, flag) => {
-    const off = flag && !isEnabled(flag);
+    const off = !!(flag && !isEnabled(flag)); // always a real boolean — null would fail Discord API validation
     return new ButtonBuilder()
       .setCustomId(id)
       .setLabel(off ? `🔴 ${label.replace(/^\S+\s/, '')}` : label)
