@@ -699,6 +699,17 @@ const ITEMS = {
     stackLimit:  2,
     cooldownMs:  2 * 60 * 60 * 1000,
   },
+  shield: {
+    id:          'shield',
+    name:        'Shield',
+    emoji:       '🛡️',
+    description: 'Protect yourself from steals for 24 hours. Activates immediately on purchase — no separate use step.',
+    price:       5000,
+    maxUses:     1,
+    stackLimit:  1,
+    instant:     true, // activates on purchase, skips user_items table
+    cooldownMs:  0,
+  },
 };
 
 // Resolve item ID from user input (handles spaces, underscores, case)
@@ -2646,8 +2657,17 @@ client.on('messageCreate', async(message) => {
   // ── !blackmarket ──
   if (content === '!blackmarket') {
     const u = getUser(userId, username);
+    const shieldRow = db.prepare('SELECT expires_at FROM shields WHERE user_id = ?').get(userId);
+    const shieldActive = shieldRow && new Date(shieldRow.expires_at) > new Date();
     const embed = new EmbedBuilder().setColor('#1a1a1a').setTitle('🖤 Black Market')
       .setDescription(Object.values(ITEMS).map(item => {
+        if (item.instant) {
+          // Shield — show live status instead of uses/stack
+          const statusStr = shieldActive
+            ? ` · 🛡️ **Active** — expires <t:${Math.floor(new Date(shieldRow.expires_at).getTime()/1000)}:R>`
+            : ' · _(inactive)_';
+          return `${item.emoji} **${item.name}** — ${item.price.toLocaleString()} BB\n*${item.description}*${statusStr}`;
+        }
         const uses = getItemUses(userId, item.id);
         const stacks = getItemStacks(userId, item.id);
         const cdMs = itemCooldownRemaining(userId, item.id);
@@ -2657,18 +2677,24 @@ client.on('messageCreate', async(message) => {
       }).join('\n\n'))
       .addFields({ name: '👛 Your Wallet', value: `${u.balance.toLocaleString()} BB`, inline: true })
       .setFooter({ text: "Bully's World • No refunds." }).setTimestamp();
-    const rows = [];
     // Row 1: Buy buttons
     const buyRow = new ActionRowBuilder().addComponents(
       Object.values(ITEMS).map(item => {
+        if (item.instant) {
+          const canBuy = u.balance >= item.price && !shieldActive;
+          return new ButtonBuilder().setCustomId(`bm_buy.${item.id}`).setLabel(shieldActive ? '🛡️ Shielded' : `Buy ${item.name}`).setEmoji(item.emoji).setStyle(ButtonStyle.Primary).setDisabled(!canBuy);
+        }
         const stacks = getItemStacks(userId, item.id);
         const canBuy = u.balance >= item.price && stacks < item.stackLimit;
         return new ButtonBuilder().setCustomId(`bm_buy.${item.id}`).setLabel(`Buy ${item.name}`).setEmoji(item.emoji).setStyle(ButtonStyle.Primary).setDisabled(!canBuy);
       })
     );
-    // Row 2: Use buttons
+    // Row 2: Use buttons (instant items show status, not a use button)
     const useRow = new ActionRowBuilder().addComponents(
       Object.values(ITEMS).map(item => {
+        if (item.instant) {
+          return new ButtonBuilder().setCustomId(`bm_status.${item.id}`).setLabel(shieldActive ? '🛡️ Active' : '🛡️ No Shield').setStyle(ButtonStyle.Secondary).setDisabled(true);
+        }
         const uses = getItemUses(userId, item.id);
         return new ButtonBuilder().setCustomId(`bm_use.${item.id}`).setLabel(`Use ${item.name}`).setEmoji(item.emoji).setStyle(ButtonStyle.Secondary).setDisabled(uses < 1);
       })
@@ -2810,24 +2836,10 @@ client.on('messageCreate', async(message) => {
     return;
   }
 
-  // ── !shield ──
+  // ── !shield ── (redirects to black market)
   if (content === '!shield') {
-    const u = getUser(userId, username);
-    if (hasShield(userId)) {
-      const row = db.prepare('SELECT expires_at FROM shields WHERE user_id = ?').get(userId);
-      await message.reply(`You already have an active shield! It expires <t:${Math.floor(new Date(row.expires_at).getTime()/1000)}:R>.`);
-      return;
-    }
-    if (u.balance < 100) { await message.reply("A protection shield costs **100 BB** and you don't have enough."); return; }
-    spendBB(userId, 100);
-    const expires = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
-    db.prepare('INSERT OR REPLACE INTO shields (user_id, expires_at) VALUES (?, ?)').run(userId, expires);
-    const embed = new EmbedBuilder().setColor('#4169E1').setTitle('🛡️ Shield Activated!')
-      .setDescription(`You're protected from steals for the next **24 hours**.
-
-Expires <t:${Math.floor(new Date(expires).getTime()/1000)}:R>`)
-      .setFooter({ text: "Bully's World • No one's touching your BB." }).setTimestamp();
-    await message.reply({ embeds: [embed] });
+    const r = await message.reply('🛡️ Shields are now sold in **!blackmarket** — **5,000 BB** for 24 hours of steal protection.');
+    setTimeout(() => r.delete().catch(() => {}), 8000);
     return;
   }
 
@@ -5483,7 +5495,7 @@ client.on('interactionCreate', async interaction => {
             { name: '⏳ Cooldown',      value: 'You can only steal once every **3 minutes**', inline: false },
             { name: '🛡️ Who Is Protected?', value:
               '• Anyone with **25 BB or less** in their wallet — you lose **10 BB** for trying\n' +
-              '• Anyone with an active **shield** (`!shield` — 100 BB for 24h protection)\n' +
+              '• Anyone with an active **shield** (`!blackmarket` — 5,000 BB for 24h protection)\n' +
               '• Steal too many times and you may get caught (penalty up to 50% of the steal amount)',
               inline: false },
             { name: '⚠️ Risks',        value: '• Target can block it — you lose up to 50% of the attempt as penalty\n• Attempt against low-balance users = instant -10 BB fine\n• Going below -50 BB freezes your steal ability', inline: false },
@@ -5657,6 +5669,16 @@ client.on('interactionCreate', async interaction => {
       if (!item) { await interaction.reply({ content: '❌ Unknown item.', ephemeral: true }); return; }
       const u = getUser(userId, username);
       if (u.balance < item.price) { await interaction.reply({ content: `❌ Need **${item.price.toLocaleString()} BB**. You have **${u.balance.toLocaleString()} BB**.`, ephemeral: true }); return; }
+      if (item.instant) {
+        // Instant items (e.g. Shield) — activate directly, never enter user_items
+        if (hasShield(userId)) { await interaction.reply({ content: '🛡️ You already have an active shield!', ephemeral: true }); return; }
+        spendBB(userId, item.price);
+        const expires = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+        db.prepare('INSERT OR REPLACE INTO shields (user_id, expires_at) VALUES (?, ?)').run(userId, expires);
+        const expiresTs = Math.floor(new Date(expires).getTime() / 1000);
+        await interaction.reply({ content: `🛡️ **Shield activated!** You're protected from steals for the next 24 hours.\n\nExpires <t:${expiresTs}:R>`, ephemeral: true });
+        return;
+      }
       if (getItemStacks(userId, itemId) >= item.stackLimit) { await interaction.reply({ content: `❌ Stack limit reached (${item.stackLimit}/${item.stackLimit}). Use your existing **${item.name}** first.`, ephemeral: true }); return; }
       spendBB(userId, item.price);
       db.prepare('INSERT INTO user_items (user_id, item_id, uses_remaining) VALUES (?, ?, ?)').run(userId, itemId, item.maxUses);
