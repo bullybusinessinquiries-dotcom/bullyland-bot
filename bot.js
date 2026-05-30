@@ -3814,14 +3814,21 @@ This challenge expires in 60 seconds.`)
   }
 
   // ── !fixroles [confirm] ─────────────────────────────────────────────────────
-  // Recovery command: reads transaction log for "role rollback refund" entries,
-  // rebuilds the user→role map, and strips those Discord roles from members.
-  // Use this when rolerollback cleared the DB but Discord roles weren't stripped.
+  // Strips shop-bought roles from members after a rolerollback that cleared the
+  // DB but left Discord roles intact. ONLY strips roles that exist in SHOP_ROLES
+  // (the Google Sheet source list) — reaction/interest roles are never touched.
   if (content === '!fixroles' || content === '!fixroles confirm') {
     const isFixConfirm = content === '!fixroles confirm';
-    // Parse refund transactions — reason format:
-    // "role rollback refund — ROLE_NAME (purchased YYYY-MM-DD)"
-    // Only grab entries from the last 7 days to avoid touching old/unrelated rollbacks
+
+    if (!SHOP_ROLES.length) {
+      await message.reply('⚠️ SHOP_ROLES is empty — sheet may not have loaded yet. Try again in a moment.');
+      return;
+    }
+
+    // Build a Set of all known shop role names for fast lookup
+    const shopRoleNames = new Set(SHOP_ROLES.map(r => r.name));
+
+    // Parse refund transactions from last 7 days
     const fixCutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
     const fixRows = db.prepare(`
       SELECT DISTINCT user_id, reason FROM transactions
@@ -3831,16 +3838,23 @@ This challenge expires in 60 seconds.`)
     `).all(fixCutoff);
 
     if (fixRows.length === 0) {
-      await message.reply('No role rollback refund transactions found in the log. Nothing to fix.');
+      await message.reply('No role rollback refund transactions found in the last 7 days. Nothing to fix.');
       return;
     }
 
-    // Build list of { userId, roleName } pairs
+    // Build pairs — only keep entries whose role name is in the shop list
     const fixPairs = fixRows.map(r => {
       const afterDash = r.reason.split(' — ')[1] || '';
       const roleName  = afterDash.split(' (purchased')[0].trim();
       return { userId: r.user_id, roleName };
-    }).filter(p => p.roleName);
+    }).filter(p => p.roleName && shopRoleNames.has(p.roleName)); // ← shop roles ONLY
+
+    const skippedNonShop = fixRows.length - fixPairs.length;
+
+    if (fixPairs.length === 0) {
+      await message.reply('No shop role transactions found in the last 7 days (all entries were filtered as non-shop roles).');
+      return;
+    }
 
     if (!isFixConfirm) {
       const lines = fixPairs.slice(0, 20).map(p => `<@${p.userId}> — **${p.roleName}**`).join('\n');
@@ -3849,8 +3863,10 @@ This challenge expires in 60 seconds.`)
         .setColor('#FF6600')
         .setTitle('🔧 Fix Roles Preview')
         .setDescription(
-          `**${fixPairs.length} role assignments** to strip (sourced from transaction log).\n\n` +
-          lines + more + `\n\n` +
+          `**${fixPairs.length} shop role assignments** to strip.\n` +
+          (skippedNonShop > 0 ? `**${skippedNonShop} non-shop entries ignored** (reaction/interest roles — safe).\n` : '') +
+          `\n` + lines + more + `\n\n` +
+          `Only roles from the shop's Google Sheet list will be stripped.\n` +
           `⚠️ Run \`!fixroles confirm\` to execute.`
         )
         .setFooter({ text: "Bully's World Admin • Preview Only" })
@@ -3860,10 +3876,7 @@ This challenge expires in 60 seconds.`)
 
     // Execute
     const fixGuild = message.guild;
-    const fixAck = await message.reply(`⏳ Stripping **${fixPairs.length}** Discord roles from member profiles...`);
-    let fixStripped = 0, fixSkipped = 0;
-
-    // Refresh role cache, batch-fetch all unique members
+    const fixAck = await message.reply(`⏳ Stripping **${fixPairs.length}** shop roles from member profiles...`);
     try { await fixGuild.roles.fetch(); } catch (_) {}
     const fixUniqueIds = [...new Set(fixPairs.map(p => p.userId))];
     let fixMemberMap = new Map();
@@ -3872,13 +3885,14 @@ This challenge expires in 60 seconds.`)
       if (fetched) fetched.forEach(m => fixMemberMap.set(m.id, m));
     } catch (_) {}
 
+    let fixStripped = 0, fixSkipped = 0;
     for (const p of fixPairs) {
       try {
         const member = fixMemberMap.get(p.userId);
         if (!member) { fixSkipped++; continue; }
         const discordRole = fixGuild.roles.cache.find(r => r.name === p.roleName);
         if (discordRole && member.roles.cache.has(discordRole.id)) {
-          await member.roles.remove(discordRole, 'fixroles — post-rollback Discord cleanup');
+          await member.roles.remove(discordRole, 'fixroles — shop role rollback cleanup');
           fixStripped++;
         } else {
           fixSkipped++;
@@ -3893,9 +3907,10 @@ This challenge expires in 60 seconds.`)
       .setColor('#8B0000')
       .setTitle('🔧 Fix Roles Complete')
       .setDescription(
-        `**${fixStripped} Discord roles** stripped from member profiles.\n` +
-        `**${fixSkipped} skipped** (member left server, or role already removed).\n\n` +
-        `_Sourced from transaction log — no DB records needed._`
+        `**${fixStripped} shop roles** stripped from member profiles.\n` +
+        `**${fixSkipped} skipped** (already removed, member left, or role not found).\n` +
+        (skippedNonShop > 0 ? `**${skippedNonShop} non-shop entries untouched** (reaction/interest roles preserved).\n` : '') +
+        `\n_Only roles from the shop's master list were affected._`
       )
       .setFooter({ text: "Bully's World Admin • Recovery Complete" })
       .setTimestamp()] });
