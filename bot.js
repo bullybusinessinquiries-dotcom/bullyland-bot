@@ -3503,7 +3503,16 @@ This challenge expires in 60 seconds.`)
       ORDER BY total_bb DESC
     `).all();
 
-    const grandTotal = sources.reduce((s, r) => s + r.total_bb, 0);
+    const grossTotal = sources.reduce((s, r) => s + r.total_bb, 0);
+
+    // ── Economy rollbacks (deduct from issued total) ──────────────────────────
+    const rollbackRow = db.prepare(`
+      SELECT COALESCE(SUM(ABS(amount)), 0) as total_confiscated, COUNT(*) as tx_count
+      FROM transactions
+      WHERE reason LIKE 'economy rollback%' ${andTx}
+    `).get();
+    const rollbackConfiscated = rollbackRow?.total_confiscated ?? 0;
+    const grandTotal = grossTotal - rollbackConfiscated;
 
     // ── Daily flow ────────────────────────────────────────────────────────────
     const daily = db.prepare(`
@@ -3525,10 +3534,15 @@ This challenge expires in 60 seconds.`)
     const lastTx = db.prepare(`SELECT MAX(created_at) as ts FROM transactions ${whereTx}`).get();
 
     // ── Build embeds ──────────────────────────────────────────────────────────
-    const sourceLines = sources.map(r => {
-      const pct = grandTotal > 0 ? ((r.total_bb / grandTotal) * 100).toFixed(1) : '0.0';
-      return `\`${String(r.total_bb.toLocaleString()).padStart(7)} BB\` **${pct}%** \u2014 ${r.feature} *(${r.tx_count} txns)*`;
-    }).join('\n');
+    const sourceLines = [
+      ...sources.map(r => {
+        const pct = grossTotal > 0 ? ((r.total_bb / grossTotal) * 100).toFixed(1) : '0.0';
+        return `\`${String(r.total_bb.toLocaleString()).padStart(7)} BB\` **${pct}%** \u2014 ${r.feature} *(${r.tx_count} txns)*`;
+      }),
+      ...(rollbackConfiscated > 0
+        ? [`\`-${rollbackConfiscated.toLocaleString()} BB\` \u2014 \ud83d\udd25 Economy Rollbacks *(${rollbackRow.tx_count} txns)*`]
+        : []),
+    ].join('\n');
 
     const dailyLines = daily.length
       ? daily.map(r => {
@@ -3547,9 +3561,9 @@ This challenge expires in 60 seconds.`)
       .setTitle(`\ud83d\udcca Economy Analytics \u2014 ${rangeLabel}`)
       .addFields(
         { name: '\ud83d\udcb0 Total Wallet Supply', value: `${(totals.wallet_total || 0).toLocaleString()} BB`, inline: true },
-        { name: '\ud83d\udcc8 All-Time Issued',     value: `${(totals.all_time_earned || 0).toLocaleString()} BB`, inline: true },
+        { name: '\ud83d\udcc8 Net BB Issued',        value: `${grandTotal.toLocaleString()} BB`, inline: true },
         { name: '\ud83d\udc65 Users Tracked',       value: `${totals.user_count}`, inline: true },
-        { name: `\ud83c\udfe6 BB Issued by Source \u2014 ${grandTotal.toLocaleString()} BB total`, value: sourceLines || '_No data._' },
+        { name: `\ud83c\udfe6 BB Issued by Source \u2014 ${grandTotal.toLocaleString()} BB net`, value: sourceLines || '_No data._' },
         { name: '\ud83c\udfc6 Top 10 Richest Members', value: richLines || '_No data._' }
       )
       .setFooter({ text: `Last transaction: ${lastTx?.ts || 'none in range'} \u2022 Bully's World Admin` })
