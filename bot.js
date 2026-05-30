@@ -4098,6 +4098,7 @@ let _heistIdCounter = 0;
 const heistChallengeState        = new Map(); // heistId → challenge phase state
 const heistDistractionListeners  = new Map(); // `channelId.userId` → listener
 const activeStealTargets         = new Set(); // target user IDs currently being stolen from (mutex)
+const activeShopBuyers           = new Set(); // user IDs mid-purchase (prevents concurrent buy race)
 let shopSelectionPending = new Map(); // userId -> waiting for shop item number
 let lotterySelectionPending = new Map(); // userId -> waiting for ticket count
 let activeDuels = new Map(); // challenged_id -> duel info
@@ -5001,6 +5002,13 @@ const _rl = new Map();
 
 // ── Shop role purchase handler ───────────────────────────────────────────────
 async function fulfillRolePurchase(interaction, userId, username, roleName, rarity, cost) {
+  // Prevent concurrent purchases from the same user bypassing the 3-slot equip limit
+  if (activeShopBuyers.has(userId)) {
+    await interaction.reply({ content: '⏳ Your previous purchase is still processing. Try again in a moment.', ephemeral: true });
+    return;
+  }
+  activeShopBuyers.add(userId);
+  try {
   // Check if already owned
   if (ownsRole(userId, roleName)) {
     await interaction.reply({ content: `You already own **${roleName}**! Check your **!inventory**.`, ephemeral: true });
@@ -5017,7 +5025,7 @@ async function fulfillRolePurchase(interaction, userId, username, roleName, rari
   // Add to inventory
   addToInventory(userId, roleName, rarity);
 
-  // Auto-equip if slot available
+  // Auto-equip if slot available — re-read equipped count inside lock to prevent race
   const guild = await client.guilds.fetch(CONFIG.GUILD_ID);
   const mem = await guild.members.fetch(userId).catch(() => null);
   const equipped = getEquippedRoles(userId);
@@ -5042,6 +5050,9 @@ async function fulfillRolePurchase(interaction, userId, username, roleName, rari
     ],
     ephemeral: true
   });
+  } finally {
+    activeShopBuyers.delete(userId); // Release purchase lock
+  }
 }
 
 // !shop — handled in main message handler above
