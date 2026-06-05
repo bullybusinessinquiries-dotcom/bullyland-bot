@@ -12,7 +12,7 @@ const { GoogleSpreadsheet } = require('google-spreadsheet');
 const { JWT } = require('google-auth-library');
 const schedule = require('node-schedule');
 
-const { Client, GatewayIntentBits, EmbedBuilder, PermissionsBitField, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType, StringSelectMenuBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, PermissionsBitField, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType, StringSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle } = require('discord.js');
 const initRadio = require('./radio');
 const client = new Client({
   intents: [
@@ -5390,61 +5390,27 @@ client.on('interactionCreate', async interaction => {
       return;
     }
     const approvalId = parseInt(interaction.customId.split('.')[1], 10);
-    const approval = _pendingAnnouncementApprovals.get(approvalId);
-    if (!approval) {
+    if (!_pendingAnnouncementApprovals.has(approvalId)) {
       await interaction.update({ embeds: [EmbedBuilder.from(interaction.message.embeds[0]).setColor('#808080').setTitle('📢 Announcement Request — Already Handled')], components: [] });
       return;
     }
-    _pendingAnnouncementApprovals.delete(approvalId);
-    const { session, modId, modUsername, payload, postNow, postAt } = approval;
     const isApprove = interaction.customId.startsWith('announce_approve.');
-
-    if (!isApprove) {
-      // ── Denied ──
-      await interaction.update({
-        embeds: [EmbedBuilder.from(interaction.message.embeds[0]).setColor('#8B0000').setTitle('📢 Announcement — ❌ DENIED').setFooter({ text: `Denied by ${interaction.user.username} • Approval ID #${approvalId}` })],
-        components: [],
-      });
-      try {
-        const mod = await client.users.fetch(modId);
-        await mod.send({ embeds: [new EmbedBuilder().setColor('#8B0000').setTitle('❌ Announcement Denied')
-          .setDescription(`Your announcement was **denied** by the admin.\n\n**Message preview:**\n> ${session.text.slice(0, 300)}${session.text.length > 300 ? '…' : ''}`)
-          .setFooter({ text: "Bully's World" }).setTimestamp()] });
-      } catch (_) {}
-      return;
-    }
-
-    // ── Approved ──
-    const announceCh = await client.channels.fetch(session.channelId).catch(() => null);
-    if (!announceCh) {
-      await interaction.update({ embeds: [EmbedBuilder.from(interaction.message.embeds[0]).setColor('#808080').setTitle('📢 Announcement — ⚠️ Channel Not Found')], components: [] });
-      return;
-    }
-
-    let confirmMsg;
-    if (postNow || !postAt || postAt <= new Date()) {
-      await announceCh.send(payload);
-      confirmMsg = `✅ Posted immediately in <#${session.channelId}>.`;
-    } else {
-      const queuedId = scheduleAnnouncement(session.text, postAt, session.mention || '', session.channelId, session.format);
-      const unix = Math.floor(postAt.getTime() / 1000);
-      confirmMsg = `✅ Scheduled as **#${queuedId}** for <t:${unix}:F> (<t:${unix}:R>) in <#${session.channelId}>.`;
-    }
-
-    await interaction.update({
-      embeds: [EmbedBuilder.from(interaction.message.embeds[0]).setColor('#2ecc71').setTitle('📢 Announcement — ✅ APPROVED').setFooter({ text: `Approved by ${interaction.user.username} • Approval ID #${approvalId}` })],
-      components: [],
-    });
-    await interaction.followUp({ content: confirmMsg, ephemeral: true });
-
-    // Notify mod
-    try {
-      const mod = await client.users.fetch(modId);
-      const ts = !postNow && postAt && postAt > new Date() ? `scheduled for <t:${Math.floor(postAt.getTime()/1000)}:F>` : 'posted';
-      await mod.send({ embeds: [new EmbedBuilder().setColor('#2ecc71').setTitle('✅ Announcement Approved')
-        .setDescription(`Your announcement was **approved** and has been ${ts}.\n\n**Channel:** <#${session.channelId}>\n\n**Message:**\n> ${session.text.slice(0, 300)}${session.text.length > 300 ? '…' : ''}`)
-        .setFooter({ text: "Bully's World" }).setTimestamp()] });
-    } catch (_) {}
+    // Show a modal so the owner can optionally leave a note
+    const modal = new ModalBuilder()
+      .setCustomId(`announce_note.${isApprove ? 'approve' : 'deny'}.${approvalId}`)
+      .setTitle(isApprove ? '✅ Approve Announcement' : '❌ Deny Announcement')
+      .addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId('note')
+            .setLabel('Note for the mod (optional)')
+            .setStyle(TextInputStyle.Paragraph)
+            .setPlaceholder(isApprove ? 'e.g. "Looks good, posted!"' : 'e.g. "Too promotional, rewrite and resubmit."')
+            .setRequired(false)
+            .setMaxLength(500)
+        )
+      );
+    await interaction.showModal(modal);
     return;
   }
 
@@ -8868,6 +8834,90 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 process.on('uncaughtException', err => {
   console.error('[Process] Uncaught exception (handled — bot stays up):', err.message);
+});
+
+// ── Announcement approval modal submit ───────────────────────────────────────
+client.on('interactionCreate', async interaction => {
+  if (!interaction.isModalSubmit()) return;
+  if (!interaction.customId.startsWith('announce_note.')) return;
+
+  const [, decision, idStr] = interaction.customId.split('.');
+  const approvalId = parseInt(idStr, 10);
+  const note = interaction.fields.getTextInputValue('note')?.trim() || '';
+  const isApprove = decision === 'approve';
+
+  const approval = _pendingAnnouncementApprovals.get(approvalId);
+  if (!approval) {
+    await interaction.reply({ content: '❌ This request has already been handled or expired.', ephemeral: true });
+    return;
+  }
+  _pendingAnnouncementApprovals.delete(approvalId);
+  const { session, modId, payload, postNow, postAt } = approval;
+
+  if (!isApprove) {
+    // ── Denied ──
+    await interaction.update({
+      embeds: [EmbedBuilder.from(interaction.message.embeds[0])
+        .setColor('#8B0000')
+        .setTitle('📢 Announcement — ❌ DENIED')
+        .setFooter({ text: `Denied by ${interaction.user.username} • Approval ID #${approvalId}` })],
+      components: [],
+    });
+    try {
+      const mod = await client.users.fetch(modId);
+      const deniedEmbed = new EmbedBuilder().setColor('#8B0000').setTitle('❌ Announcement Denied')
+        .setDescription(
+          `Your announcement was **denied** by the admin.` +
+          (note ? `\n\n**Admin note:** ${note}` : '') +
+          `\n\n**Your message:**\n> ${session.text.slice(0, 300)}${session.text.length > 300 ? '…' : ''}`
+        )
+        .setFooter({ text: "Bully's World" }).setTimestamp();
+      await mod.send({ embeds: [deniedEmbed] });
+    } catch (_) {}
+    return;
+  }
+
+  // ── Approved ──
+  const announceCh = await client.channels.fetch(session.channelId).catch(() => null);
+  if (!announceCh) {
+    await interaction.reply({ content: '❌ Could not fetch the target channel. Announcement could not be posted.', ephemeral: true });
+    return;
+  }
+
+  let confirmMsg;
+  if (postNow || !postAt || postAt <= new Date()) {
+    await announceCh.send(payload);
+    confirmMsg = `✅ Posted immediately in <#${session.channelId}>.`;
+  } else {
+    const queuedId = scheduleAnnouncement(session.text, postAt, session.mention || '', session.channelId, session.format);
+    const unix = Math.floor(postAt.getTime() / 1000);
+    confirmMsg = `✅ Scheduled as **#${queuedId}** for <t:${unix}:F> (<t:${unix}:R>) in <#${session.channelId}>.`;
+  }
+
+  await interaction.update({
+    embeds: [EmbedBuilder.from(interaction.message.embeds[0])
+      .setColor('#2ecc71')
+      .setTitle('📢 Announcement — ✅ APPROVED')
+      .setFooter({ text: `Approved by ${interaction.user.username} • Approval ID #${approvalId}` })],
+    components: [],
+  });
+  await interaction.followUp({ content: confirmMsg, ephemeral: true });
+
+  // Notify mod
+  try {
+    const mod = await client.users.fetch(modId);
+    const ts = !postNow && postAt && postAt > new Date()
+      ? `scheduled for <t:${Math.floor(postAt.getTime() / 1000)}:F>`
+      : 'posted';
+    const approvedEmbed = new EmbedBuilder().setColor('#2ecc71').setTitle('✅ Announcement Approved')
+      .setDescription(
+        `Your announcement was **approved** and has been ${ts}.` +
+        (note ? `\n\n**Admin note:** ${note}` : '') +
+        `\n\n**Channel:** <#${session.channelId}>\n\n**Your message:**\n> ${session.text.slice(0, 300)}${session.text.length > 300 ? '…' : ''}`
+      )
+      .setFooter({ text: "Bully's World" }).setTimestamp();
+    await mod.send({ embeds: [approvedEmbed] });
+  } catch (_) {}
 });
 
 client.login(process.env.DISCORD_TOKEN);
