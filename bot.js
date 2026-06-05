@@ -7234,8 +7234,9 @@ client.on('messageCreate', async msg => {
         }
       }
 
-      // ── Admin: post or schedule directly ────────────────────────────────────
-      if (session.isAdmin) {
+      // ── Admin: post or schedule directly (double-check at execution time) ──
+      const isAdminNow = msg.author.id === process.env.OWNER_ID || msg.member?.permissions?.has(PermissionsBitField.Flags.Administrator);
+      if (session.isAdmin || isAdminNow) {
         _pendingAnnouncements.delete(msg.author.id);
         if (lower === 'now') {
           await announceCh.send(payload);
