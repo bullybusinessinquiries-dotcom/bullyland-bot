@@ -5383,6 +5383,71 @@ client.on('interactionCreate', async interaction => {
 client.on('interactionCreate', async interaction => {
   if (!interaction.isButton()) return;
 
+  // ── Announcement approval (fired in owner DMs) ──────────────────────────────
+  if (interaction.customId.startsWith('announce_approve.') || interaction.customId.startsWith('announce_deny.')) {
+    if (interaction.user.id !== process.env.OWNER_ID) {
+      await interaction.reply({ content: '❌ Only the server owner can approve announcements.', ephemeral: true });
+      return;
+    }
+    const approvalId = parseInt(interaction.customId.split('.')[1], 10);
+    const approval = _pendingAnnouncementApprovals.get(approvalId);
+    if (!approval) {
+      await interaction.update({ embeds: [EmbedBuilder.from(interaction.message.embeds[0]).setColor('#808080').setTitle('📢 Announcement Request — Already Handled')], components: [] });
+      return;
+    }
+    _pendingAnnouncementApprovals.delete(approvalId);
+    const { session, modId, modUsername, payload, postNow, postAt } = approval;
+    const isApprove = interaction.customId.startsWith('announce_approve.');
+
+    if (!isApprove) {
+      // ── Denied ──
+      await interaction.update({
+        embeds: [EmbedBuilder.from(interaction.message.embeds[0]).setColor('#8B0000').setTitle('📢 Announcement — ❌ DENIED').setFooter({ text: `Denied by ${interaction.user.username} • Approval ID #${approvalId}` })],
+        components: [],
+      });
+      try {
+        const mod = await client.users.fetch(modId);
+        await mod.send({ embeds: [new EmbedBuilder().setColor('#8B0000').setTitle('❌ Announcement Denied')
+          .setDescription(`Your announcement was **denied** by the admin.\n\n**Message preview:**\n> ${session.text.slice(0, 300)}${session.text.length > 300 ? '…' : ''}`)
+          .setFooter({ text: "Bully's World" }).setTimestamp()] });
+      } catch (_) {}
+      return;
+    }
+
+    // ── Approved ──
+    const announceCh = await client.channels.fetch(session.channelId).catch(() => null);
+    if (!announceCh) {
+      await interaction.update({ embeds: [EmbedBuilder.from(interaction.message.embeds[0]).setColor('#808080').setTitle('📢 Announcement — ⚠️ Channel Not Found')], components: [] });
+      return;
+    }
+
+    let confirmMsg;
+    if (postNow || !postAt || postAt <= new Date()) {
+      await announceCh.send(payload);
+      confirmMsg = `✅ Posted immediately in <#${session.channelId}>.`;
+    } else {
+      const queuedId = scheduleAnnouncement(session.text, postAt, session.mention || '', session.channelId, session.format);
+      const unix = Math.floor(postAt.getTime() / 1000);
+      confirmMsg = `✅ Scheduled as **#${queuedId}** for <t:${unix}:F> (<t:${unix}:R>) in <#${session.channelId}>.`;
+    }
+
+    await interaction.update({
+      embeds: [EmbedBuilder.from(interaction.message.embeds[0]).setColor('#2ecc71').setTitle('📢 Announcement — ✅ APPROVED').setFooter({ text: `Approved by ${interaction.user.username} • Approval ID #${approvalId}` })],
+      components: [],
+    });
+    await interaction.followUp({ content: confirmMsg, ephemeral: true });
+
+    // Notify mod
+    try {
+      const mod = await client.users.fetch(modId);
+      const ts = !postNow && postAt && postAt > new Date() ? `scheduled for <t:${Math.floor(postAt.getTime()/1000)}:F>` : 'posted';
+      await mod.send({ embeds: [new EmbedBuilder().setColor('#2ecc71').setTitle('✅ Announcement Approved')
+        .setDescription(`Your announcement was **approved** and has been ${ts}.\n\n**Channel:** <#${session.channelId}>\n\n**Message:**\n> ${session.text.slice(0, 300)}${session.text.length > 300 ? '…' : ''}`)
+        .setFooter({ text: "Bully's World" }).setTimestamp()] });
+    } catch (_) {}
+    return;
+  }
+
   // ── Neighborhood Watch buttons bypass testing mode (DM interactions have no member) ──
   // ── Game Controller toggle ───────────────────────────────────────────────────
   if (interaction.customId.startsWith('gc_toggle.')) {
@@ -6943,10 +7008,12 @@ Click **BLOCK IT** within **${windowSecs} seconds**!`).setFooter({ text: "Bully'
 // ANNOUNCEMENT SYSTEM
 // ============================================================================
 const ANNOUNCEMENT_CHANNEL_ID = process.env.CHANNEL_ANNOUNCEMENTS || '1353949538393526283';
-const _pendingAnnouncements  = new Map(); // userId → { state, text, timer }
+const _pendingAnnouncements  = new Map(); // userId → { state, text, timer, isAdmin }
 const _pendingAuctionSetups  = new Map(); // userId → { state, imageUrl, title, scheduledStart, timer }
 const _announcementQueue = []; // { id, text, postAt, timeoutHandle }
 let _announcementNextId = 1;
+const _pendingAnnouncementApprovals = new Map(); // approvalId → { session, modId, modUsername, postNow, postAt }
+let _announcementApprovalNextId = 1;
 
 function scheduleAnnouncement(text, postAt, mention, channelId = ANNOUNCEMENT_CHANNEL_ID, format = 'embed') {
   const id = _announcementNextId++;
@@ -7029,9 +7096,19 @@ function scheduleDMBlast(text, recipientIds, recipientLabel, adminId, postAt) {
 client.on('messageCreate', async msg => {
   if (msg.author?.bot || !msg.guild) return;
   const isAdmin = msg.author.id === process.env.OWNER_ID || msg.member?.permissions?.has(PermissionsBitField.Flags.Administrator);
-  if (!isAdmin) return;
+  const isMod = !isAdmin && (
+    msg.member?.permissions?.has(PermissionsBitField.Flags.ManageMessages) ||
+    (process.env.ROLE_MOD && msg.member?.roles?.cache?.has(process.env.ROLE_MOD))
+  );
+  if (!isAdmin && !isMod) return;
   const content = msg.content.trim();
   const lower = content.toLowerCase();
+  // Mods may only use the announcement flow
+  if (isMod) {
+    const isAnnouncementRelated = lower === '!announcement' ||
+      (_pendingAnnouncements.has(msg.author.id) && !lower.startsWith('!'));
+    if (!isAnnouncementRelated) return;
+  }
 
   // ── Announcement flow — capture mid-session replies before command checks ──
   if (_pendingAnnouncements.has(msg.author.id) && !lower.startsWith('!')) {
@@ -7146,24 +7223,81 @@ client.on('messageCreate', async msg => {
         ? { content: mention || null, embeds: [buildEmbed(session.text)] }
         : { content: mention ? `${mention}\n\n${session.text}` : session.text };
 
-      if (lower === 'now') {
-        _pendingAnnouncements.delete(msg.author.id);
-        await announceCh.send(payload);
-        await msg.reply(`✅ Announcement posted in <#${session.channelId}>!`);
-      } else {
-        const postAt = parseShutdownTime(lower);
+      // ── Validate time first (applies to both admin and mod paths) ──
+      let postAt = null;
+      if (lower !== 'now') {
+        postAt = parseShutdownTime(lower);
         if (!postAt) {
           resetTimer();
           await msg.reply("❌ Couldn't parse that time. Try **`now`**, **`6:00pm`**, or **`14:30`**. Or type **`cancel`** to abort.");
           return;
         }
+      }
+
+      // ── Admin: post or schedule directly ────────────────────────────────────
+      if (session.isAdmin) {
         _pendingAnnouncements.delete(msg.author.id);
-        const unix = Math.floor(postAt.getTime() / 1000);
-        const queuedId = scheduleAnnouncement(session.text, postAt, mention, session.channelId, session.format);
-        await msg.reply(
-          `✅ Announcement **#${queuedId}** queued for <t:${unix}:F> (<t:${unix}:R>) in <#${session.channelId}>.\n` +
-          `Use \`!announcementqueue\` to view all queued, or \`!cancelannouncement ${queuedId}\` to remove it.`
-        );
+        if (lower === 'now') {
+          await announceCh.send(payload);
+          await msg.reply(`✅ Announcement posted in <#${session.channelId}>!`);
+        } else {
+          const unix = Math.floor(postAt.getTime() / 1000);
+          const queuedId = scheduleAnnouncement(session.text, postAt, mention, session.channelId, session.format);
+          await msg.reply(
+            `✅ Announcement **#${queuedId}** queued for <t:${unix}:F> (<t:${unix}:R>) in <#${session.channelId}>.\n` +
+            `Use \`!announcementqueue\` to view all queued, or \`!cancelannouncement ${queuedId}\` to remove it.`
+          );
+        }
+        return;
+      }
+
+      // ── Mod: submit for owner approval ──────────────────────────────────────
+      _pendingAnnouncements.delete(msg.author.id);
+      const approvalId = _announcementApprovalNextId++;
+      _pendingAnnouncementApprovals.set(approvalId, {
+        session: { ...session },
+        modId:       msg.author.id,
+        modUsername: msg.author.username,
+        payload,
+        postNow: lower === 'now',
+        postAt,
+      });
+
+      const owner = await client.users.fetch(CONFIG.OWNER_ID).catch(() => null);
+      if (!owner) {
+        await msg.reply('❌ Could not reach the admin to request approval. Try again later.');
+        return;
+      }
+
+      const previewText = session.text.length > 800 ? session.text.slice(0, 800) + '…' : session.text;
+      const timeDisplay = lower === 'now'
+        ? 'Immediately (post now)'
+        : `<t:${Math.floor(postAt.getTime() / 1000)}:F> (<t:${Math.floor(postAt.getTime() / 1000)}:R>)`;
+
+      const approvalEmbed = new EmbedBuilder()
+        .setColor('#f0a500')
+        .setTitle('📢 Announcement Approval Request')
+        .addFields(
+          { name: '👤 Submitted by',  value: `<@${msg.author.id}> (${msg.author.username})`, inline: true },
+          { name: '📡 Channel',       value: `<#${session.channelId}>`,                      inline: true },
+          { name: '🎨 Format',        value: session.format,                                 inline: true },
+          { name: '🔔 Mention',       value: session.mention || 'None',                      inline: true },
+          { name: '⏰ Post Time',     value: timeDisplay,                                    inline: true },
+          { name: '📝 Message',       value: previewText },
+        )
+        .setFooter({ text: `Approval ID #${approvalId} • Approve or deny below` })
+        .setTimestamp();
+
+      const approvalRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`announce_approve.${approvalId}`).setLabel('✅ Approve').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId(`announce_deny.${approvalId}`).setLabel('❌ Deny').setStyle(ButtonStyle.Danger),
+      );
+
+      try {
+        await owner.send({ embeds: [approvalEmbed], components: [approvalRow] });
+        await msg.reply('⏳ Your announcement has been submitted for **admin approval**. You\'ll be notified once it\'s reviewed.');
+      } catch (_) {
+        await msg.reply('❌ Could not DM the admin for approval. Please contact them directly.');
       }
       return;
     }
@@ -7359,7 +7493,7 @@ client.on('messageCreate', async msg => {
       await msg.reply('📢 What would you like to announce? Type your message now.\n\nType **`cancel`** at any point to abort.');
     }
     const timer = setTimeout(() => _pendingAnnouncements.delete(msg.author.id), 5 * 60 * 1000);
-    _pendingAnnouncements.set(msg.author.id, { state: 'awaiting_text', text: null, timer });
+    _pendingAnnouncements.set(msg.author.id, { state: 'awaiting_text', text: null, timer, isAdmin });
     return;
   }
 
