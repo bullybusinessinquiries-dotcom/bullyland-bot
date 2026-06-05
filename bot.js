@@ -7093,13 +7093,27 @@ client.on('messageCreate', async msg => {
     // Step 1 — collect the message text
     if (session.state === 'awaiting_text') {
       session.text = msg.content.trim();
-      session.state = 'awaiting_channel';
-      resetTimer();
-      await msg.reply(
-        '📡 **Which channel?**\n\n' +
-        'Mention a channel (e.g. **`#announcements`**) or type **`default`** to use the default announcements channel.\n\n' +
-        'Type **`cancel`** to abort.'
-      );
+      if (!session.isAdmin) {
+        // Mods are locked to the announcements channel — skip channel picker
+        session.channelId = ANNOUNCEMENT_CHANNEL_ID;
+        session.channelName = 'announcements';
+        session.state = 'awaiting_format';
+        resetTimer();
+        await msg.reply(
+          '🎨 **What format?**\n\n' +
+          '**`embed`** — styled card with gold border and Bully\'s World footer\n' +
+          '**`plain`** — raw text, exactly as you typed it\n\n' +
+          'Type **`cancel`** to abort.'
+        );
+      } else {
+        session.state = 'awaiting_channel';
+        resetTimer();
+        await msg.reply(
+          '📡 **Which channel?**\n\n' +
+          'Mention a channel (e.g. **`#announcements`**) or type **`default`** to use the default announcements channel.\n\n' +
+          'Type **`cancel`** to abort.'
+        );
+      }
       return;
     }
 
