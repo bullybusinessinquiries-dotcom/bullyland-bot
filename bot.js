@@ -1307,6 +1307,7 @@ async function postShopEmbed(channel) {
 // Toggle with !testingmode on/off (admin only). Off by default for live use.
 let TESTING_MODE = false;
 const TESTER_ROLE_ID = '1498127933963767987';
+const MOD_ROLE_ID    = process.env.ROLE_MOD || '1357610864135503965';
 
 function hasAccess(member) {
   if (!TESTING_MODE) return true;
@@ -2426,10 +2427,7 @@ client.on('messageCreate', async(message) => {
 
   // ── Channel gate — restrict commands to designated channels ──
   const _isAdmin = message.member?.permissions.has(PermissionsBitField.Flags.Administrator) || message.author.id === process.env.OWNER_ID;
-  const _isMod = !_isAdmin && (
-    message.member?.permissions.has(PermissionsBitField.Flags.ManageMessages) ||
-    (process.env.ROLE_MOD && message.member?.roles?.cache?.has(process.env.ROLE_MOD))
-  );
+  const _isMod = !_isAdmin && message.member?.roles?.cache?.has(MOD_ROLE_ID);
   // Mods bypass the channel gate only for !announcement (their only allowed command)
   const _modAnnouncementBypass = _isMod && content.toLowerCase() === '!announcement';
   if (content.startsWith('!') && !_isAdmin && !_modAnnouncementBypass) {
@@ -7068,10 +7066,7 @@ function scheduleDMBlast(text, recipientIds, recipientLabel, adminId, postAt) {
 client.on('messageCreate', async msg => {
   if (msg.author?.bot || !msg.guild) return;
   const isAdmin = msg.author.id === process.env.OWNER_ID || msg.member?.permissions?.has(PermissionsBitField.Flags.Administrator);
-  const isMod = !isAdmin && (
-    msg.member?.permissions?.has(PermissionsBitField.Flags.ManageMessages) ||
-    (process.env.ROLE_MOD && msg.member?.roles?.cache?.has(process.env.ROLE_MOD))
-  );
+  const isMod = !isAdmin && msg.member?.roles?.cache?.has(MOD_ROLE_ID);
   if (!isAdmin && !isMod) return;
   const content = msg.content.trim();
   const lower = content.toLowerCase();
