@@ -2425,8 +2425,14 @@ client.on('messageCreate', async(message) => {
   }
 
   // ── Channel gate — restrict commands to designated channels ──
-  const _isAdmin = message.member?.permissions.has(PermissionsBitField.Flags.Administrator);
-  if (content.startsWith('!') && !_isAdmin) {
+  const _isAdmin = message.member?.permissions.has(PermissionsBitField.Flags.Administrator) || message.author.id === process.env.OWNER_ID;
+  const _isMod = !_isAdmin && (
+    message.member?.permissions.has(PermissionsBitField.Flags.ManageMessages) ||
+    (process.env.ROLE_MOD && message.member?.roles?.cache?.has(process.env.ROLE_MOD))
+  );
+  // Mods bypass the channel gate only for !announcement (their only allowed command)
+  const _modAnnouncementBypass = _isMod && content.toLowerCase() === '!announcement';
+  if (content.startsWith('!') && !_isAdmin && !_modAnnouncementBypass) {
     const cid = message.channelId;
     const inGameChannel = cid === CONFIG.CHANNELS.GAMES || cid === CONFIG.CHANNELS.GAMES_2;
     const inLobby = cid === CONFIG.CHANNELS.GENERAL;
