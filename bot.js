@@ -14,6 +14,7 @@ const schedule = require('node-schedule');
 
 const { Client, GatewayIntentBits, EmbedBuilder, PermissionsBitField, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType, StringSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle } = require('discord.js');
 const initRadio = require('./radio');
+const fyp = require('./fyp');
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -22,7 +23,8 @@ const client = new Client({
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.DirectMessages,
     GatewayIntentBits.GuildMessageReactions,
-    GatewayIntentBits.GuildVoiceStates, // required for @discordjs/voice
+    GatewayIntentBits.GuildVoiceStates,      // required for @discordjs/voice
+    GatewayIntentBits.GuildScheduledEvents,  // required for FYP event posts
   ],
   partials: [Partials.Message, Partials.Channel, Partials.Reaction],
 });
@@ -1560,6 +1562,7 @@ client.on('messageCreate', async(message) => {
 client.on('messageReactionAdd', async (reaction, user) => {
   if (user.bot) return;
   await dailyQ.handleReaction(reaction, user).catch(() => {});
+  fyp.handleReaction(reaction, user);
   if (!activeChest) return;
   if (reaction.message.id !== activeChest.messageId) return;
   if (reaction.emoji.name !== '🧡') return;
@@ -1634,6 +1637,7 @@ client.on('guildMemberAdd', async(member) => {
       .setTimestamp();
     await member.send({ embeds: [embed] });
   } catch { console.log(`[Welcome DM] Could not DM ${member.user.username}`); }
+  fyp.postNewMember(member).catch(() => {});
 });
 
 // ─── LEVEL-UP REWARDS — auto-DM when Lurkr assigns a new level role ──────────
@@ -1745,6 +1749,7 @@ client.on('guildMemberUpdate', async (oldMember, newMember) => {
         addBB(newMember.id, newMember.user.username, BOOSTER_WEEKLY_BB, 'Booster Club — first week reward');
         db.prepare('INSERT OR IGNORE INTO booster_payouts (user_id, week) VALUES (?, ?)').run(newMember.id, week);
         await sendBoosterPaycheck(newMember, true);
+        fyp.postServerBoost(newMember).catch(() => {});
         console.log(`[Booster] New booster: ${newMember.user.username} — paid ${BOOSTER_WEEKLY_BB} BB`);
       }
     }
@@ -4544,6 +4549,7 @@ async function runLottery() {
   const winner = pool[Math.floor(Math.random() * pool.length)];
   const totalPot = entries.reduce((sum, e) => sum + e.tickets * 30, 0);
   addBB(winner.userId, winner.username, totalPot, 'lottery winner');
+  fyp.postLotteryWinner(winner, totalPot).catch(() => {});
   const channel = await client.channels.fetch(CONFIG.CHANNELS.GENERAL).catch(()=>null);
   if (channel) {
     const embed = new EmbedBuilder().setColor('#FFD700').setTitle('🎟️ WEEKLY LOTTERY WINNER!')
@@ -4845,6 +4851,9 @@ client.once('ready', async()=>{
   initRadio(client).catch(err => {
     console.error('[Radio] Fatal init error:', err.message);
   });
+
+  // ── Bullyland FYP feed ─────────────────────────────────────────────────────
+  fyp.initFYP(client, db, process.env.CHANNEL_FYP);
 
   // ── Register Stripe payment webhook callback ────────────────────────────────
   // Called by dashboard.js when a checkout.session.completed event is received
@@ -8933,6 +8942,93 @@ client.on('interactionCreate', async interaction => {
       .setFooter({ text: "Bully's World" }).setTimestamp();
     await mod.send({ embeds: [approvedEmbed] });
   } catch (_) {}
+});
+
+// ─── FYP DIAGNOSTIC ───────────────────────────────────────────────────────────
+// !fypcheck — replies with raw diagnostic info, no admin check, works anywhere
+client.on('messageCreate', async msg => {
+  if (msg.author.bot || !msg.guild) return;
+  if (msg.content.trim().toLowerCase() !== '!fypcheck') return;
+
+  const channelId = process.env.CHANNEL_FYP;
+  let lines = [`**CHANNEL_FYP env var:** \`${channelId ?? 'NOT SET'}\``];
+
+  if (channelId) {
+    const ch = await client.channels.fetch(channelId).catch(e => e);
+    if (ch instanceof Error) {
+      lines.push(`**Fetch result:** ❌ \`${ch.message}\``);
+    } else if (!ch) {
+      lines.push(`**Fetch result:** ❌ null (channel not found)`);
+    } else {
+      lines.push(`**Fetch result:** ✅ found — \`#${ch.name}\``);
+      const testMsg = await ch.send('FYP diagnostic test — delete me').catch(e => e);
+      if (testMsg instanceof Error) {
+        lines.push(`**Send test:** ❌ \`${testMsg.message}\``);
+      } else {
+        lines.push(`**Send test:** ✅ message posted`);
+        setTimeout(() => testMsg.delete().catch(() => {}), 5000);
+      }
+    }
+  }
+
+  await msg.reply(lines.join('\n')).catch(() => {});
+});
+
+// ─── FYP ADMIN COMMANDS ───────────────────────────────────────────────────────
+// Standalone handler so it bypasses all channel gates and the nested admin blocks above.
+// Works for: the server owner (OWNER_ID) or anyone with Administrator permission.
+client.on('messageCreate', async msg => {
+  if (msg.author.bot || !msg.guild) return;
+  if (!msg.content.toLowerCase().startsWith('!fyp')) return;
+
+  const isOwner = msg.author.id === process.env.OWNER_ID;
+  const isAdmin = msg.member?.permissions?.has(PermissionsBitField.Flags.Administrator);
+  if (!isOwner && !isAdmin) return;
+
+  const parts = msg.content.trim().split(/\s+/);
+  const sub   = (parts[1] || '').toLowerCase();
+
+  const wrap = fn => fn().catch(e => {
+    console.error('[FYP CMD] Error:', e.message);
+    msg.reply(`❌ FYP error: ${e.message}`).catch(() => {});
+  });
+
+  if (!sub) {
+    return msg.reply(
+      '**FYP Commands**\n' +
+      '`!fyp feed` — post a feed card now\n' +
+      '`!fyp poll` — post a poll now\n' +
+      '`!fyp radio` — post a radio card now\n' +
+      '`!fyp dailyq` — post today\'s most agreed response\n' +
+      '`!fyp seed` — post one of each (feed + poll + radio)\n' +
+      '`!fyp status` — show channel info and active post count'
+    );
+  }
+
+  if (sub === 'feed') {
+    await msg.react('✅').catch(() => {});
+    await wrap(() => fyp._postFeedPost());
+  } else if (sub === 'poll') {
+    await msg.react('✅').catch(() => {});
+    await wrap(() => fyp._postPoll());
+  } else if (sub === 'radio') {
+    await msg.react('✅').catch(() => {});
+    await wrap(() => fyp._postRadioNowPlaying());
+  } else if (sub === 'dailyq') {
+    await msg.react('✅').catch(() => {});
+    await wrap(() => fyp._postDailyQResult());
+  } else if (sub === 'seed') {
+    await msg.react('✅').catch(() => {});
+    await wrap(() => fyp._postFeedPost());
+    await new Promise(r => setTimeout(r, 1500));
+    await wrap(() => fyp._postPoll());
+    await new Promise(r => setTimeout(r, 1500));
+    await wrap(() => fyp._postRadioNowPlaying());
+  } else if (sub === 'status') {
+    await fyp._status(msg);
+  } else {
+    await msg.reply(`Unknown subcommand \`${sub}\`. Type \`!fyp\` to see options.`);
+  }
 });
 
 client.login(process.env.DISCORD_TOKEN);
