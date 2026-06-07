@@ -279,6 +279,7 @@ const CONFIG = {
     GAMES:            process.env.CHANNEL_GAMES,
     GAMES_2:          process.env.CHANNEL_GAMES_2,
     TESTING:          '1492228049272438834',
+    FYP:              process.env.CHANNEL_FYP || '1490068501736587335',
   },
 
   ROLES: {
@@ -4853,7 +4854,7 @@ client.once('ready', async()=>{
   });
 
   // ── Bullyland FYP feed ─────────────────────────────────────────────────────
-  fyp.initFYP(client, db, process.env.CHANNEL_FYP);
+  fyp.initFYP(client, db, CONFIG.CHANNELS.FYP);
 
   // ── Register Stripe payment webhook callback ────────────────────────────────
   // Called by dashboard.js when a checkout.session.completed event is received
@@ -8950,8 +8951,8 @@ client.on('messageCreate', async msg => {
   if (msg.author.bot || !msg.guild) return;
   if (msg.content.trim().toLowerCase() !== '!fypcheck') return;
 
-  const channelId = process.env.CHANNEL_FYP;
-  let lines = [`**CHANNEL_FYP env var:** \`${channelId ?? 'NOT SET'}\``];
+  const channelId = CONFIG.CHANNELS.FYP;
+  let lines = [`**FYP channel ID:** \`${channelId ?? 'NOT SET'}\``];
 
   if (channelId) {
     const ch = await client.channels.fetch(channelId).catch(e => e);
