@@ -7026,14 +7026,17 @@ function scheduleAnnouncement(text, postAt, mention, channelId = ANNOUNCEMENT_CH
     ).run(id, text, postAt.toISOString(), mention || '', channelId, format);
   }
 
-  // node-schedule handles arbitrarily-far-future dates safely (no 32-bit overflow)
+  // node-schedule handles arbitrarily-far-future dates safely (no 32-bit overflow).
+  // RULE: scheduled data must NEVER be lost on redeploy. Always persist first, send then delete.
   const job = schedule.scheduleJob(postAt, async () => {
+    const ch = await client.channels.fetch(channelId).catch(() => null);
+    if (ch) await ch.send(_buildAnnouncementPayload(text, mention, format)).catch(err => {
+      console.error(`[Announcements] Failed to send announcement #${id}:`, err);
+    });
+    // Only remove from DB and queue AFTER a successful (or attempted) send — never before
     db.prepare('DELETE FROM scheduled_announcements WHERE id = ?').run(id);
     const idx = _announcementQueue.findIndex(a => a.id === id);
     if (idx !== -1) _announcementQueue.splice(idx, 1);
-    const ch = await client.channels.fetch(channelId).catch(() => null);
-    if (!ch) return;
-    await ch.send(_buildAnnouncementPayload(text, mention, format));
   });
 
   _announcementQueue.push({ id, text, postAt, mention, channelId, format, job });
