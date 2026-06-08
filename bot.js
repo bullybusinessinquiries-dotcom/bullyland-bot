@@ -7003,6 +7003,42 @@ const _announcementQueue = []; // { id, text, postAt, mention, channelId, format
 const _pendingAnnouncementApprovals = new Map(); // approvalId → { session, modId, modUsername, postNow, postAt }
 let _announcementApprovalNextId = 1;
 
+// ── Announcement dropdown builders ───────────────────────────────────────────
+function _buildFormatDropdown(userId) {
+  const row = new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId(`ann_format.${userId}`)
+      .setPlaceholder('Pick a format...')
+      .addOptions([
+        { label: '🖼️ Embed', value: 'embed', description: 'Styled card with gold border and Bully\'s World footer' },
+        { label: '💬 Plain Text', value: 'plain', description: 'Raw text, exactly as you typed it' },
+      ])
+  );
+  return { content: '🎨 **What format should this use?**', components: [row] };
+}
+
+async function _buildMentionDropdown(userId, guild) {
+  // Fetch roles — filter out @everyone and bot-managed roles, cap at 23 (leaving room for @everyone + @here + none)
+  await guild.roles.fetch();
+  const roles = guild.roles.cache
+    .filter(r => r.id !== guild.id && !r.managed && r.mentionable)
+    .sort((a, b) => b.position - a.position)
+    .first(23);
+  const options = [
+    { label: '@everyone', value: '@everyone', description: 'Ping every member in the server' },
+    { label: '@here', value: '@here', description: 'Ping all online members' },
+    { label: 'No ping', value: 'none', description: 'Post without mentioning anyone' },
+    ...roles.map(r => ({ label: `@${r.name}`, value: `<@&${r.id}>`, description: `Ping the ${r.name} role` })),
+  ];
+  const row = new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId(`ann_mention.${userId}`)
+      .setPlaceholder('Pick who to mention...')
+      .addOptions(options)
+  );
+  return { content: '🔔 **Who should be mentioned?**', components: [row] };
+}
+
 function _buildAnnouncementPayload(text, mention, format) {
   const buildEmbed = (t) => new EmbedBuilder().setColor('#c9a84c').setTitle('📢 Announcement')
     .setDescription(t).setFooter({ text: "Bully's World" }).setTimestamp();
@@ -7154,98 +7190,37 @@ client.on('messageCreate', async msg => {
     if (session.state === 'awaiting_text') {
       session.text = msg.content.trim();
       if (!session.isAdmin) {
-        // Mods are locked to the announcements channel — skip channel picker
+        // Mods are locked to the announcements channel — skip channel picker, go straight to format dropdown
         session.channelId = ANNOUNCEMENT_CHANNEL_ID;
         session.channelName = 'announcements';
         session.state = 'awaiting_format';
         resetTimer();
-        await msg.reply(
-          '🎨 **What format?**\n\n' +
-          '**`embed`** — styled card with gold border and Bully\'s World footer\n' +
-          '**`plain`** — raw text, exactly as you typed it\n\n' +
-          'Type **`cancel`** to abort.'
-        );
+        await msg.reply(_buildFormatDropdown(msg.author.id));
       } else {
         session.state = 'awaiting_channel';
         resetTimer();
-        await msg.reply(
-          '📡 **Which channel?**\n\n' +
-          'Mention a channel (e.g. **`#announcements`**) or type **`default`** to use the default announcements channel.\n\n' +
-          'Type **`cancel`** to abort.'
+        // Build channel dropdown from all text channels in the guild
+        const guild = msg.guild;
+        const textChannels = guild.channels.cache
+          .filter(c => c.isTextBased() && !c.isThread())
+          .sort((a, b) => a.position - b.position)
+          .first(25); // Discord select menu max
+        const options = textChannels.map(c => ({ label: `# ${c.name}`, value: c.id,
+          default: c.id === ANNOUNCEMENT_CHANNEL_ID }));
+        const row = new ActionRowBuilder().addComponents(
+          new StringSelectMenuBuilder()
+            .setCustomId(`ann_channel.${msg.author.id}`)
+            .setPlaceholder('Pick a channel...')
+            .addOptions(options)
         );
+        await msg.reply({ content: '📡 **Which channel should this post in?**', components: [row] });
       }
       return;
     }
 
-    // Step 2 — pick the target channel
-    if (session.state === 'awaiting_channel') {
-      if (lower === 'cancel') { await cancel(); return; }
-
-      let targetChannel = null;
-      if (lower === 'default') {
-        targetChannel = await client.channels.fetch(ANNOUNCEMENT_CHANNEL_ID).catch(() => null);
-      } else {
-        // Accept a channel mention (#channel) or a raw ID
-        targetChannel = msg.mentions.channels.first()
-          ?? await client.channels.fetch(msg.content.trim().replace(/[<#>]/g, '')).catch(() => null);
-      }
-
-      if (!targetChannel?.isTextBased()) {
-        resetTimer();
-        await msg.reply("❌ Couldn't find that channel. Mention a channel (e.g. **`#general`**) or type **`default`**.");
-        return;
-      }
-
-      session.channelId = targetChannel.id;
-      session.channelName = targetChannel.name;
-      session.state = 'awaiting_format';
-      resetTimer();
-      await msg.reply(
-        '🎨 **What format?**\n\n' +
-        '**`embed`** — styled card with gold border and Bully\'s World footer\n' +
-        '**`plain`** — raw text, exactly as you typed it\n\n' +
-        'Type **`cancel`** to abort.'
-      );
-      return;
-    }
-
-    // Step 3 — pick embed or plain text
-    if (session.state === 'awaiting_format') {
-      if (lower === 'cancel') { await cancel(); return; }
-
-      if (!['embed', 'e', 'plain', 'p', 'text'].includes(lower)) {
-        resetTimer();
-        await msg.reply('❌ Reply **`embed`** or **`plain`**. Type **`cancel`** to abort.');
-        return;
-      }
-
-      session.format = ['embed', 'e'].includes(lower) ? 'embed' : 'plain';
-      session.state = 'awaiting_mention';
-      resetTimer();
-      await msg.reply(
-        '🔔 **Who should be mentioned?**\n\n' +
-        'Reply **`@everyone`**, **`@here`**, a role mention, or **`none`** for no ping.\n\n' +
-        'Type **`cancel`** to abort.'
-      );
-      return;
-    }
-
-    // Step 4 — mention / ping
-    if (session.state === 'awaiting_mention') {
-      if (lower === 'cancel') { await cancel(); return; }
-      session.mention = lower === 'none' ? '' : msg.content.trim();
-      session.state = 'awaiting_time';
-      resetTimer();
-      await msg.reply(
-        '⏰ **When should this post?**\n\n' +
-        'Reply **`now`** to post immediately.\n\n' +
-        '**Same-day:** `6:00pm` or `14:30` (posts today or tomorrow if time has passed)\n' +
-        '**Specific date:** `June 20 at 6:00pm` · `Jul 4 8:30am` · `2026-12-25 9:00am`\n\n' +
-        'All times are CT.\n\n' +
-        'Type **`cancel`** to abort.'
-      );
-      return;
-    }
+    // Steps 2-4 are now handled via dropdown interactions (see interactionCreate handler below).
+    // The session states 'awaiting_channel', 'awaiting_format', 'awaiting_mention' no longer
+    // accept text replies — they wait for a select menu interaction.
 
     // Step 5 — schedule or post now
     if (session.state === 'awaiting_time') {
@@ -9077,6 +9052,76 @@ client.on('interactionCreate', async interaction => {
       .setFooter({ text: "Bully's World" }).setTimestamp();
     await mod.send({ embeds: [approvedEmbed] });
   } catch (_) {}
+});
+
+// ── Announcement dropdown interactions ───────────────────────────────────────
+client.on('interactionCreate', async interaction => {
+  if (!interaction.isStringSelectMenu()) return;
+  const { customId, values, user, guild } = interaction;
+
+  // ── Channel picker ──────────────────────────────────────────────────────────
+  if (customId.startsWith('ann_channel.')) {
+    const userId = customId.split('.')[1];
+    if (user.id !== userId) { await interaction.reply({ content: '❌ This menu isn\'t for you.', ephemeral: true }); return; }
+    const session = _pendingAnnouncements.get(userId);
+    if (!session || session.state !== 'awaiting_channel') { await interaction.update({ content: '⏰ This session expired. Type `!announcement` to start over.', components: [] }); return; }
+
+    const ch = await client.channels.fetch(values[0]).catch(() => null);
+    if (!ch?.isTextBased()) { await interaction.reply({ content: '❌ Could not find that channel. Try again.', ephemeral: true }); return; }
+
+    session.channelId = ch.id;
+    session.channelName = ch.name;
+    session.state = 'awaiting_format';
+    clearTimeout(session.timer);
+    session.timer = setTimeout(() => _pendingAnnouncements.delete(userId), 5 * 60 * 1000);
+
+    await interaction.update({ content: `✅ Channel set to <#${ch.id}>`, components: [] });
+    await interaction.followUp(_buildFormatDropdown(userId));
+    return;
+  }
+
+  // ── Format picker ───────────────────────────────────────────────────────────
+  if (customId.startsWith('ann_format.')) {
+    const userId = customId.split('.')[1];
+    if (user.id !== userId) { await interaction.reply({ content: '❌ This menu isn\'t for you.', ephemeral: true }); return; }
+    const session = _pendingAnnouncements.get(userId);
+    if (!session || session.state !== 'awaiting_format') { await interaction.update({ content: '⏰ This session expired. Type `!announcement` to start over.', components: [] }); return; }
+
+    session.format = values[0]; // 'embed' or 'plain'
+    session.state = 'awaiting_mention';
+    clearTimeout(session.timer);
+    session.timer = setTimeout(() => _pendingAnnouncements.delete(userId), 5 * 60 * 1000);
+
+    const formatLabel = session.format === 'embed' ? '🖼️ Embed' : '💬 Plain Text';
+    await interaction.update({ content: `✅ Format set to **${formatLabel}**`, components: [] });
+    await interaction.followUp(await _buildMentionDropdown(userId, guild));
+    return;
+  }
+
+  // ── Mention picker ──────────────────────────────────────────────────────────
+  if (customId.startsWith('ann_mention.')) {
+    const userId = customId.split('.')[1];
+    if (user.id !== userId) { await interaction.reply({ content: '❌ This menu isn\'t for you.', ephemeral: true }); return; }
+    const session = _pendingAnnouncements.get(userId);
+    if (!session || session.state !== 'awaiting_mention') { await interaction.update({ content: '⏰ This session expired. Type `!announcement` to start over.', components: [] }); return; }
+
+    session.mention = values[0] === 'none' ? '' : values[0];
+    session.state = 'awaiting_time';
+    clearTimeout(session.timer);
+    session.timer = setTimeout(() => _pendingAnnouncements.delete(userId), 5 * 60 * 1000);
+
+    const mentionLabel = values[0] === 'none' ? 'No ping' : values[0];
+    await interaction.update({ content: `✅ Mention set to **${mentionLabel}**`, components: [] });
+    await interaction.followUp({
+      content:
+        '⏰ **When should this post?**\n\n' +
+        'Reply **`now`** to post immediately.\n\n' +
+        '**Same-day:** `6:00pm` or `14:30` (posts today or tomorrow if time has passed)\n' +
+        '**Specific date:** `June 20 at 6:00pm` · `Jul 4 8:30am` · `2026-12-25 9:00am`\n\n' +
+        'All times are CT.\n\nType **`cancel`** to abort.',
+    });
+    return;
+  }
 });
 
 // ─── FYP DIAGNOSTIC ───────────────────────────────────────────────────────────
