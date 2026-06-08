@@ -7197,9 +7197,10 @@ client.on('messageCreate', async msg => {
         ? msg.attachments.map(a => a.url)
         : [];
       if (!session.isAdmin) {
-        // Mods are locked to the announcements channel — skip channel picker, go straight to format dropdown
-        session.channelId = ANNOUNCEMENT_CHANNEL_ID;
-        session.channelName = 'announcements';
+        // Mods post in the lobby, mention defaults to @everyone — skip channel + mention steps
+        session.channelId = CONFIG.CHANNELS.GENERAL;
+        session.channelName = 'general';
+        session.mention = '@everyone';
         session.state = 'awaiting_format';
         resetTimer();
         await msg.reply(_buildFormatDropdown(msg.author.id));
@@ -9090,13 +9091,27 @@ client.on('interactionCreate', async interaction => {
     if (!session || session.state !== 'awaiting_format') { await interaction.update({ content: '⏰ This session expired. Type `!announcement` to start over.', components: [] }); return; }
 
     session.format = values[0]; // 'embed' or 'plain'
-    session.state = 'awaiting_mention';
     clearTimeout(session.timer);
     session.timer = setTimeout(() => _pendingAnnouncements.delete(userId), 5 * 60 * 1000);
 
     const formatLabel = session.format === 'embed' ? '🖼️ Embed' : '💬 Plain Text';
     await interaction.update({ content: `✅ Format set to **${formatLabel}**`, components: [] });
-    await interaction.followUp(await _buildMentionDropdown(userId, guild));
+
+    if (!session.isAdmin) {
+      // Mods skip the mention step — already defaulted to @everyone
+      session.state = 'awaiting_time';
+      await interaction.followUp({
+        content:
+          '⏰ **When should this post?**\n\n' +
+          'Reply **`now`** to post immediately.\n\n' +
+          '**Same-day:** `6:00pm` or `14:30` (posts today or tomorrow if time has passed)\n' +
+          '**Specific date:** `June 20 at 6:00pm` · `Jul 4 8:30am` · `2026-12-25 9:00am`\n\n' +
+          'All times are CT.\n\nType **`cancel`** to abort.',
+      });
+    } else {
+      session.state = 'awaiting_mention';
+      await interaction.followUp(await _buildMentionDropdown(userId, guild));
+    }
     return;
   }
 
