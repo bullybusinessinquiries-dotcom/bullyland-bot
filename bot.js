@@ -232,6 +232,14 @@ db.exec(`
     opted_out  INTEGER DEFAULT 0,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
   );
+  CREATE TABLE IF NOT EXISTS scheduled_announcements (
+    id         INTEGER PRIMARY KEY,
+    text       TEXT NOT NULL,
+    post_at    TEXT NOT NULL,
+    mention    TEXT DEFAULT '',
+    channel_id TEXT NOT NULL,
+    format     TEXT DEFAULT 'embed'
+  );
 `);
 
 // ── SQLite durability settings (must come before any writes) ──────────────────
@@ -4822,6 +4830,7 @@ client.once('ready', async()=>{
   if (!process.env.ROLE_BOOSTER)  console.warn('[⚠️  Config] ROLE_BOOSTER is not set — Booster weekly payouts are disabled. Add it in Railway → Variables.');
 
   // ── Neighborhood Watch: post channel button & reschedule any live votes ───────
+  _reloadPersistedAnnouncements();
   loadFeatureFlags();
   console.log('[GameController] Feature flags loaded:', Object.entries(FEATURE_FLAGS).map(([k,v]) => `${k}:${v?'ON':'OFF'}`).join(' '));
 
@@ -6990,27 +6999,65 @@ Click **BLOCK IT** within **${windowSecs} seconds**!`).setFooter({ text: "Bully'
 const ANNOUNCEMENT_CHANNEL_ID = process.env.CHANNEL_ANNOUNCEMENTS || '1353949538393526283';
 const _pendingAnnouncements  = new Map(); // userId → { state, text, timer, isAdmin }
 const _pendingAuctionSetups  = new Map(); // userId → { state, imageUrl, title, scheduledStart, timer }
-const _announcementQueue = []; // { id, text, postAt, timeoutHandle }
-let _announcementNextId = 1;
+const _announcementQueue = []; // { id, text, postAt, mention, channelId, format, job }
 const _pendingAnnouncementApprovals = new Map(); // approvalId → { session, modId, modUsername, postNow, postAt }
 let _announcementApprovalNextId = 1;
 
-function scheduleAnnouncement(text, postAt, mention, channelId = ANNOUNCEMENT_CHANNEL_ID, format = 'embed') {
-  const id = _announcementNextId++;
+function _buildAnnouncementPayload(text, mention, format) {
   const buildEmbed = (t) => new EmbedBuilder().setColor('#c9a84c').setTitle('📢 Announcement')
     .setDescription(t).setFooter({ text: "Bully's World" }).setTimestamp();
-  const handle = setTimeout(async () => {
+  return format === 'embed'
+    ? { content: mention || null, embeds: [buildEmbed(text)] }
+    : { content: mention ? `${mention}\n\n${text}` : text };
+}
+
+function scheduleAnnouncement(text, postAt, mention, channelId = ANNOUNCEMENT_CHANNEL_ID, format = 'embed', existingId = null) {
+  // Persist to DB so it survives restarts
+  let id;
+  if (existingId != null) {
+    id = existingId;
+  } else {
+    // Find the lowest positive integer not already in the queue (fills cancelled slots)
+    const usedIds = new Set(_announcementQueue.map(a => a.id));
+    id = 1;
+    while (usedIds.has(id)) id++;
+    db.prepare(
+      'INSERT INTO scheduled_announcements (id, text, post_at, mention, channel_id, format) VALUES (?, ?, ?, ?, ?, ?)'
+    ).run(id, text, postAt.toISOString(), mention || '', channelId, format);
+  }
+
+  // node-schedule handles arbitrarily-far-future dates safely (no 32-bit overflow)
+  const job = schedule.scheduleJob(postAt, async () => {
+    db.prepare('DELETE FROM scheduled_announcements WHERE id = ?').run(id);
     const idx = _announcementQueue.findIndex(a => a.id === id);
     if (idx !== -1) _announcementQueue.splice(idx, 1);
     const ch = await client.channels.fetch(channelId).catch(() => null);
     if (!ch) return;
-    const payload = format === 'embed'
-      ? { content: mention || null, embeds: [buildEmbed(text)] }
-      : { content: mention ? `${mention}\n\n${text}` : text };
-    await ch.send(payload);
-  }, postAt - Date.now());
-  _announcementQueue.push({ id, text, postAt, mention, channelId, format, timeoutHandle: handle });
+    await ch.send(_buildAnnouncementPayload(text, mention, format));
+  });
+
+  _announcementQueue.push({ id, text, postAt, mention, channelId, format, job });
   return id;
+}
+
+// Restore any announcements that were queued before a bot restart
+function _reloadPersistedAnnouncements() {
+  const rows = db.prepare('SELECT * FROM scheduled_announcements').all();
+  const now = new Date();
+  for (const row of rows) {
+    const postAt = new Date(row.post_at);
+    if (postAt <= now) {
+      // Missed while bot was offline — fire immediately
+      (async () => {
+        const ch = await client.channels.fetch(row.channel_id).catch(() => null);
+        if (ch) await ch.send(_buildAnnouncementPayload(row.text, row.mention, row.format));
+        db.prepare('DELETE FROM scheduled_announcements WHERE id = ?').run(row.id);
+      })();
+    } else {
+      scheduleAnnouncement(row.text, postAt, row.mention, row.channel_id, row.format, row.id);
+    }
+  }
+  if (rows.length) console.log(`[Announcements] Restored ${rows.length} scheduled announcement(s) from DB.`);
 }
 
 // ── DM BLAST SYSTEM ──────────────────────────────────────────────────────────
@@ -7188,7 +7235,10 @@ client.on('messageCreate', async msg => {
       resetTimer();
       await msg.reply(
         '⏰ **When should this post?**\n\n' +
-        'Reply **`now`** to post immediately, or a time like **`6:00pm`** or **`8:30am`** (CT).\n\n' +
+        'Reply **`now`** to post immediately.\n\n' +
+        '**Same-day:** `6:00pm` or `14:30` (posts today or tomorrow if time has passed)\n' +
+        '**Specific date:** `June 20 at 6:00pm` · `Jul 4 8:30am` · `2026-12-25 9:00am`\n\n' +
+        'All times are CT.\n\n' +
         'Type **`cancel`** to abort.'
       );
       return;
@@ -7217,10 +7267,15 @@ client.on('messageCreate', async msg => {
       // ── Validate time first (applies to both admin and mod paths) ──
       let postAt = null;
       if (lower !== 'now') {
-        postAt = parseShutdownTime(lower);
+        postAt = parseAnnouncementDateTime(msg.content.trim());
         if (!postAt) {
           resetTimer();
-          await msg.reply("❌ Couldn't parse that time. Try **`now`**, **`6:00pm`**, or **`14:30`**. Or type **`cancel`** to abort.");
+          await msg.reply("❌ Couldn't parse that. Try **`now`**, **`6:00pm`**, **`14:30`**, **`June 20 at 6:00pm`**, or **`2026-12-25 9:00am`**. Or type **`cancel`** to abort.");
+          return;
+        }
+        if (postAt <= new Date()) {
+          resetTimer();
+          await msg.reply("❌ That date/time is in the past. Please pick a future time. Or type **`cancel`** to abort.");
           return;
         }
       }
@@ -7496,7 +7551,7 @@ client.on('messageCreate', async msg => {
       return;
     }
     const lines = _announcementQueue.map(a => {
-      const unix = Math.floor(a.postAt / 1000);
+      const unix = Math.floor((a.postAt instanceof Date ? a.postAt.getTime() : a.postAt) / 1000);
       const preview = a.text.length > 80 ? a.text.slice(0, 80) + '…' : a.text;
       const chTag = a.channelId ? `<#${a.channelId}>` : '#announcements';
       const fmt   = a.format === 'plain' ? 'plain text' : 'embed';
@@ -7516,7 +7571,8 @@ client.on('messageCreate', async msg => {
     if (isNaN(id)) { await msg.reply('Usage: `!cancelannouncement [id]` — get IDs from `!announcementqueue`'); return; }
     const idx = _announcementQueue.findIndex(a => a.id === id);
     if (idx === -1) { await msg.reply(`❌ No queued announcement with ID **#${id}**.`); return; }
-    clearTimeout(_announcementQueue[idx].timeoutHandle);
+    _announcementQueue[idx].job?.cancel();
+    db.prepare('DELETE FROM scheduled_announcements WHERE id = ?').run(id);
     _announcementQueue.splice(idx, 1);
     await msg.reply(`✅ Announcement **#${id}** cancelled and removed from the queue.`);
     return;
@@ -7871,6 +7927,81 @@ let _constructionMsgId  = null;
 let _scheduledStart     = null;
 let _scheduledEnd       = null;
 let _savedOverwrites    = [];
+
+// Parses a time-only string like "6:00pm" or "14:30" into a Date (CT), rolling to tomorrow if past.
+// Used by the construction zone scheduler.
+// For announcements use parseAnnouncementDateTime which also handles full date+time strings.
+function parseAnnouncementDateTime(str) {
+  if (!str) return null;
+  str = str.trim();
+
+  // Helper: build a CT Date from explicit year/month/day + hours/minutes
+  function buildCT(year, month, day, hours, minutes) {
+    const pad = n => String(n).padStart(2, '0');
+    const isoLike = `${year}-${pad(month)}-${pad(day)}T${pad(hours)}:${pad(minutes)}:00`;
+    // Determine the CT UTC offset at that moment by building a temp UTC date and reading it back
+    const tempUTC = new Date(isoLike + 'Z');
+    const tzName = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', timeZoneName: 'shortOffset' })
+      .formatToParts(tempUTC).find(x => x.type === 'timeZoneName')?.value || 'GMT-5';
+    const offsetMatch = tzName.match(/GMT([+-])(\d+)(?::(\d+))?/);
+    const offsetHours = offsetMatch ? parseInt(offsetMatch[1] + offsetMatch[2]) : -5;
+    const result = new Date(isoLike + 'Z');
+    result.setUTCHours(result.getUTCHours() - offsetHours);
+    return result;
+  }
+
+  // Helper: parse a time string like "6:00pm", "8:30am", "14:30", "9am" into { hours, minutes }
+  function parseTimePart(t) {
+    t = t.trim().toLowerCase();
+    const ampm = t.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)$/);
+    const mil  = t.match(/^(\d{1,2}):(\d{2})$/);
+    if (ampm) {
+      let h = parseInt(ampm[1]), m = parseInt(ampm[2] || '0');
+      if (ampm[3] === 'pm' && h !== 12) h += 12;
+      if (ampm[3] === 'am' && h === 12) h = 0;
+      return { hours: h, minutes: m };
+    }
+    if (mil) return { hours: parseInt(mil[1]), minutes: parseInt(mil[2]) };
+    return null;
+  }
+
+  const MONTHS = { jan:1,feb:2,mar:3,apr:4,may:5,jun:6,jul:7,aug:8,sep:9,oct:10,nov:11,dec:12,
+    january:1,february:2,march:3,april:4,june:6,july:7,august:8,september:9,october:10,november:11,december:12 };
+
+  // ── Format 1: ISO-like "2026-06-20 6:00pm" or "2026-06-20 14:30" ──
+  const isoMatch = str.match(/^(\d{4})-(\d{2})-(\d{2})\s+(.+)$/);
+  if (isoMatch) {
+    const tp = parseTimePart(isoMatch[4]);
+    if (tp) return buildCT(parseInt(isoMatch[1]), parseInt(isoMatch[2]), parseInt(isoMatch[3]), tp.hours, tp.minutes);
+  }
+
+  // ── Format 2: "June 20 at 6:00pm", "Jun 20 6:00pm", "June 20th at 8am" ──
+  const naturalMatch = str.match(/^([a-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?(?:\s+at)?\s+(.+)$/i);
+  if (naturalMatch) {
+    const monthKey = naturalMatch[1].toLowerCase();
+    const month = MONTHS[monthKey];
+    const day = parseInt(naturalMatch[2]);
+    const tp = parseTimePart(naturalMatch[3]);
+    if (month && day && tp) {
+      const now = new Date();
+      const ctParts = Object.fromEntries(
+        new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit' })
+          .formatToParts(now).map(x => [x.type, x.value])
+      );
+      // Use current year; if the resulting date is in the past, use next year
+      let year = parseInt(ctParts.year);
+      let candidate = buildCT(year, month, day, tp.hours, tp.minutes);
+      if (candidate <= now) candidate = buildCT(year + 1, month, day, tp.hours, tp.minutes);
+      return candidate;
+    }
+  }
+
+  // ── Format 3: time-only fallback — "6:00pm", "14:30" (today/tomorrow) ──
+  const tp = parseTimePart(str);
+  if (tp) return parseShutdownTime(str); // reuse existing same-day logic
+
+  return null;
+}
 
 function parseShutdownTime(str) {
   if (!str) return null;
