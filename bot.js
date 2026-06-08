@@ -5407,8 +5407,10 @@ client.on('interactionCreate', async interaction => {
 // ============================================================================
 client.on('interactionCreate', async interaction => {
   if (!interaction.isButton()) return;
-  // ann_confirm buttons are handled in the announcement dropdown listener below
-  if (interaction.customId.startsWith('ann_confirm.')) return;
+  // ann_confirm / ann_back / ann_cancel buttons are handled in the announcement dropdown listener
+  if (interaction.customId.startsWith('ann_confirm.') ||
+      interaction.customId.startsWith('ann_back.')    ||
+      interaction.customId.startsWith('ann_cancel.')) return;
 
   // ── Announcement approval (fired in owner DMs) ──────────────────────────────
   if (interaction.customId.startsWith('announce_approve.') || interaction.customId.startsWith('announce_deny.')) {
@@ -7010,12 +7012,27 @@ let _announcementApprovalNextId = 1;
 // ── Announcement dropdown builders ───────────────────────────────────────────
 // Each step: select menu to choose + confirm button to proceed.
 // Selecting the menu stores the choice; confirm advances to the next step.
-const _annConfirmBtn = (userId, step) => new ActionRowBuilder().addComponents(
-  new ButtonBuilder()
-    .setCustomId(`ann_confirm.${step}.${userId}`)
-    .setLabel('✅ Confirm')
-    .setStyle(ButtonStyle.Success)
-);
+// Pinned roles always shown at the top of the mention dropdown
+const ANN_PINNED_ROLES = [
+  { id: '1497978671816773782', label: '🎵 Music'   },
+  { id: '1497978706042425574', label: '🍥 Anime'   },
+  { id: '1497978802477727905', label: '🖌️ Artist'  },
+  { id: '1497978841082237110', label: '🍳 Cooking'  },
+  { id: '1497978868093419730', label: '🎮 Gamer'   },
+  { id: '1498193590332166185', label: '🍿 Movies'  },
+];
+
+const _annActionRow = (userId, step, showBack = true) => {
+  const btns = [];
+  if (showBack) btns.push(
+    new ButtonBuilder().setCustomId(`ann_back.${step}.${userId}`).setLabel('⬅️ Go Back').setStyle(ButtonStyle.Secondary)
+  );
+  btns.push(
+    new ButtonBuilder().setCustomId(`ann_confirm.${step}.${userId}`).setLabel('✅ Confirm').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`ann_cancel.${userId}`).setLabel('❌ Cancel').setStyle(ButtonStyle.Danger),
+  );
+  return new ActionRowBuilder().addComponents(btns);
+};
 
 function _buildChannelDropdown(userId, guild) {
   const textChannels = guild.channels.cache
@@ -7031,10 +7048,10 @@ function _buildChannelDropdown(userId, guild) {
       .setPlaceholder('Pick a channel...')
       .addOptions(options)
   );
-  return { content: '📡 **Which channel should this post in?**\nSelect a channel then click **Confirm**.', components: [selectRow, _annConfirmBtn(userId, 'channel')] };
+  return { content: '📡 **Which channel should this post in?**\nSelect a channel then click **Confirm**.', components: [selectRow, _annActionRow(userId, 'channel', false)] };
 }
 
-function _buildFormatDropdown(userId) {
+function _buildFormatDropdown(userId, isAdmin = true) {
   const selectRow = new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
       .setCustomId(`ann_format_sel.${userId}`)
@@ -7044,20 +7061,23 @@ function _buildFormatDropdown(userId) {
         { label: '💬 Plain Text', value: 'plain', description: 'Raw text, exactly as you typed it' },
       ])
   );
-  return { content: '🎨 **What format should this use?**\nSelect a format then click **Confirm**.', components: [selectRow, _annConfirmBtn(userId, 'format')] };
+  return { content: '🎨 **What format should this use?**\nSelect a format then click **Confirm**.', components: [selectRow, _annActionRow(userId, 'format', isAdmin)] };
 }
 
 async function _buildMentionDropdown(userId, guild) {
+  // Pinned interest roles shown first, then @everyone / @here / no ping, then remaining mentionable roles
   await guild.roles.fetch();
-  const roles = guild.roles.cache
-    .filter(r => r.id !== guild.id && !r.managed && r.mentionable)
+  const pinnedIds = new Set(ANN_PINNED_ROLES.map(r => r.id));
+  const otherRoles = guild.roles.cache
+    .filter(r => r.id !== guild.id && !r.managed && r.mentionable && !pinnedIds.has(r.id))
     .sort((a, b) => b.position - a.position)
-    .first(23);
+    .first(18); // cap so total stays ≤ 25
   const options = [
+    ...ANN_PINNED_ROLES.map(r => ({ label: `@${r.label}`, value: `<@&${r.id}>`, description: `Ping the ${r.label} role` })),
     { label: '@everyone', value: '@everyone', description: 'Ping every member in the server' },
     { label: '@here',     value: '@here',     description: 'Ping all online members' },
     { label: 'No ping',   value: 'none',      description: 'Post without mentioning anyone' },
-    ...roles.map(r => ({ label: `@${r.name}`, value: `<@&${r.id}>`, description: `Ping the ${r.name} role` })),
+    ...otherRoles.map(r => ({ label: `@${r.name}`, value: `<@&${r.id}>`, description: `Ping the ${r.name} role` })),
   ];
   const selectRow = new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
@@ -7065,7 +7085,7 @@ async function _buildMentionDropdown(userId, guild) {
       .setPlaceholder('Pick who to mention...')
       .addOptions(options)
   );
-  return { content: '🔔 **Who should be mentioned?**\nSelect an option then click **Confirm**.', components: [selectRow, _annConfirmBtn(userId, 'mention')] };
+  return { content: '🔔 **Who should be mentioned?**\nSelect an option then click **Confirm**.', components: [selectRow, _annActionRow(userId, 'mention')] };
 }
 
 function _buildAnnouncementPayload(text, mention, format, attachments = []) {
@@ -7230,7 +7250,7 @@ client.on('messageCreate', async msg => {
         session.mention = '@everyone';
         session.state = 'awaiting_format';
         resetTimer();
-        await msg.reply(_buildFormatDropdown(msg.author.id));
+        await msg.reply(_buildFormatDropdown(msg.author.id, false)); // mods: no back button
       } else {
         session.state = 'awaiting_channel';
         resetTimer();
@@ -9104,6 +9124,39 @@ client.on('interactionCreate', async interaction => {
       await interaction.deferUpdate();
       return;
     }
+  }
+
+  // ── Cancel button: abort the session ────────────────────────────────────────
+  if (interaction.isButton() && customId.startsWith('ann_cancel.')) {
+    const userId = customId.split('.')[1];
+    if (user.id !== userId) { await interaction.reply({ content: '❌ This button isn\'t for you.', ephemeral: true }); return; }
+    const session = _pendingAnnouncements.get(userId);
+    if (session) { clearTimeout(session.timer); _pendingAnnouncements.delete(userId); }
+    await interaction.update({ content: '❌ Announcement cancelled.', components: [] });
+    return;
+  }
+
+  // ── Go Back buttons: return to the previous step ─────────────────────────────
+  if (interaction.isButton() && customId.startsWith('ann_back.')) {
+    const parts  = customId.split('.');
+    const step   = parts[1]; // step we're currently on (going back FROM)
+    const userId = parts[2];
+    if (user.id !== userId) { await interaction.reply({ content: '❌ This button isn\'t for you.', ephemeral: true }); return; }
+    const session = _pendingAnnouncements.get(userId);
+    if (!session) { await interaction.update({ content: '⏰ Session expired. Type `!announcement` to start over.', components: [] }); return; }
+    clearTimeout(session.timer);
+    session.timer = setTimeout(() => _pendingAnnouncements.delete(userId), 5 * 60 * 1000);
+
+    if (step === 'format') {
+      session.state = 'awaiting_channel';
+      await interaction.update({ content: '📡 **Which channel should this post in?**\nSelect a channel then click **Confirm**.', components: [] });
+      await interaction.followUp(_buildChannelDropdown(userId, guild));
+    } else if (step === 'mention') {
+      session.state = 'awaiting_format';
+      await interaction.update({ content: '🎨 **What format should this use?**\nSelect a format then click **Confirm**.', components: [] });
+      await interaction.followUp(_buildFormatDropdown(userId, true));
+    }
+    return;
   }
 
   // ── Confirm buttons: advance to the next step ───────────────────────────────
