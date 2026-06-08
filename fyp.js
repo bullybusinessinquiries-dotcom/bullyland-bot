@@ -341,7 +341,7 @@ async function lockChannel() {
     SendMessages:          false,
     AddReactions:          true,
     ReadMessageHistory:    true,
-    ViewChannel:           true,
+    ViewChannel:           null,  // don't touch ViewChannel — let Discord/role permissions control who can see it
     CreatePublicThreads:   false,
     SendMessagesInThreads: true,
   }).catch(e => console.error('[FYP] Channel lock failed:', e.message));
