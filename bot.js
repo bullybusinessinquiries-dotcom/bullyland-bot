@@ -250,6 +250,8 @@ db.pragma('synchronous  = NORMAL');
 
 // Migrate existing DB — add bank_balance column if it doesn't exist yet
 try { db.exec('ALTER TABLE balances ADD COLUMN bank_balance INTEGER DEFAULT 0'); } catch (_) {}
+// Migrate scheduled_announcements — add attachments column for image/file support
+try { db.exec("ALTER TABLE scheduled_announcements ADD COLUMN attachments TEXT DEFAULT '[]'"); } catch (_) {}
 // Garnishment debt — tracks BB owed to the King after a treason punishment
 try { db.exec('ALTER TABLE balances ADD COLUMN garnish_debt INTEGER NOT NULL DEFAULT 0'); } catch (_) {}
 
@@ -7039,15 +7041,16 @@ async function _buildMentionDropdown(userId, guild) {
   return { content: '🔔 **Who should be mentioned?**', components: [row] };
 }
 
-function _buildAnnouncementPayload(text, mention, format) {
+function _buildAnnouncementPayload(text, mention, format, attachments = []) {
   const buildEmbed = (t) => new EmbedBuilder().setColor('#c9a84c').setTitle('📢 Announcement')
-    .setDescription(t).setFooter({ text: "Bully's World" }).setTimestamp();
+    .setDescription(t || null).setFooter({ text: "Bully's World" }).setTimestamp();
+  const files = attachments.map(url => ({ attachment: url }));
   return format === 'embed'
-    ? { content: mention || null, embeds: [buildEmbed(text)] }
-    : { content: mention ? `${mention}\n\n${text}` : text };
+    ? { content: mention || null, embeds: [buildEmbed(text)], files }
+    : { content: mention ? `${mention}\n\n${text}` : text || null, files };
 }
 
-function scheduleAnnouncement(text, postAt, mention, channelId = ANNOUNCEMENT_CHANNEL_ID, format = 'embed', existingId = null) {
+function scheduleAnnouncement(text, postAt, mention, channelId = ANNOUNCEMENT_CHANNEL_ID, format = 'embed', existingId = null, attachments = []) {
   // Persist to DB so it survives restarts
   let id;
   if (existingId != null) {
@@ -7058,15 +7061,15 @@ function scheduleAnnouncement(text, postAt, mention, channelId = ANNOUNCEMENT_CH
     id = 1;
     while (usedIds.has(id)) id++;
     db.prepare(
-      'INSERT INTO scheduled_announcements (id, text, post_at, mention, channel_id, format) VALUES (?, ?, ?, ?, ?, ?)'
-    ).run(id, text, postAt.toISOString(), mention || '', channelId, format);
+      'INSERT INTO scheduled_announcements (id, text, post_at, mention, channel_id, format, attachments) VALUES (?, ?, ?, ?, ?, ?, ?)'
+    ).run(id, text, postAt.toISOString(), mention || '', channelId, format, JSON.stringify(attachments));
   }
 
   // node-schedule handles arbitrarily-far-future dates safely (no 32-bit overflow).
   // RULE: scheduled data must NEVER be lost on redeploy. Always persist first, send then delete.
   const job = schedule.scheduleJob(postAt, async () => {
     const ch = await client.channels.fetch(channelId).catch(() => null);
-    if (ch) await ch.send(_buildAnnouncementPayload(text, mention, format)).catch(err => {
+    if (ch) await ch.send(_buildAnnouncementPayload(text, mention, format, attachments)).catch(err => {
       console.error(`[Announcements] Failed to send announcement #${id}:`, err);
     });
     // Only remove from DB and queue AFTER a successful (or attempted) send — never before
@@ -7075,7 +7078,7 @@ function scheduleAnnouncement(text, postAt, mention, channelId = ANNOUNCEMENT_CH
     if (idx !== -1) _announcementQueue.splice(idx, 1);
   });
 
-  _announcementQueue.push({ id, text, postAt, mention, channelId, format, job });
+  _announcementQueue.push({ id, text, postAt, mention, channelId, format, attachments, job });
   return id;
 }
 
@@ -7085,15 +7088,16 @@ function _reloadPersistedAnnouncements() {
   const now = new Date();
   for (const row of rows) {
     const postAt = new Date(row.post_at);
+    const attachments = row.attachments ? JSON.parse(row.attachments) : [];
     if (postAt <= now) {
       // Missed while bot was offline — fire immediately
       (async () => {
         const ch = await client.channels.fetch(row.channel_id).catch(() => null);
-        if (ch) await ch.send(_buildAnnouncementPayload(row.text, row.mention, row.format));
+        if (ch) await ch.send(_buildAnnouncementPayload(row.text, row.mention, row.format, attachments));
         db.prepare('DELETE FROM scheduled_announcements WHERE id = ?').run(row.id);
       })();
     } else {
-      scheduleAnnouncement(row.text, postAt, row.mention, row.channel_id, row.format, row.id);
+      scheduleAnnouncement(row.text, postAt, row.mention, row.channel_id, row.format, row.id, attachments);
     }
   }
   if (rows.length) console.log(`[Announcements] Restored ${rows.length} scheduled announcement(s) from DB.`);
@@ -7186,9 +7190,12 @@ client.on('messageCreate', async msg => {
       await msg.reply('❌ Announcement cancelled.');
     };
 
-    // Step 1 — collect the message text
+    // Step 1 — collect the message text (and any attached images/files)
     if (session.state === 'awaiting_text') {
       session.text = msg.content.trim();
+      session.attachments = msg.attachments.size > 0
+        ? msg.attachments.map(a => a.url)
+        : [];
       if (!session.isAdmin) {
         // Mods are locked to the announcements channel — skip channel picker, go straight to format dropdown
         session.channelId = ANNOUNCEMENT_CHANNEL_ID;
@@ -7233,14 +7240,9 @@ client.on('messageCreate', async msg => {
         return;
       }
 
-      const buildEmbed = (text) => new EmbedBuilder()
-        .setColor('#c9a84c').setTitle('📢 Announcement')
-        .setDescription(text).setFooter({ text: "Bully's World" }).setTimestamp();
-
-      const mention  = session.mention || '';
-      const payload  = session.format === 'embed'
-        ? { content: mention || null, embeds: [buildEmbed(session.text)] }
-        : { content: mention ? `${mention}\n\n${session.text}` : session.text };
+      const mention     = session.mention || '';
+      const attachments = session.attachments || [];
+      const payload     = _buildAnnouncementPayload(session.text, mention, session.format, attachments);
 
       // ── Validate time first (applies to both admin and mod paths) ──
       let postAt = null;
@@ -7267,7 +7269,7 @@ client.on('messageCreate', async msg => {
           await msg.reply(`✅ Announcement posted in <#${session.channelId}>!`);
         } else {
           const unix = Math.floor(postAt.getTime() / 1000);
-          const queuedId = scheduleAnnouncement(session.text, postAt, mention, session.channelId, session.format);
+          const queuedId = scheduleAnnouncement(session.text, postAt, mention, session.channelId, session.format, null, attachments);
           await msg.reply(
             `✅ Announcement **#${queuedId}** queued for <t:${unix}:F> (<t:${unix}:R>) in <#${session.channelId}>.\n` +
             `Use \`!announcementqueue\` to view all queued, or \`!cancelannouncement ${queuedId}\` to remove it.`
@@ -9023,7 +9025,7 @@ client.on('interactionCreate', async interaction => {
     await announceCh.send(payload);
     confirmMsg = `✅ Posted immediately in <#${session.channelId}>.`;
   } else {
-    const queuedId = scheduleAnnouncement(session.text, postAt, session.mention || '', session.channelId, session.format);
+    const queuedId = scheduleAnnouncement(session.text, postAt, session.mention || '', session.channelId, session.format, null, session.attachments || []);
     const unix = Math.floor(postAt.getTime() / 1000);
     confirmMsg = `✅ Scheduled as **#${queuedId}** for <t:${unix}:F> (<t:${unix}:R>) in <#${session.channelId}>.`;
   }
